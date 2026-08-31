@@ -8,9 +8,12 @@ logger = get_logger("settings")
 
 DEFAULTS = {
     "theme": "dark",
-    # None = no cookies passed to yt-dlp; otherwise one of "chrome"/"edge"/"firefox".
-    # Wired up in Phase B (universal link support) -- present now so the settings
-    # file format doesn't need to change shape later.
+    # Which browser's cookie store yt-dlp should borrow a signed-in session
+    # from. None means "none of them": the app falls back to whatever the
+    # user is signed in to in its OWN Browser tab, which is read from that
+    # tab's profile and never touches an installed browser. Set to one of
+    # "chrome"/"edge"/"firefox"/"brave"/"opera"/"vivaldi" by the sign-in
+    # dialog, when the user explicitly picks that instead.
     "cookies_from_browser": None,
     # Per-tab "Save to" folder. None = fall back to the matching
     # config.DEFAULT_*_DIR, same None-means-default convention as above.

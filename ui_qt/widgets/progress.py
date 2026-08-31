@@ -58,7 +58,9 @@ class AnimatedProgressBar(QProgressBar):
         super().__init__(parent)
         self.setTextVisible(False)
         self.setRange(0, 100)
-        self.setFixedHeight(10)
+        # 30% thinner than the original 10px -- a download bar is an
+        # instrument readout, not a UI element that needs presence.
+        self.setFixedHeight(7)
         self._track = QColor(track_color)
         self._fill = QColor(fill_color)
         self._complete_color = QColor(complete_color)
@@ -128,15 +130,27 @@ class AnimatedProgressBar(QProgressBar):
             # A soft band, lighter than the fill, travelling left to right.
             # Drawn over the fill (already clipped to it) so it reads as
             # light moving through the bar rather than a separate shape.
-            highlight = QColor(255, 255, 255, 60)
+            highlight = QColor(255, 255, 255, 115)
+            mid = QColor(255, 255, 255, 38)
             transparent = QColor(255, 255, 255, 0)
-            band = max(60.0, fill.width() * 0.35)
+            band = max(70.0, fill.width() * 0.40)
             start = -band + (fill.width() + band) * self._phase
             grad = QLinearGradient(start, 0, start + band, 0)
             grad.setColorAt(0.0, transparent)
+            grad.setColorAt(0.35, mid)
             grad.setColorAt(0.5, highlight)
+            grad.setColorAt(0.65, mid)
             grad.setColorAt(1.0, transparent)
             painter.setBrush(QBrush(grad))
             painter.drawRect(fill)
+
+            # Leading-edge cap: a small bright nib riding the front of the
+            # fill. At 7px tall the travelling band alone reads as a faint
+            # wash, so the nib is what actually signals "this is moving".
+            nib_w = 2.0
+            nib = QRectF(max(fill.left(), fill.right() - nib_w), fill.top(),
+                         min(nib_w, fill.width()), fill.height())
+            painter.setBrush(QColor(255, 255, 255, 150))
+            painter.drawRect(nib)
 
         painter.end()

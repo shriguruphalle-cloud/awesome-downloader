@@ -10,7 +10,8 @@ pattern TorrentTab's libtorrent installer already uses.
 """
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout,
+    QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QVBoxLayout,
 )
 
 from app import config
@@ -52,6 +53,66 @@ class _UpgradeWorker(QThread):
             self.done.emit(True, "")
         except Exception as e:
             self.done.emit(False, str(e))
+
+
+# A worker outlives the dialog that started it, deliberately.
+#
+# Both workers used to be parented to the dialog. Closing the dialog while a
+# check was still in flight therefore destroyed a QThread that was still
+# running -- and Qt does not raise for that, it calls std::terminate and the
+# whole application dies on the spot, with no traceback. Since the check is a
+# network call to pypi.org, "still running when you close it" was the normal
+# case, not an edge case: closing the Updates panel took the app with it.
+#
+# Parentless workers are not destroyed with the dialog, and this set holds the
+# only remaining reference so Python cannot garbage-collect one mid-run
+# either. Each drops itself when it finishes.
+_LIVE_WORKERS = set()
+
+
+def wait_for_workers(timeout_ms=3000):
+    """Lets any in-flight check finish before the process goes away.
+
+    Detaching the workers stops the *dialog* closing from destroying a
+    running thread, but it does not help at shutdown: whatever is still
+    running when the interpreter tears down gets destroyed anyway, and that
+    is the same std::terminate. Waiting here is the other half of the fix --
+    wired to aboutToQuit, so quitting mid-check exits cleanly instead of
+    aborting."""
+    for worker in list(_LIVE_WORKERS):
+        try:
+            worker.wait(timeout_ms)
+        except RuntimeError:
+            pass
+    _LIVE_WORKERS.clear()
+
+
+def _ensure_shutdown_hook():
+    app = QApplication.instance()
+    if app is None or getattr(app, "_update_worker_hook", False):
+        return
+    app.aboutToQuit.connect(wait_for_workers)
+    app._update_worker_hook = True
+
+
+def _run_detached(worker, on_done):
+    """Starts a worker that is safe to abandon."""
+    _ensure_shutdown_hook()
+    _LIVE_WORKERS.add(worker)
+    worker.done.connect(on_done)
+
+    def _cleanup():
+        # Only drop the reference. deleteLater() was tried here and made
+        # shutdown flaky: it queues a deletion that needs a running event
+        # loop, and at quit time there may not be one left to run it, which
+        # leaves a half-deleted QThread for the interpreter to trip over.
+        # The thread has finished by the time this runs, so letting Python
+        # own it and collect it normally is both simpler and safe.
+        _LIVE_WORKERS.discard(worker)
+
+    worker.finished.connect(_cleanup)
+    worker.start()
+    return worker
 
 
 class UpdateDialog(QDialog):
@@ -130,9 +191,7 @@ class UpdateDialog(QDialog):
         self.yt_dlp_update_btn.setVisible(False)
         self.ffmpeg_label.setText("ffmpeg: checking...")
         self.libtorrent_label.setText("libtorrent: checking...")
-        self._check_worker = _CheckWorker(self)
-        self._check_worker.done.connect(self._on_check_done)
-        self._check_worker.start()
+        self._check_worker = _run_detached(_CheckWorker(), self._on_check_done)
 
     def _on_check_done(self, result):
         self.recheck_btn.setEnabled(True)
@@ -168,9 +227,23 @@ class UpdateDialog(QDialog):
     def _on_upgrade_clicked(self):
         self.yt_dlp_update_btn.setEnabled(False)
         self.yt_dlp_update_btn.setText("Updating...")
-        self._upgrade_worker = _UpgradeWorker(self)
-        self._upgrade_worker.done.connect(self._on_upgrade_done)
-        self._upgrade_worker.start()
+        self._upgrade_worker = _run_detached(_UpgradeWorker(), self._on_upgrade_done)
+
+    def closeEvent(self, event):
+        """The workers keep running -- they are detached and will clean
+        themselves up -- but their results must stop being delivered here,
+        because these slots write to widgets this dialog is about to destroy.
+        """
+        for worker in (getattr(self, "_check_worker", None),
+                       getattr(self, "_upgrade_worker", None)):
+            if worker is None:
+                continue
+            try:
+                worker.done.disconnect()
+            except (RuntimeError, TypeError):
+                # Already disconnected, or the worker's C++ side is gone.
+                pass
+        super().closeEvent(event)
 
     def _on_upgrade_done(self, ok, error):
         self.yt_dlp_update_btn.setEnabled(True)

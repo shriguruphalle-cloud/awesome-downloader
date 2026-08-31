@@ -1,4 +1,13 @@
-yt-dlp>=2026.7.4
+yt-dlp>=2026.8.19
+# TLS-fingerprint impersonation for yt-dlp -- confirmed directly (PornHub)
+# that Cloudflare's Bot Management fingerprints the raw TLS handshake, not
+# just headers: a fetch failing outright over plain urllib succeeds
+# immediately once impersonated. Version pinned to yt-dlp's own supported
+# range (checked directly -- 0.16.0 is one patch too new and yt-dlp
+# refuses to load it); downloader.py degrades gracefully to unimpersonated
+# requests if this isn't installed at all, so it's a real dependency but
+# not a hard requirement for the app to run.
+curl_cffi>=0.10,<0.16
 libtorrent>=2.0.11 ; python_version < "3.14"
 Pillow>=10.0.0
 PySide6>=6.11.1

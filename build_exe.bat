@@ -43,11 +43,13 @@ if not exist "vendor\ffmpeg.exe" (
 echo Generating version-info metadata...
 ".venv312\Scripts\python.exe" build_version_info.py
 
-REM ui_qt/fonts/ is added as data explicitly: the bundled Inter .ttf is
-REM loaded at runtime by path (theme.load_custom_fonts), so PyInstaller's
-REM import scanner has no way to see it.
+REM ui_qt/fonts/ (bundled Inter .ttf), app_icon.png (the topbar/browser-home
+REM wordmark logo, loaded by path, not import), and ui_qt/browser_assets/
+REM (the ad-block domain list + overlay button logo the Browser tab reads
+REM at runtime) are all added as data explicitly for the same reason:
+REM PyInstaller's import scanner has no way to see a plain file path.
 echo Building Awesome Downloader.exe ...
-".venv312\Scripts\python.exe" -m PyInstaller --onefile --windowed --name "Awesome Downloader" --icon "app_icon.ico" --add-data "app_icon.ico;." --add-data "ui_qt\fonts;ui_qt\fonts" --version-file "version_info.txt" --collect-all libtorrent --collect-all PIL --collect-all PySide6 --collect-all qframelesswindow main_qt.py
+".venv312\Scripts\python.exe" -m PyInstaller --onefile --windowed --name "Awesome Downloader" --icon "app_icon.ico" --add-data "app_icon.ico;." --add-data "app_icon.png;." --add-data "ui_qt\fonts;ui_qt\fonts" --add-data "ui_qt\browser_assets;ui_qt\browser_assets" --version-file "version_info.txt" --collect-all libtorrent --collect-all PIL --collect-all PySide6 --collect-all qframelesswindow --collect-all curl_cffi main_qt.py
 
 REM Optional, no-op unless you actually have a code-signing certificate --
 REM SmartScreen's "unrecognized publisher" warning needs real code signing

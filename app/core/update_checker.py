@@ -20,10 +20,14 @@ UI code runs these (blocking, network-touching) calls on a background thread
 and marshals results back, exactly like fetch_info_with_sizes() etc. already do.
 """
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
+import zipfile
 
 from .. import config
 from ..logging_setup import get_logger
@@ -80,18 +84,79 @@ def latest_yt_dlp_version():
     return _latest_pypi_version("yt-dlp")
 
 
+def _download_and_shadow_yt_dlp_wheel(dest_dir):
+    """Downloads yt-dlp's latest PyPI wheel and extracts it into dest_dir,
+    replacing whatever was there before. A .whl is just a zip archive with
+    the package's real import layout at its root -- no pip, no venv, no
+    writable site-packages needed to unpack one, which is exactly what a
+    PyInstaller onefile .exe doesn't have at runtime. config.py prepends
+    this same directory to sys.path (if it looks valid) before anything
+    imports yt_dlp, so the extracted copy here shadows the one frozen into
+    the .exe on the next launch.
+
+    Extracts into a sibling ".staging" directory first and only swaps it
+    into place after a full, successful extraction -- so a failure partway
+    through (network drop, disk full) leaves the previously-working
+    shadow copy (or none at all) in place rather than a half-written one
+    that would break every download until the next successful update.
+    """
+    url = PYPI_JSON_URL.format(package="yt-dlp")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    version = data["info"]["version"]
+    releases = data.get("releases", {}).get(version, [])
+    wheel = next(
+        (r for r in releases if r.get("packagetype") == "bdist_wheel"
+         and r.get("filename", "").endswith("-py3-none-any.whl")),
+        None,
+    )
+    if wheel is None:
+        raise RuntimeError(f"PyPI has no universal wheel for yt-dlp {version}")
+
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".whl")
+    os.close(tmp_fd)
+    try:
+        dl_req = urllib.request.Request(wheel["url"], headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(dl_req, timeout=120) as resp, open(tmp_path, "wb") as f:
+            shutil.copyfileobj(resp, f)
+
+        staging_dir = dest_dir + ".staging"
+        if os.path.isdir(staging_dir):
+            shutil.rmtree(staging_dir)
+        os.makedirs(staging_dir, exist_ok=True)
+        with zipfile.ZipFile(tmp_path) as zf:
+            zf.extractall(staging_dir)
+
+        if not os.path.isdir(os.path.join(staging_dir, "yt_dlp")):
+            raise RuntimeError("Downloaded yt-dlp wheel didn't contain a yt_dlp package")
+
+        if os.path.isdir(dest_dir):
+            shutil.rmtree(dest_dir)
+        os.replace(staging_dir, dest_dir)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    return version
+
+
 def upgrade_yt_dlp():
     """Blocking. Raises RuntimeError with a clear message on failure (no
-    pip available, network down mid-install, frozen .exe with no
-    interpreter to pip into, ...) -- the caller shows that message rather
-    than a raw traceback, same pattern as TorrentTab's libtorrent installer.
+    pip available, network down mid-install, ...) -- the caller shows that
+    message rather than a raw traceback, same pattern as TorrentTab's
+    libtorrent installer.
+
+    Two different mechanisms depending on how the app is running: the
+    packaged .exe has no writable site-packages to pip-install into at
+    runtime, so it downloads and shadows a wheel directly (see
+    _download_and_shadow_yt_dlp_wheel); running from source, plain pip
+    already works fine and keeps behaving exactly as before.
     """
     if config.IS_FROZEN:
-        raise RuntimeError(
-            "Auto-update isn't available in the packaged .exe.\n\n"
-            "Run this in a terminal (Python 3.11-3.13), then restart the app:\n"
-            "pip install --upgrade yt-dlp"
-        )
+        _download_and_shadow_yt_dlp_wheel(config.YT_DLP_SHADOW_DIR)
+        return
     kwargs = {"capture_output": True, "text": True, "timeout": 300}
     if config.CREATE_NO_WINDOW:
         kwargs["creationflags"] = config.CREATE_NO_WINDOW

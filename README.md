@@ -3,7 +3,7 @@
 A Windows desktop app for downloading video, audio, images and torrents —
 one window, four tools, no ads and no sign-up.
 
-![Version](https://img.shields.io/badge/version-2.0.0-35b6ff)
+![Version](https://img.shields.io/badge/version-2.4.0-35b6ff)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20(64--bit)-lightgrey)
 ![Licence](https://img.shields.io/badge/licence-GPL--3.0-blue)
 

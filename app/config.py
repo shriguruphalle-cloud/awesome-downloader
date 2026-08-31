@@ -3,7 +3,7 @@ import subprocess
 import sys
 
 APP_NAME = "AWESOME DOWNLOADER"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.4.0"
 APP_PUBLISHER = "Shriguru Phalle"  # kept in sync with installer.iss's MyAppPublisher by hand
 
 IS_FROZEN = getattr(sys, "frozen", False)  # True when running as a PyInstaller .exe
@@ -38,6 +38,20 @@ DEFAULT_TORRENT_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "Torren
 APPDATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Awesome Downloader")
 LOG_PATH = os.path.join(APPDATA_DIR, "app.log")
 SETTINGS_PATH = os.path.join(APPDATA_DIR, "settings.json")
+
+# Where update_checker.upgrade_yt_dlp() extracts a freshly downloaded yt-dlp
+# wheel when running as the packaged .exe -- pip can't install into a
+# PyInstaller onefile bundle (there's no real site-packages to write into at
+# runtime), so this is the actual update mechanism there: download the wheel
+# straight from PyPI (a .whl is just a zip, no pip needed to unpack one),
+# and prepend this directory to sys.path *before* anything imports yt_dlp,
+# so the newer copy here shadows the one frozen into the .exe. Applied
+# unconditionally below, at the very top of the app's own import graph
+# (config.py is imported by everything before any of them touch yt_dlp) --
+# a no-op if nothing has been downloaded yet.
+YT_DLP_SHADOW_DIR = os.path.join(APPDATA_DIR, "yt_dlp_shadow")
+if os.path.isdir(os.path.join(YT_DLP_SHADOW_DIR, "yt_dlp")) and YT_DLP_SHADOW_DIR not in sys.path:
+    sys.path.insert(0, YT_DLP_SHADOW_DIR)
 
 # Minimum libtorrent Python-wheel-compatible range, confirmed against PyPI at
 # plan time (libtorrent 2.0.13's newest wheels top out at cp313).

@@ -8,13 +8,14 @@ import subprocess
 import sys
 import threading
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QApplication, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
 
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 
 from app import config
 from app.core.torrent_manager import LIBTORRENT_AVAILABLE, TorrentManager
@@ -29,6 +30,39 @@ from .dialogs.add_torrent_dialog import AddTorrentDialog
 from .widgets import AnimatedProgressBar, _PaintedCard, make_card
 
 logger = get_logger("torrent_tab")
+
+
+def _dots_icon(color, width=14, height=4, dot=3):
+    """The overflow button's three dots, drawn rather than typed."""
+    pixmap = QPixmap(width, height)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(color))
+    gap = (width - 3 * dot) / 2.0
+    y = (height - dot) / 2.0
+    for i in range(3):
+        painter.drawEllipse(QRectF(i * (dot + gap), y, dot, dot))
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _dot_icon(color, size=10):
+    """Small filled dot used to mark destructive menu entries -- drawn,
+    not a Unicode bullet, so it keeps its colour regardless of the font
+    the menu happens to resolve."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(color))
+    d = size * 0.62
+    off = (size - d) / 2.0
+    painter.drawEllipse(QRectF(off, off, d, d))
+    painter.end()
+    return QIcon(pixmap)
 
 
 def _python_version_str():
@@ -208,9 +242,16 @@ class TorrentTab(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("background: transparent;")
+        # Scoped by id. An unscoped "background: transparent" is a
+        # widget-level stylesheet, and a widget stylesheet outranks the
+        # application one for every descendant -- so it also repainted the
+        # accent/quiet buttons on the rows inside transparent, which is why
+        # they rendered as bare text with no fill.
+        scroll.setObjectName("torrentScroll")
+        scroll.setStyleSheet("#torrentScroll { background: transparent; }")
         self.list_body = QWidget()
-        self.list_body.setStyleSheet("background: transparent;")
+        self.list_body.setObjectName("torrentScrollBody")
+        self.list_body.setStyleSheet("#torrentScrollBody { background: transparent; }")
         self.list_body_layout = QVBoxLayout(self.list_body)
         self.list_body_layout.setContentsMargins(0, 0, 0, 0)
         self.list_body_layout.setSpacing(6)
@@ -435,43 +476,55 @@ class TorrentTab(QWidget):
         # to reach Segoe UI Emoji for them. Real word labels avoid depending
         # on font glyph coverage entirely, and say what each button does
         # rather than leaving it to be guessed from a pictogram.
-        # All four row actions share the outlined "pill" shape; only the
-        # destructive one is red. See theme.py's QPushButton#pill comment.
+        # Row actions follow the "one primary, then overflow" shape rather
+        # than laying every action out in a line. Five outlined accent-
+        # coloured buttons per row put ~25 of them on a full screen, which
+        # made the accent colour meaningless and -- worse -- left "Delete
+        # Files" visually identical to "Open Folder". Now: the primary
+        # (Pause/Resume, or Play once finished) is the only filled control,
+        # Open Folder sits beside it as a quiet secondary, and both
+        # destructive actions live behind the "..." menu, away from
+        # anything clicked by habit.
         ctrl_row = QHBoxLayout()
+        ctrl_row.setContentsMargins(0, 2, 0, 0)
         ctrl_row.setSpacing(6)
         pause_btn = QPushButton("Pause")
-        pause_btn.setObjectName("pill")
+        pause_btn.setObjectName("accent")
         pause_btn.setCursor(Qt.PointingHandCursor)
-        pause_btn.setFixedHeight(28)
+        pause_btn.setFixedHeight(30)
+        pause_btn.setMinimumWidth(84)
         pause_btn.clicked.connect(lambda: self._toggle_pause(row_id))
         ctrl_row.addWidget(pause_btn)
 
         folder_btn = QPushButton("Open Folder")
-        folder_btn.setObjectName("pill")
+        folder_btn.setObjectName("quiet")
         folder_btn.setCursor(Qt.PointingHandCursor)
-        folder_btn.setFixedHeight(28)
+        folder_btn.setFixedHeight(30)
         folder_btn.clicked.connect(lambda: self._open_row_folder(row_id))
         ctrl_row.addWidget(folder_btn)
 
-        # Split into two explicit buttons instead of one 🗑 that popped a
-        # "also delete the files?" Yes/No dialog -- asked for directly, and
-        # it makes the destructive choice visible up front rather than
-        # hiding it behind a prompt after the fact.
-        remove_btn = QPushButton("Remove Torrent")
-        remove_btn.setObjectName("pill")
-        remove_btn.setCursor(Qt.PointingHandCursor)
-        remove_btn.setFixedHeight(28)
-        remove_btn.setToolTip("Stop and remove this torrent, but keep the files already downloaded.")
-        remove_btn.clicked.connect(lambda: self._remove_row(row_id, delete_files=False))
-        ctrl_row.addWidget(remove_btn)
-
-        delete_btn = QPushButton("Delete Files")
-        delete_btn.setObjectName("danger")
-        delete_btn.setCursor(Qt.PointingHandCursor)
-        delete_btn.setFixedHeight(28)
-        delete_btn.setToolTip("Remove this torrent AND delete everything it downloaded from disk.")
-        delete_btn.clicked.connect(lambda: self._remove_row(row_id, delete_files=True))
-        ctrl_row.addWidget(delete_btn)
+        # Destructive actions are deliberately NOT inline. Both still exist
+        # as two explicit choices (rather than one button plus an
+        # "...and the files?" prompt afterwards), they have just moved one
+        # click away so they cannot be hit by muscle memory.
+        # Drawn, not typed. As a "..." text label this rendered at the
+        # label's own size and weight and came out as one faint dot -- an
+        # overflow control nobody would find. Three explicit dots at a fixed
+        # size read the same at any font, and the padding reset stops the
+        # shared #quiet rule (4px/12px, sized for word buttons) from
+        # squeezing them out of a 32px square.
+        more_btn = QPushButton()
+        more_btn.setObjectName("quiet")
+        more_btn.setIcon(_dots_icon(theme.tokens(self._dark_mode())["text_muted"]))
+        more_btn.setIconSize(QSize(14, 4))
+        more_btn.setStyleSheet("padding: 0px;")
+        more_btn.setCursor(Qt.PointingHandCursor)
+        more_btn.setFixedSize(32, 30)
+        more_btn.setToolTip("More actions")
+        more_btn.setAccessibleName("More actions")
+        more_btn.clicked.connect(lambda: self._show_row_menu(row_id, more_btn))
+        ctrl_row.addSpacing(2)
+        ctrl_row.addWidget(more_btn)
 
         ctrl_row.addStretch(1)
 
@@ -481,7 +534,8 @@ class TorrentTab(QWidget):
         play_btn = QPushButton("▶  Play")
         play_btn.setObjectName("success")
         play_btn.setCursor(Qt.PointingHandCursor)
-        play_btn.setFixedHeight(28)
+        play_btn.setFixedHeight(30)
+        play_btn.setMinimumWidth(84)
         play_btn.setToolTip("Open the downloaded file in your default player.")
         play_btn.clicked.connect(lambda: self._play_row(row_id))
         play_btn.setVisible(False)
@@ -496,7 +550,16 @@ class TorrentTab(QWidget):
             "handle": handle, "save_path": save_path, "kind": kind, "uri_or_path": uri_or_path,
             "selected": selected, "card": card, "name_label": name_label, "status_label": status_label,
             "progress_bar": progress_bar, "pct_label": pct_label, "detail_label": detail_label,
-            "pause_btn": pause_btn, "play_btn": play_btn, "history_recorded": False,
+            "pause_btn": pause_btn, "play_btn": play_btn,
+            # A row restored from torrents.json at 100% was already recorded
+            # in history back when it first completed, in whatever session
+            # that was -- only a row starting below 100% (a genuinely new
+            # torrent) still needs its completion caught by _poll() below.
+            # Without this, every completed torrent silently re-added itself
+            # to history on every single relaunch, even right after Clear
+            # History, since this flag lives only in memory and used to
+            # always start False regardless of restored progress.
+            "history_recorded": initial_progress >= 1.0,
             "was_complete": None,
             # saved_progress is the floor shown while libtorrent re-hashes on
             # resume; last_progress is what gets written back to torrents.json.
@@ -548,6 +611,72 @@ class TorrentTab(QWidget):
         except Exception:
             logger.exception("Failed to open %s", target)
             QMessageBox.information(self, config.APP_NAME, f"The file is at:\n{target}")
+
+    def _show_row_menu(self, row_id, anchor_btn):
+        """Overflow menu for a torrent row: the low-frequency and
+        destructive actions that used to sit inline as their own buttons.
+
+        Both destructive entries are separated from the rest by a divider
+        and are the only red items, so the dangerous choices are visually
+        distinct from "copy a link" -- which was exactly what the old
+        all-identical row of pills could not express."""
+        if row_id not in self.rows:
+            return
+        t = theme.tokens(dark_mode=self._dark_mode())
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background: {t['card_bg_solid']};
+                color: {t['text']};
+                border: 1px solid {t['card_border']};
+                border-radius: 9px;
+                padding: 4px;
+            }}
+            QMenu::item {{ padding: 7px 22px 7px 12px; border-radius: 6px; }}
+            QMenu::item:selected {{ background: {t['hover_overlay']}; }}
+            QMenu::separator {{ height: 1px; background: {t['divider']}; margin: 4px 8px; }}
+        """)
+
+        copy_action = menu.addAction("Copy magnet link")
+        copy_action.triggered.connect(lambda: self._copy_row_magnet(row_id))
+
+        menu.addSeparator()
+
+        remove_action = menu.addAction("Remove torrent")
+        remove_action.setToolTip(
+            "Stop and remove this torrent, but keep the files already downloaded.")
+        remove_action.triggered.connect(
+            lambda: self._remove_row(row_id, delete_files=False))
+
+        delete_action = menu.addAction("Delete files from disk")
+        delete_action.setToolTip(
+            "Remove this torrent AND delete everything it downloaded from disk.")
+        delete_action.triggered.connect(
+            lambda: self._remove_row(row_id, delete_files=True))
+
+        # QSS cannot target an individual QMenu item, so the destructive
+        # pair is marked with a small red dot icon instead of red text.
+        # Combined with the divider above them, that is what separates
+        # "copy a link" from "erase 31 GB" -- the distinction the old row
+        # of identical pills could not make at all.
+        dot = _dot_icon(t["danger"])
+        for act in (remove_action, delete_action):
+            act.setIcon(dot)
+            act.setIconVisibleInMenu(True)
+
+        menu.exec(anchor_btn.mapToGlobal(anchor_btn.rect().bottomLeft()))
+
+    def _copy_row_magnet(self, row_id):
+        """Puts the row's magnet URI (or its .torrent path, for a file-added
+        torrent) on the clipboard -- the only genuinely new action this menu
+        introduces, and the one that made an overflow worth having rather
+        than just hiding two buttons."""
+        info = self.rows.get(row_id)
+        if not info:
+            return
+        value = info.get("uri_or_path") or ""
+        if value:
+            QApplication.clipboard().setText(value)
 
     def _open_row_folder(self, row_id):
         info = self.rows.get(row_id)

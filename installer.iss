@@ -1,4 +1,4 @@
-; ============================================================================
+﻿; ============================================================================
 ; AWESOME DOWNLOADER — Inno Setup installer script
 ; ============================================================================
 ; This turns your already-built app into a real Windows installer wizard:
@@ -18,7 +18,7 @@
 ; ============================================================================
 
 #define MyAppName "AWESOME DOWNLOADER"
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "2.4.0"
 #define MyAppPublisher "Shriguru Phalle"
 #define MyAppExeName "Awesome Downloader.exe"
 
@@ -43,6 +43,16 @@ WizardStyle=modern
 WizardImageFile=installer_assets\wizard_large.bmp,installer_assets\wizard_large@2x.bmp
 WizardSmallImageFile=installer_assets\wizard_small.bmp,installer_assets\wizard_small@2x.bmp
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; Without these the setup binary ships with an empty FileVersion: Windows'
+; file properties, and most download sites that read it, then show a blank
+; where the version should be -- on the one file a first-time user inspects
+; before deciding to run an unsigned installer.
+VersionInfoVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoProductName={#MyAppName}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} Setup
+VersionInfoCopyright=Copyright (C) {#MyAppPublisher}
 ArchitecturesInstallIn64BitMode=x64compatible
 ; The bundled app is a 64-bit build (PyInstaller + 64-bit Python, verified
 ; from its PE header: machine = AMD64), so it physically cannot run on
@@ -87,25 +97,36 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; Tasks: desktopicon
 
 [Registry]
-; If ffmpeg.exe was bundled (see [Files] above), add the install folder to
-; PATH so the app can find it automatically without a separate ffmpeg install.
-Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
-    ValueData: "{olddata};{app}"; Check: NeedsAddPath('{app}'); Flags: preservestringtype
+; No PATH entry. This used to append {app} to the user's Path so the bundled
+; ffmpeg could be found -- but the app never needed it: ffmpeg_utils.ffmpeg_path()
+; looks for ffmpeg.exe beside the executable (config.BASE_DIR, which is
+; os.path.dirname(sys.executable) in a frozen build) and only falls back to PATH
+; if that is missing. [Files] installs vendor\ffmpeg.exe to exactly that folder.
+;
+; Worse than unnecessary, it was wrong: with PrivilegesRequired=admin the HKCU
+; hive being written is the *elevating* account's, so when an admin installs for
+; someone else the entry lands in the wrong user's environment -- and it
+; permanently modified a PATH the app doesn't read.
 
 ; Register as a handler for magnet: links (same technique real torrent
-; clients like qBittorrent/uTorrent use) -- per-user (HKCU), so it doesn't
-; need extra elevation beyond what the installer already has. Chrome/Edge
+; clients like qBittorrent/uTorrent use). Written to HKA, not HKCU: HKA
+; resolves to HKLM when Setup is running elevated (this installer requires
+; admin, so the association covers every account on the machine, matching an
+; install into Program Files) and to HKCU when it is not. Hard-coding HKCU
+; registered the handler for whichever account happened to click through the
+; UAC prompt, which is not necessarily the person who will use the app.
+; Chrome/Edge
 ; will offer "Open AWESOME DOWNLOADER?" the next time a magnet link is
 ; clicked once this is registered. The app receives the link as a command-
 ; line argument (see app/main_qt.py) and routes it straight into the Torrent
 ; tab's existing add-magnet flow.
-Root: HKCU; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: ""; \
+Root: HKA; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: ""; \
     ValueData: "URL:Magnet Link"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: "URL Protocol"; \
+Root: HKA; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: "URL Protocol"; \
     ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\magnet\DefaultIcon"; ValueType: string; ValueName: ""; \
+Root: HKA; Subkey: "Software\Classes\magnet\DefaultIcon"; ValueType: string; ValueName: ""; \
     ValueData: "{app}\app_icon.ico"
-Root: HKCU; Subkey: "Software\Classes\magnet\shell\open\command"; ValueType: string; ValueName: ""; \
+Root: HKA; Subkey: "Software\Classes\magnet\shell\open\command"; ValueType: string; ValueName: ""; \
     ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 
@@ -113,18 +134,6 @@ Root: HKCU; Subkey: "Software\Classes\magnet\shell\open\command"; ValueType: str
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
-function NeedsAddPath(Param: string): boolean;
-var
-  OrigPath: string;
-begin
-  if not RegQueryStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', OrigPath) then
-  begin
-    Result := True;
-    exit;
-  end;
-  Result := Pos(';' + Param + ';', ';' + OrigPath + ';') = 0;
-end;
-
 // Best-effort only: downloads a fresh ffmpeg.exe over whatever build-day
 // copy [Files] already installed. Every failure mode (no internet, both
 // mirrors down, PowerShell missing/blocked) is swallowed by the script's
@@ -175,5 +184,36 @@ begin
   if CurStep = ssPostInstall then
   begin
     UpdateFFmpegIfRequested;
+  end;
+end;
+
+// Everything the app remembers -- settings, download and browsing history,
+// bookmarks, the queued-link list, the browser profile with its logins --
+// lives in %LOCALAPPDATA%\Awesome Downloader, outside {app}, so uninstalling
+// never touched it. That is the right default: an uninstall is often really
+// a reinstall, and silently throwing away someone's history and saved logins
+// because they updated the app would be indefensible.
+//
+// But it left no way to remove it either, which is its own problem for
+// anyone actually leaving. So: asked once, at uninstall, defaulting to No.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir: string;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    exit;
+
+  DataDir := ExpandConstant('{localappdata}\Awesome Downloader');
+  if not DirExists(DataDir) then
+    exit;
+
+  if MsgBox('Also remove your Awesome Downloader data?' + #13#10 + #13#10 +
+            'This deletes your settings, download history, browsing history, ' +
+            'bookmarks, queued links, and any sites you signed in to inside ' +
+            'the app''s browser.' + #13#10 + #13#10 +
+            'Choose No to keep it all for a future reinstall.',
+            mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+  begin
+    DelTree(DataDir, True, True, True);
   end;
 end;

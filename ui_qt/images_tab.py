@@ -18,6 +18,7 @@ from app.core import downloader
 from app.logging_setup import get_logger
 from app.utils import download_history, settings as settings_store
 
+from .dialogs import signin_dialog
 from .widgets import _PaintedCard, make_card
 
 logger = get_logger("images_tab")
@@ -41,6 +42,9 @@ class ImagesTab(QWidget):
     _tile_preview_sig = Signal(int, object)
     _download_progress_sig = Signal(str)
     _download_done_sig = Signal(str, int, int)
+    # Raised when the user picks "sign in inside this app" -- main_qt wires
+    # it to switching over to the Browser tab.
+    open_browser_requested = Signal()
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -115,10 +119,17 @@ class ImagesTab(QWidget):
         grid_scroll = QScrollArea()
         grid_scroll.setWidgetResizable(True)
         grid_scroll.setFrameShape(QFrame.NoFrame)
-        grid_scroll.setStyleSheet("background: transparent;")
+        # Scoped by id. An unscoped "background: transparent" is a
+        # widget-level stylesheet, and a widget stylesheet outranks the
+        # application one for every descendant -- so it also repainted the
+        # accent/quiet buttons on the rows inside transparent, which is why
+        # they rendered as bare text with no fill.
+        grid_scroll.setObjectName("imagesScroll")
+        grid_scroll.setStyleSheet("#imagesScroll { background: transparent; }")
         grid_scroll.setMaximumHeight(420)
         self.grid_widget = QWidget()
-        self.grid_widget.setStyleSheet("background: transparent;")
+        self.grid_widget.setObjectName("imagesScrollBody")
+        self.grid_widget.setStyleSheet("#imagesScrollBody { background: transparent; }")
         self.grid_layout = QGridLayout(self.grid_widget)
         self.grid_layout.setSpacing(8)
         grid_scroll.setWidget(self.grid_widget)
@@ -196,9 +207,13 @@ class ImagesTab(QWidget):
         self.download_btn.setEnabled(False)
         threading.Thread(target=self._fetch_thread, args=(url,), daemon=True).start()
 
+    def _cookies_from_browser(self):
+        return (self.settings or {}).get("cookies_from_browser")
+
     def _fetch_thread(self, url):
         try:
-            post_title, all_items = downloader.fetch_image_gallery(url)
+            post_title, all_items = downloader.fetch_image_gallery(
+                url, cookies_from_browser=self._cookies_from_browser())
             image_items = [it for it in all_items if not it["is_video"]]
             skipped_videos = len(all_items) - len(image_items)
             self._fetch_done_sig.emit(post_title, image_items, skipped_videos)
@@ -224,8 +239,31 @@ class ImagesTab(QWidget):
 
     def _on_fetch_error(self, err):
         self.fetch_btn.setEnabled(True)
+        # yt-dlp's own "use --cookies-from-browser" text is a command-line
+        # instruction, and showing it verbatim made the app's answer to "this
+        # needs a login" a wall of terminal advice. A link that needs a
+        # session gets the dialog that can actually set one up instead.
+        if signin_dialog.needs_sign_in(err):
+            self.status_label.setText("That link needs a signed-in account.")
+            self._offer_sign_in()
+            return
         self.status_label.setText("Could not load images for that link.")
         QMessageBox.critical(self, config.APP_NAME, f"Failed to fetch images:\n{err}")
+
+    def _offer_sign_in(self):
+        choice = signin_dialog.show_sign_in_help(
+            self, url=self.url_entry.text().strip(),
+            dark_mode=(self.settings or {}).get("theme", "dark") != "light",
+            current=self._cookies_from_browser())
+        if choice is None:
+            return
+        if choice == "browser_tab":
+            self.open_browser_requested.emit()
+            return
+        self.settings["cookies_from_browser"] = choice
+        settings_store.save_settings(self.settings)
+        self.status_label.setText("Using your %s sign-in -- fetching again..." % choice)
+        self.on_fetch()
 
     # ------------------------------------------------------------ Gallery ---
     def _clear_grid(self):

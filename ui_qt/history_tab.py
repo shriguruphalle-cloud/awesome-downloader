@@ -39,6 +39,13 @@ def _pil_to_pixmap(img):
 
 class HistoryTab(QWidget):
     _thumb_ready_sig = Signal(object, object)  # (thumb_label, pil_image)
+    # Fired whenever download_history.add_entry() runs anywhere in the app
+    # (video/audio download, image save, torrent completion, browser direct
+    # download -- five separate call sites). MainWindow badges this tab's
+    # pill off of it the same way DownloadTab's job_started already badges
+    # the Download pill, since none of those five call sites otherwise have
+    # any way to reach the tab strip.
+    entry_added = Signal()
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -60,9 +67,16 @@ class HistoryTab(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("background: transparent;")
+        # Scoped by id. An unscoped "background: transparent" is a
+        # widget-level stylesheet, and a widget stylesheet outranks the
+        # application one for every descendant -- so it also repainted the
+        # accent/quiet buttons on the rows inside transparent, which is why
+        # they rendered as bare text with no fill.
+        scroll.setObjectName("historyScroll")
+        scroll.setStyleSheet("#historyScroll { background: transparent; }")
         self.body = QWidget()
-        self.body.setStyleSheet("background: transparent;")
+        self.body.setObjectName("historyScrollBody")
+        self.body.setStyleSheet("#historyScrollBody { background: transparent; }")
         self.body_layout = QVBoxLayout(self.body)
         self.body_layout.setContentsMargins(4, 4, 4, 4)
         self.body_layout.setSpacing(8)

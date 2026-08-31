@@ -14,6 +14,21 @@ logger = get_logger("download_history")
 HISTORY_PATH = os.path.join(config.APPDATA_DIR, "history.json")
 MAX_ENTRIES = 500
 
+# Plain-callable observers, not a Qt Signal -- this module stays
+# framework-agnostic like the rest of app/utils. add_entry() is called from
+# five different tabs, some from background download threads (images_tab.py's
+# _download_thread) and some from the GUI thread (video_tab.py/browser_tab.py's
+# _on_download_done slots), so whatever gets registered here must itself be
+# safe to call from either -- a Qt Signal's bound .emit method qualifies
+# (that's the standard cross-thread-safe pattern already used throughout this
+# codebase's own progress_hook -> _progress_sig.emit() calls), a direct widget
+# touch would not.
+_listeners = []
+
+
+def register_listener(fn):
+    _listeners.append(fn)
+
 
 def load():
     try:
@@ -40,6 +55,11 @@ def add_entry(kind, title, file_path, folder_path, size_bytes=0):
         "completed_at": time.time(),
     })
     _save(entries[:MAX_ENTRIES])
+    for fn in _listeners:
+        try:
+            fn()
+        except Exception:
+            logger.exception("download_history listener failed")
 
 
 def remove_entry(index):

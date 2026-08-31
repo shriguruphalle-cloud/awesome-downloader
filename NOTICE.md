@@ -10,6 +10,7 @@ The following components are redistributed with the application.
 | Component | Version | Licence | Bundled in the installer |
 |---|---|---|---|
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | 2026.07.04 | Unlicense (public domain) | Yes (inside the executable) |
+| [curl_cffi](https://github.com/lexiforest/curl_cffi) | 0.15.0 | MIT | Yes (inside the executable) |
 | [FFmpeg](https://ffmpeg.org/) (`essentials` build by [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)) | 9.0 | **GPL v3** (`--enable-gpl --enable-version3`) | Yes (`ffmpeg.exe`) |
 | [libtorrent](https://libtorrent.org/) | 2.0.13 | BSD 3-Clause | Yes (inside the executable) |
 | [Qt](https://www.qt.io/) via [PySide6](https://doc.qt.io/qtforpython/) | 6.11.1 | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only (used under LGPL v3) | Yes (inside the executable) |
