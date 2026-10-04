@@ -7,9 +7,6 @@ back via root.after(...).
 import glob
 import io
 import os
-import re
-import threading
-import time
 import urllib.parse
 import urllib.request
 
@@ -55,8 +52,101 @@ try:
 except ImportError:
     IMPERSONATE_TARGET = None
 
+try:
+    from yt_dlp.cookies import CookieLoadError
+except ImportError:  # older yt-dlp
+    CookieLoadError = None
 
-def base_ydl_opts(cookies_from_browser=None):
+# Browsers whose cookie store couldn't be read this session. Chrome and Edge
+# now lock their cookies with app-bound encryption that nothing outside the
+# browser can open ("Failed to decrypt with DPAPI", yt-dlp issue #10927), and
+# yt-dlp reads the store while it *starts up* -- before it has even looked at
+# the link -- so one unreadable browser made every fetch fail, including
+# public videos that need no sign-in at all (reported with a PornHub link).
+# Once a browser is known to be unreadable it is skipped for the rest of the
+# session instead of failing the same way on every request.
+_UNREADABLE_BROWSERS = set()
+
+# Called as listener(browser, message) -- from a worker thread -- the first
+# time a browser's cookies turn out to be unreadable, so the UI can say why a
+# sign-in wasn't used. The UI marshals it to its own thread.
+cookie_fallback_listeners = []
+
+_COOKIE_FAILURE_MARKERS = (
+    "failed to decrypt with dpapi",
+    "failed to load cookies",
+    "could not copy chrome cookie database",
+    "could not find chrome cookies database",
+    "could not find firefox cookies database",
+    "cookie database",
+    "unsupported browser",
+)
+
+
+def _is_cookie_failure(exc):
+    """True if `exc` (or anything it wraps) is yt-dlp failing to read a
+    browser's cookie store, rather than failing on the link itself."""
+    seen = set()
+    e = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if CookieLoadError is not None and isinstance(e, CookieLoadError):
+            return True
+        if any(m in str(e).lower() for m in _COOKIE_FAILURE_MARKERS):
+            return True
+        wrapped = getattr(e, "exc_info", None)
+        e = e.__cause__ or e.__context__ or (wrapped[1] if wrapped else None)
+    return False
+
+
+def _drop_browser_cookies(opts, url, exc):
+    """Carries on without the browser's cookies: the app's own Browser-tab
+    session is used instead if there is one, else the request goes out
+    anonymously -- which is all a public video ever needed."""
+    browser = opts.pop("cookiesfrombrowser", (None,))[0]
+    first_time = browser not in _UNREADABLE_BROWSERS
+    _UNREADABLE_BROWSERS.add(browser)
+    if not opts.get("cookiefile"):
+        cookie_file = browser_cookies.scoped_cookie_file(url)
+        if cookie_file:
+            opts["cookiefile"] = cookie_file
+    logger.warning("Couldn't read %s's cookies (%s) -- continuing without them",
+                   browser, str(exc).splitlines()[0][:160])
+    if first_time:
+        for listener in list(cookie_fallback_listeners):
+            try:
+                listener(browser, str(exc).splitlines()[0][:300])
+            except Exception:
+                logger.exception("cookie fallback listener failed")
+
+
+def _run(opts, url, work):
+    """work(ydl) with a YoutubeDL built from `opts`. If the chosen browser's
+    cookie store can't be read -- when YoutubeDL starts, or on its first
+    request -- the browser's cookies are dropped (see _drop_browser_cookies)
+    and the work runs once more. `opts` is updated in place, so a caller that
+    goes on to build more instances from it doesn't hit the same wall."""
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return work(ydl)
+    except Exception as e:
+        if not opts.get("cookiesfrombrowser") or not _is_cookie_failure(e):
+            raise
+        _drop_browser_cookies(opts, url, e)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return work(ydl)
+
+
+# Among streams of the same resolution and frame rate, H.264 and AAC first:
+# they play in every player and on every GPU, where AV1 and HEVC depend on
+# the decoder installed (a missing or faulty one shows garbage blocks too).
+# Resolution still comes first, so a 4K video that only exists in VP9/AV1 is
+# still downloaded in 4K. The fetch uses the same order, so the size shown
+# for each resolution is the size of what will actually be downloaded.
+VIDEO_FORMAT_SORT = ["res", "fps", "vcodec:h264", "acodec:aac"]
+
+
+def base_ydl_opts(cookies_from_browser=None, url=None):
     """Common options, incl. a browser-like User-Agent which avoids some 403s.
 
     socket_timeout is a hard safety net: confirmed directly that a
@@ -85,11 +175,31 @@ def base_ydl_opts(cookies_from_browser=None):
         # for sources that aren't fragmented (a single direct progressive
         # MP4 URL, say) -- nothing to parallelize there, but harmless to set
         # unconditionally.
-        "concurrent_fragment_downloads": 8,
+        #
+        # 4, not 8: many video CDNs throttle a client that opens that many
+        # connections at once, and a throttled fragment is a failed one.
+        "concurrent_fragment_downloads": 4,
+        # A fragment that still fails after its retries ends the download
+        # with an error. yt-dlp's default is to skip it and carry on, which
+        # finishes "successfully" with a hole in the stream: every frame
+        # until the next keyframe then decodes against missing data, and the
+        # picture smears into blocks (reported with a screenshot as "looks
+        # pixelated, like the encoding went wrong"). A failed download can
+        # be retried, and resumes; a silently corrupt one can't be noticed.
+        "skip_unavailable_fragments": False,
+        "fragment_retries": 15,
+        "retries": 10,
+        "file_access_retries": 5,
+        # Back off between retries instead of hammering a CDN that has
+        # started refusing: 1, 2, 4, 8 ... seconds, at most 20.
+        "retry_sleep_functions": {
+            "fragment": lambda n: min(2 ** n, 20),
+            "http": lambda n: min(2 ** n, 20),
+        },
     }
     if IMPERSONATE_TARGET is not None:
         opts["impersonate"] = IMPERSONATE_TARGET
-    if cookies_from_browser:
+    if cookies_from_browser and cookies_from_browser not in _UNREADABLE_BROWSERS:
         opts["cookiesfrombrowser"] = (cookies_from_browser,)
     else:
         # Whatever the user is signed in to in this app's own Browser tab.
@@ -98,12 +208,22 @@ def base_ydl_opts(cookies_from_browser=None):
         # media response, and yt-dlp's remedy is cookies. Taking them from
         # the built-in browser means the user opts in by signing in here,
         # rather than the app reaching into their real Chrome profile.
-        # Returns None when there is no profile yet, in which case nothing
-        # is added and the request goes out anonymously exactly as before.
-        cookie_file = browser_cookies.cookie_file_if_available()
+        #
+        # Scoped to `url`'s site and written to a file of its own: callers
+        # hand the options back to release_opts() once yt-dlp is finished,
+        # which deletes it. None when there is nothing to send, in which case
+        # the request goes out anonymously exactly as before.
+        cookie_file = browser_cookies.scoped_cookie_file(url)
         if cookie_file:
             opts["cookiefile"] = cookie_file
     return opts
+
+
+def release_opts(opts):
+    """Deletes the temporary cookie file base_ydl_opts() made for these
+    options. Safe to call on any options dict, and more than once."""
+    if opts:
+        browser_cookies.discard(opts.get("cookiefile"))
 
 
 def _selected_size(ydl, formats, fmt_spec):
@@ -143,9 +263,22 @@ def fetch_info_with_sizes(url, cookies_from_browser=None):
     re-implementing HTML scraping that would just hit the same login walls
     yt-dlp's extractor-specific handling already knows how to work around.
     """
-    opts = {**base_ydl_opts(cookies_from_browser), "skip_download": True, "ignore_no_formats_error": True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    opts = {**base_ydl_opts(cookies_from_browser, url), "skip_download": True,
+            "ignore_no_formats_error": True,
+            "format_sort": VIDEO_FORMAT_SORT,
+            # A playlist or channel comes back as a list of links rather than
+            # having every one of its videos fully extracted -- without this,
+            # pasting a 200-video playlist sat on "reading..." for minutes
+            # while yt-dlp resolved formats for videos nobody had chosen yet.
+            # It changes nothing for a single video, which is still extracted
+            # in full. `noplaylist` stays on, so a watch?v=...&list=... link
+            # is still that one video.
+            "extract_flat": "in_playlist",
+            "playlist_items": f"1-{PLAYLIST_LIMIT}"}
+    def work(ydl):
         info = ydl.extract_info(url, download=False)
+        if is_playlist(info):
+            return info, {}
         formats = info.get("formats", [])
         heights = sorted({
             f["height"] for f in formats
@@ -155,7 +288,82 @@ def fetch_info_with_sizes(url, cookies_from_browser=None):
             h: _selected_size(ydl, formats, f"bestvideo[height<={h}]+bestaudio/best[height<={h}]")
             for h in heights
         }
-    return info, height_sizes
+        return info, height_sizes
+
+    try:
+        return _run(opts, url, work)
+    finally:
+        release_opts(opts)
+
+
+# How many entries of a playlist or channel get stacked at once. A channel
+# can list tens of thousands; the first few hundred is what anyone means by
+# "download this playlist", and it keeps the queue usable.
+PLAYLIST_LIMIT = 300
+
+# The heights offered for a playlist entry, whose real formats are not known
+# until it is downloaded (the whole point of the flat listing above). The
+# format selector falls back to the nearest available one, so picking 1440p
+# for a video that tops out at 1080p still gets the 1080p.
+STANDARD_LADDER = [2160, 1440, 1080, 720, 480, 360]
+
+
+def is_playlist(info):
+    return (bool(info) and info.get("_type") in ("playlist", "multi_video")
+            and info.get("entries") is not None)
+
+
+def _entry_url(entry):
+    url = entry.get("webpage_url") or entry.get("url") or ""
+    if url.startswith(("http://", "https://")):
+        return url
+    ie = (entry.get("ie_key") or entry.get("extractor_key") or "").lower()
+    vid = entry.get("id") or url
+    if ie.startswith("youtube") and vid:
+        return f"https://www.youtube.com/watch?v={vid}"
+    return url or None
+
+
+def _is_tab_listing(entries):
+    """A channel's root URL lists its *tabs* (Videos, Shorts, Live) rather
+    than videos, each one a playlist of its own."""
+    if not entries:
+        return False
+    tabs = [e for e in entries if isinstance(e, dict) and (
+        (e.get("ie_key") or "").lower().endswith("tab") or e.get("_type") == "playlist")]
+    return len(tabs) == len(entries)
+
+
+def playlist_entries(info, cookies_from_browser=None):
+    """Flattens a playlist result into [{"url", "title", "duration",
+    "uploader", "thumbnail_url"}], following a channel root into its Videos
+    tab first. Entries with no usable link (deleted or private videos show up
+    in playlists as placeholders) are dropped."""
+    entries = list(info.get("entries") or [])
+    if _is_tab_listing(entries):
+        tab = next((e for e in entries if "/videos" in (_entry_url(e) or "")), entries[0])
+        tab_url = _entry_url(tab)
+        if tab_url:
+            sub_info, _sizes = fetch_info_with_sizes(tab_url, cookies_from_browser)
+            if is_playlist(sub_info):
+                entries = list(sub_info.get("entries") or [])
+
+    out = []
+    for e in entries[:PLAYLIST_LIMIT]:
+        if not isinstance(e, dict):
+            continue
+        url = _entry_url(e)
+        title = e.get("title") or ""
+        if not url or title in ("[Deleted video]", "[Private video]"):
+            continue
+        out.append({
+            "url": url,
+            "title": title or url,
+            "duration": int(e.get("duration") or 0),
+            "uploader": e.get("uploader") or e.get("channel") or info.get("uploader") or "",
+            "thumbnail_url": best_thumbnail_url(e),
+        })
+    return out
 
 
 _REDDIT_COOKIE_JAR = None
@@ -250,9 +458,12 @@ def fetch_image_gallery(url, cookies_from_browser=None):
         # through to the normal yt-dlp path below, which handles single-image
         # and video Reddit posts fine on its own.
 
-    opts = {**base_ydl_opts(cookies_from_browser), "skip_download": True, "ignore_no_formats_error": True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    opts = {**base_ydl_opts(cookies_from_browser, url), "skip_download": True,
+            "ignore_no_formats_error": True}
+    try:
+        info = _run(opts, url, lambda ydl: ydl.extract_info(url, download=False))
+    finally:
+        release_opts(opts)
 
     post_title = info.get("title") or "Untitled post"
     entries = info.get("entries")
@@ -407,8 +618,7 @@ def run_with_client_fallback(opts, url):
     last_error = None
     for attempt in range(3):
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(url, download=True), None
+            return _run(opts, url, lambda ydl: ydl.extract_info(url, download=True)), None
         except yt_dlp.utils.DownloadError as e:
             last_error = e
             msg = str(e)
@@ -422,8 +632,7 @@ def run_with_client_fallback(opts, url):
         try:
             retry_opts = dict(opts)
             retry_opts["extractor_args"] = {"youtube": {"player_client": [client]}}
-            with yt_dlp.YoutubeDL(retry_opts) as ydl:
-                return ydl.extract_info(url, download=True), client
+            return _run(retry_opts, url, lambda ydl: ydl.extract_info(url, download=True)), client
         except Exception:
             logger.info("403 client-fallback '%s' also failed for %s", client, url)
             continue
@@ -434,7 +643,7 @@ def download_audio(url, save_dir, bitrate, progress_hook, time_range=None, cooki
     """Returns (info, mp3_path_or_None, used_fallback_client_or_None)."""
     outtmpl = os.path.join(save_dir, "%(title)s.%(ext)s")
     opts = {
-        **base_ydl_opts(cookies_from_browser),
+        **base_ydl_opts(cookies_from_browser, url),
         **range_ydl_opts(time_range),
         "format": "bestaudio/best",
         "outtmpl": outtmpl,
@@ -443,241 +652,55 @@ def download_audio(url, save_dir, bitrate, progress_hook, time_range=None, cooki
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": bitrate}
         ],
     }
-    info, used_fallback = run_with_client_fallback(opts, url)
-
-    # The postprocessor changes the extension to .mp3 after download, so the
-    # newest .mp3 in the save dir is the reliable way to find it (same
-    # fallback pattern download_video uses for its merged .mkv).
-    candidates = sorted(glob.glob(os.path.join(save_dir, "*.mp3")), key=os.path.getmtime)
-    mp3_path = candidates[-1] if candidates else None
-    return info, mp3_path, used_fallback
+    try:
+        info, used_fallback = run_with_client_fallback(opts, url)
+    finally:
+        release_opts(opts)
+    return info, _final_path(info, save_dir, ".mp3"), used_fallback
 
 
 def download_video(url, save_dir, height, progress_hook, time_range=None, cookies_from_browser=None):
     """Returns (info, merged_mkv_path_or_None, used_fallback_client_or_None)."""
     outtmpl = os.path.join(save_dir, "%(title)s.%(ext)s")
-    fmt = (f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
+    # The trailing "/bestvideo+bestaudio/best" is a last resort for a height
+    # the video simply doesn't go down to: without it, asking for 360p on a
+    # video whose smallest stream is 480p failed outright with "Requested
+    # format is not available". That matters more now that playlist entries
+    # offer a standard ladder rather than the heights each video really has.
+    fmt = (f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/bestvideo+bestaudio/best"
            if height else "bestvideo+bestaudio/best")
     opts = {
-        **base_ydl_opts(cookies_from_browser),
+        **base_ydl_opts(cookies_from_browser, url),
         **range_ydl_opts(time_range),
         "format": fmt,
+        "format_sort": VIDEO_FORMAT_SORT,
         "outtmpl": outtmpl,
         "progress_hooks": [progress_hook],
         "merge_output_format": "mkv",  # always merge into mkv first: universally compatible
     }
-    info, used_fallback = run_with_client_fallback(opts, url)
-
-    merged_path = None
-    downloads = info.get("requested_downloads") or []
-    if downloads and downloads[0].get("filepath"):
-        merged_path = downloads[0]["filepath"]
-    else:
-        candidates = sorted(glob.glob(os.path.join(save_dir, "*.mkv")), key=os.path.getmtime)
-        merged_path = candidates[-1] if candidates else None
-    return info, merged_path, used_fallback
-
-
-_FILENAME_RE = re.compile(r'filename\*?=(?:UTF-8\'\')?"?([^";\r\n]+)"?', re.IGNORECASE)
-_UNSAFE_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-
-def _unique_direct_path(save_dir, filename):
-    base, ext = os.path.splitext(filename)
-    candidate = os.path.join(save_dir, filename)
-    n = 2
-    while os.path.exists(candidate):
-        candidate = os.path.join(save_dir, f"{base} ({n}){ext}")
-        n += 1
-    return candidate
-
-
-_SEGMENT_COUNT = 8  # IDM's own long-standing default -- matches what was asked for
-_MIN_SEGMENT_SIZE = 2 * 1024 * 1024  # below this, splitting adds only overhead
-
-
-def _probe(url):
-    """One small ranged request that doubles as size/filename discovery and
-    a real test of whether the server honors Range (some advertise
-    Accept-Ranges but still don't split correctly, so an actual 206 is
-    checked for rather than trusting the header alone)."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Range": "bytes=0-0"})
     try:
-        resp = urllib.request.urlopen(req, timeout=30)
-    except urllib.error.HTTPError as e:
-        resp = e
-    supports_range = resp.status == 206
-    total = None
-    content_range = resp.headers.get("Content-Range")
-    if supports_range and content_range and "/" in content_range:
-        try:
-            total = int(content_range.rsplit("/", 1)[1])
-        except ValueError:
-            total = None
-    if total is None:
-        length = resp.headers.get("Content-Length")
-        try:
-            total = int(length) if length else None
-        except (TypeError, ValueError):
-            total = None
-        # A non-range GET's Content-Length is the *remaining* body, which
-        # for this probe is fine either way since it's the same as the full
-        # size when Range wasn't honored (status 200, whole file returned).
-    filename = None
-    m = _FILENAME_RE.search(resp.headers.get("Content-Disposition", ""))
-    if m:
-        filename = urllib.parse.unquote(m.group(1))
-    final_url = resp.geturl()
-    resp.close()
-    return supports_range, total, filename, final_url
+        info, used_fallback = run_with_client_fallback(opts, url)
+    finally:
+        release_opts(opts)
+    return info, _final_path(info, save_dir, ".mkv"), used_fallback
 
 
-def _resolve_dest(save_dir, suggested_filename, probed_filename, final_url):
-    filename = suggested_filename or probed_filename
-    if not filename:
-        filename = os.path.basename(urllib.parse.urlparse(final_url).path)
-    filename = _UNSAFE_FILENAME_CHARS.sub("_", filename).strip(" .") or "download"
-    return _unique_direct_path(save_dir, filename)
+def _final_path(info, save_dir, ext):
+    """Where this download actually ended up.
 
-
-def download_direct_file(url, save_dir, progress_hook, suggested_filename=None):
-    """Streams an arbitrary URL straight to disk. This is for direct file
-    links the Browser tab's download interception catches that yt-dlp has
-    no extractor for (a .zip, an .exe, a direct video/image file) -- as
-    opposed to a page yt-dlp can pull structured formats from.
-    `progress_hook` gets the same dict shape yt-dlp's own hooks use
-    ({"status": "downloading", "downloaded_bytes", "total_bytes", "speed",
-    "eta"} / {"status": "finished"}), so it plugs into the same progress UI
-    the yt-dlp downloads already drive.
-
-    Splits into up to 8 parallel Range-request connections when the server
-    supports it (same technique IDM/aria2 use for the speedup over a single
-    stream) -- and falls back to one plain sequential stream when it
-    doesn't, rather than failing outright. Not every host allows Range
-    requests, so segmented downloading isn't guaranteed for every link."""
-    supports_range, total, probed_filename, final_url = _probe(url)
-    dest = _resolve_dest(save_dir, suggested_filename, probed_filename, final_url)
-
-    if supports_range and total and total >= _MIN_SEGMENT_SIZE * 2:
-        return _download_segmented(final_url, dest, total, progress_hook)
-    return _download_single_stream(final_url, dest, progress_hook, total)
-
-
-def _download_single_stream(url, dest, progress_hook, total):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    downloaded = 0
-    start = time.monotonic()
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as f:
-            while True:
-                chunk = resp.read(262144)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                elapsed = time.monotonic() - start
-                speed = downloaded / elapsed if elapsed > 0.25 else None
-                eta = int((total - downloaded) / speed) if (speed and total) else None
-                progress_hook({
-                    "status": "downloading",
-                    "downloaded_bytes": downloaded,
-                    "total_bytes": total,
-                    "speed": speed,
-                    "eta": eta,
-                    "filename": dest,
-                })
-    except BaseException:
-        # Cancellation (progress_hook raises DownloadCancelled) or any real
-        # I/O error both leave a half-written file behind -- drop it rather
-        # than let a corrupt partial masquerade as a finished download.
-        try:
-            os.remove(dest)
-        except OSError:
-            pass
-        raise
-
-    progress_hook({"status": "finished"})
-    return dest
-
-
-def _download_segmented(url, dest, total, progress_hook, segment_count=_SEGMENT_COUNT):
-    segments = max(1, min(segment_count, total // _MIN_SEGMENT_SIZE))
-    seg_size = total // segments
-    bounds = []
-    start_offset = 0
-    for i in range(segments):
-        end_offset = total - 1 if i == segments - 1 else start_offset + seg_size - 1
-        bounds.append((start_offset, end_offset))
-        start_offset = end_offset + 1
-
-    # Pre-sized so every segment thread can seek() to its own disjoint byte
-    # range and write independently -- the standard technique behind
-    # multi-connection downloading, safe because no two segments ever touch
-    # the same bytes.
-    with open(dest, "wb") as f:
-        f.truncate(total)
-
-    progress = [0] * segments
-    progress_lock = threading.Lock()
-    cancelled = threading.Event()
-    errors = []
-    start_time = time.monotonic()
-
-    def report():
-        with progress_lock:
-            downloaded = sum(progress)
-        elapsed = time.monotonic() - start_time
-        speed = downloaded / elapsed if elapsed > 0.25 else None
-        eta = int((total - downloaded) / speed) if (speed and downloaded < total) else None
-        progress_hook({
-            "status": "downloading",
-            "downloaded_bytes": downloaded,
-            "total_bytes": total,
-            "speed": speed,
-            "eta": eta,
-            "filename": dest,
-        })
-
-    def worker(index, seg_start, seg_end):
-        req = urllib.request.Request(url, headers={
-            "User-Agent": USER_AGENT, "Range": f"bytes={seg_start}-{seg_end}",
-        })
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "r+b") as f:
-                f.seek(seg_start)
-                remaining = seg_end - seg_start + 1
-                while remaining > 0 and not cancelled.is_set():
-                    chunk = resp.read(min(262144, remaining))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    remaining -= len(chunk)
-                    with progress_lock:
-                        progress[index] += len(chunk)
-                    try:
-                        report()
-                    except BaseException:
-                        cancelled.set()
-                        return
-        except Exception as e:
-            errors.append(e)
-            cancelled.set()
-
-    threads = [threading.Thread(target=worker, args=(i, s, e), daemon=True)
-               for i, (s, e) in enumerate(bounds)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    if cancelled.is_set():
-        try:
-            os.remove(dest)
-        except OSError:
-            pass
-        if errors:
-            raise errors[0]
-        raise DownloadCancelled("Cancelled by user")
-
-    progress_hook({"status": "finished"})
-    return dest
+    yt-dlp records the post-processed path on the info it returns, so that is
+    the answer. The old fallback -- "the newest file with this extension in
+    the folder" -- is only used when it is missing, because it is wrong the
+    moment two downloads share a folder: whichever finished last would be
+    reported as the result of both, so one card's Play button opened the
+    other one's file.
+    """
+    for d in (info or {}).get("requested_downloads") or []:
+        path = d.get("filepath") or d.get("filename")
+        if path and os.path.exists(path):
+            return path
+    path = (info or {}).get("filepath")
+    if path and os.path.exists(path):
+        return path
+    candidates = sorted(glob.glob(os.path.join(save_dir, "*" + ext)), key=os.path.getmtime)
+    return candidates[-1] if candidates else None

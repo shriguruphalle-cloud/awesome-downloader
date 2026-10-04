@@ -30,6 +30,14 @@ def _cache_path(file_path):
     return os.path.join(CACHE_DIR, f"{digest}.jpg")
 
 
+def _cover(img, size):
+    """Scaled to fill `size` and centre-cropped, keeping the aspect ratio.
+    A plain resize to the box squashed every 16:9 video frame into the old
+    64x64 square."""
+    from PIL import ImageOps
+    return ImageOps.fit(img.convert("RGB"), size, Image.LANCZOS)
+
+
 def get_preview_image(file_path, kind, size=(64, 64)):
     """Returns a resized PIL Image, or None if no real thumbnail could be
     produced (caller should show a placeholder icon instead)."""
@@ -38,7 +46,7 @@ def get_preview_image(file_path, kind, size=(64, 64)):
 
     if kind == "image":
         try:
-            return Image.open(file_path).convert("RGB").resize(size, Image.LANCZOS)
+            return _cover(Image.open(file_path), size)
         except Exception:
             logger.exception("Failed to load image thumbnail for %s", file_path)
             return None
@@ -61,7 +69,7 @@ def get_preview_image(file_path, kind, size=(64, 64)):
             return None
 
     try:
-        return Image.open(cache_path).convert("RGB").resize(size, Image.LANCZOS)
+        return _cover(Image.open(cache_path), size)
     except Exception:
         logger.exception("Failed to load cached thumbnail for %s", file_path)
         return None

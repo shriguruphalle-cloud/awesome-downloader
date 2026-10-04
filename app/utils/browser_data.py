@@ -14,7 +14,6 @@ logger = get_logger("browser_data")
 BOOKMARKS_PATH = os.path.join(config.APPDATA_DIR, "browser_bookmarks.json")
 HISTORY_PATH = os.path.join(config.APPDATA_DIR, "browser_history.json")
 SHORTCUTS_PATH = os.path.join(config.APPDATA_DIR, "browser_shortcuts.json")
-ADBLOCK_DISABLED_PATH = os.path.join(config.APPDATA_DIR, "browser_adblock_disabled.json")
 PREFS_PATH = os.path.join(config.APPDATA_DIR, "browser_prefs.json")
 MAX_HISTORY_ENTRIES = 300
 
@@ -81,9 +80,64 @@ def add_history_entry(url, title):
     the top rather than growing a second entry -- the point of a browser
     history list is 'what did I look at recently', not a full navigation
     log."""
-    entries = [e for e in load_history() if e.get("url") != url]
-    entries.insert(0, {"url": url, "title": title or url, "visited_at": time.time()})
+    entries = load_history()
+    previous = next((e for e in entries if e.get("url") == url), None)
+    visits = int((previous or {}).get("visits") or 0) + 1
+    entries = [e for e in entries if e.get("url") != url]
+    entries.insert(0, {"url": url, "title": title or url, "visited_at": time.time(), "visits": visits})
     _save(HISTORY_PATH, entries[:MAX_HISTORY_ENTRIES])
+
+
+def _host(url):
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def site_name(host, titles=()):
+    """A site's own name for a tile: the part its pages' titles share
+    ("... - YouTube", "... | Reddit"), else the host made presentable."""
+    counts = {}
+    for title in titles:
+        for sep in (" - ", " | ", " — ", " · ", " – "):
+            if sep in (title or ""):
+                tail = title.rsplit(sep, 1)[1].strip()
+                if 1 < len(tail) <= 24:
+                    counts[tail] = counts.get(tail, 0) + 1
+                break
+    if counts:
+        name, n = max(counts.items(), key=lambda kv: kv[1])
+        if n >= 2 or len(titles) == 1:
+            return name
+    bare = host[4:] if host.startswith("www.") else host
+    stem = bare.split(".")[0] if bare.count(".") >= 1 else bare
+    return stem[:1].upper() + stem[1:] if stem else host
+
+
+def top_sites(limit=8, exclude_hosts=()):
+    """The sites visited most, weighted toward recent visits (a visit two
+    weeks ago counts half), one entry per site: [{url, title, host}]."""
+    now = time.time()
+    exclude = {h.lower().removeprefix("www.") for h in exclude_hosts if h}
+    sites = {}
+    for e in load_history():
+        url = e.get("url") or ""
+        if not url.startswith(("http://", "https://")):
+            continue
+        host = _host(url)
+        bare = host.removeprefix("www.")
+        if not host or bare in exclude:
+            continue
+        age_days = max(0.0, (now - float(e.get("visited_at") or now)) / 86400.0)
+        weight = int(e.get("visits") or 1) * (0.5 ** (age_days / 14.0))
+        site = sites.setdefault(bare, {"score": 0.0, "host": host, "titles": [], "scheme": url.split(":", 1)[0]})
+        site["score"] += weight
+        site["titles"].append(e.get("title") or "")
+    ranked = sorted(sites.values(), key=lambda s: s["score"], reverse=True)[:limit]
+    return [{"url": "%s://%s/" % (s["scheme"], s["host"]), "host": s["host"],
+             "title": site_name(s["host"], s["titles"])} for s in ranked]
 
 
 def clear_history():
@@ -120,31 +174,6 @@ def remove_shortcut(url):
     return shortcuts
 
 
-def load_adblock_disabled_hosts():
-    try:
-        with open(ADBLOCK_DISABLED_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return set(data) if isinstance(data, list) else set()
-    except FileNotFoundError:
-        return set()
-    except Exception:
-        logger.exception("Failed to load %s", ADBLOCK_DISABLED_PATH)
-        return set()
-
-
-def set_adblock_disabled(host, disabled):
-    """Per-site override for the always-on ad blocker -- some sites break
-    under it, and a global on/off would mean giving up blocking everywhere
-    just to fix one site (matches uBlock's own per-site toggle)."""
-    hosts = load_adblock_disabled_hosts()
-    if disabled:
-        hosts.add(host)
-    else:
-        hosts.discard(host)
-    _save(ADBLOCK_DISABLED_PATH, sorted(hosts))
-    return hosts
-
-
 def _load_prefs():
     """A plain dict of small scalar Browser-tab preferences (accent
     choice, home background image path) -- separate from the list-shaped
@@ -170,9 +199,11 @@ def _save_prefs(prefs):
 
 
 def get_browser_accent():
-    """"warm" (the default, off-black/terracotta) or "classic" (the same
-    blue/near-black palette every other tab uses)."""
-    return _load_prefs().get("accent", "warm")
+    """"classic" (the default since 2.5: the same cinematic glass every other
+    tab uses) or "warm" (a warmer grade, chosen from the home page's
+    toggle). The default used to be "warm", which made the Browser the one
+    tab that didn't look like the rest of the app."""
+    return _load_prefs().get("accent", "classic")
 
 
 def set_browser_accent(name):
@@ -198,4 +229,88 @@ def set_home_background_image(path):
 def clear_home_background_image():
     prefs = _load_prefs()
     prefs.pop("home_background_image", None)
+    _save_prefs(prefs)
+
+
+# ---- search engine ---------------------------------------------------------
+# name -> (label, query URL prefix). The query is percent-encoded and appended.
+SEARCH_ENGINES = {
+    "google": ("Google", "https://www.google.com/search?q="),
+    "duckduckgo": ("DuckDuckGo", "https://duckduckgo.com/?q="),
+    "bing": ("Bing", "https://www.bing.com/search?q="),
+    "brave": ("Brave Search", "https://search.brave.com/search?q="),
+    "yandex": ("Yandex", "https://yandex.com/search/?text="),
+}
+DEFAULT_SEARCH_ENGINE = "duckduckgo"
+
+
+def get_search_engine():
+    name = _load_prefs().get("search_engine", DEFAULT_SEARCH_ENGINE)
+    return name if name in SEARCH_ENGINES else DEFAULT_SEARCH_ENGINE
+
+
+def set_search_engine(name):
+    if name not in SEARCH_ENGINES:
+        return
+    prefs = _load_prefs()
+    prefs["search_engine"] = name
+    _save_prefs(prefs)
+
+
+def search_url(query):
+    import urllib.parse
+    return SEARCH_ENGINES[get_search_engine()][1] + urllib.parse.quote_plus(query)
+
+
+# ---- small switches ----------------------------------------------------------
+def get_pref(name, default=None):
+    return _load_prefs().get(name, default)
+
+
+def set_pref(name, value):
+    prefs = _load_prefs()
+    prefs[name] = value
+    _save_prefs(prefs)
+
+
+# ---- session (the tabs that were open) ----------------------------------------
+def load_session():
+    """(urls, current_index) of the tabs open when the app last closed --
+    whether or not they're reopened at start (that's the caller's choice;
+    with it off, Ctrl+Shift+T brings them back)."""
+    data = _load_prefs().get("session") or {}
+    urls = [u for u in data.get("tabs", []) if isinstance(u, str) and u.startswith(("http://", "https://"))]
+    current = data.get("current", 0)
+    if not isinstance(current, int) or not 0 <= current < max(1, len(urls)):
+        current = 0
+    return urls[:30], current
+
+
+def save_session(urls, current):
+    prefs = _load_prefs()
+    prefs["session"] = {"tabs": list(urls)[:30], "current": int(current)}
+    _save_prefs(prefs)
+
+
+# ---- recently closed (Ctrl+Shift+T), kept across restarts ------------------------
+# Newest last. Each entry is {"url": ...} for a tab, or {"session": [urls]} for
+# the whole set of tabs a previous run left open. Private tabs never get here.
+CLOSED_LIMIT = 25
+
+
+def load_closed():
+    out = []
+    for e in _load_prefs().get("closed") or []:
+        if isinstance(e, dict) and isinstance(e.get("url"), str) and e["url"].startswith(("http://", "https://")):
+            out.append({"url": e["url"]})
+        elif isinstance(e, dict) and isinstance(e.get("session"), list):
+            urls = [u for u in e["session"] if isinstance(u, str) and u.startswith(("http://", "https://"))]
+            if urls:
+                out.append({"session": urls[:30]})
+    return out[-CLOSED_LIMIT:]
+
+
+def save_closed(entries):
+    prefs = _load_prefs()
+    prefs["closed"] = list(entries)[-CLOSED_LIMIT:]
     _save_prefs(prefs)

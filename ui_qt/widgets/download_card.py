@@ -10,6 +10,8 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from .card import _PaintedCard
 from .progress import AnimatedProgressBar
+from .rounded_image import RoundedImage
+from .button import Button
 
 # 16:9 exactly -- asked for directly. Everything downstream (the placeholder,
 # the scaled pixmap) derives from these two numbers so the ratio can't drift.
@@ -50,17 +52,13 @@ class DownloadCard(_PaintedCard):
         self._playable = False
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(10)
 
         top = QHBoxLayout()
-        top.setSpacing(12)
+        top.setSpacing(14)
 
-        self.thumb_label = QLabel()
-        self.thumb_label.setFixedSize(THUMB_W, THUMB_H)
-        self.thumb_label.setAlignment(Qt.AlignCenter)
-        self.thumb_label.setObjectName("muted")
-        self.thumb_label.setScaledContents(False)
+        self.thumb_label = RoundedImage(THUMB_W, THUMB_H, radius=9.0, placeholder="No preview")
         self.set_thumbnail(pixmap)
         top.addWidget(self.thumb_label, 0, Qt.AlignTop)
 
@@ -77,17 +75,20 @@ class DownloadCard(_PaintedCard):
         self.play_btn.move((THUMB_W - 30) // 2, (THUMB_H - 30) // 2)
 
         text_col = QVBoxLayout()
-        text_col.setSpacing(2)
+        text_col.setSpacing(3)
         self.title_label = QLabel(title)
-        self.title_label.setStyleSheet("font-weight: 600;")
+        self.title_label.setStyleSheet("font-weight: 600; font-size: 13.5px;")
         self.title_label.setWordWrap(True)
         text_col.addWidget(self.title_label)
         self.meta_label = QLabel(meta)
         self.meta_label.setObjectName("muted")
         self.meta_label.setWordWrap(True)
         text_col.addWidget(self.meta_label)
+        text_col.addSpacing(2)
+        # The live readout -- sizes, speed, time left -- in mono, so the
+        # numbers hold still while they change instead of jittering sideways.
         self.detail_label = QLabel("Starting...")
-        self.detail_label.setObjectName("muted")
+        self.detail_label.setObjectName("mono")
         self.detail_label.setWordWrap(True)
         text_col.addWidget(self.detail_label)
         text_col.addStretch(1)
@@ -95,7 +96,7 @@ class DownloadCard(_PaintedCard):
 
         btn_col = QVBoxLayout()
         btn_col.setSpacing(6)
-        self.pause_btn = QPushButton("Pause")
+        self.pause_btn = Button("Pause")
         self.pause_btn.setObjectName("historyPlain")
         self.pause_btn.setCursor(Qt.PointingHandCursor)
         self.pause_btn.clicked.connect(self._handle_pause_toggle)
@@ -104,13 +105,13 @@ class DownloadCard(_PaintedCard):
         # Hidden until a failure -- a stuck/failed download's only way
         # forward besides dismissing it entirely (Chrome's own downloads
         # bar has the same "Retry" affordance on a failed item).
-        self.retry_btn = QPushButton("Retry")
+        self.retry_btn = Button("Retry")
         self.retry_btn.setObjectName("historyPlain")
         self.retry_btn.setCursor(Qt.PointingHandCursor)
         self.retry_btn.clicked.connect(self._handle_retry)
         self.retry_btn.setVisible(False)
         btn_col.addWidget(self.retry_btn)
-        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn = Button("Cancel")
         self.cancel_btn.setObjectName("historyPlain")
         self.cancel_btn.setCursor(Qt.PointingHandCursor)
         self.cancel_btn.clicked.connect(self._handle_cancel)
@@ -120,11 +121,12 @@ class DownloadCard(_PaintedCard):
         root.addLayout(top)
 
         bar_row = QHBoxLayout()
-        bar_row.setSpacing(8)
+        bar_row.setSpacing(10)
         self.progress_bar = _make_bar(dark_mode)
         bar_row.addWidget(self.progress_bar, 1)
         self.pct_label = QLabel("0%")
-        self.pct_label.setFixedWidth(42)
+        self.pct_label.setObjectName("mono")
+        self.pct_label.setFixedWidth(44)
         self.pct_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         bar_row.addWidget(self.pct_label)
         root.addLayout(bar_row)
@@ -134,15 +136,11 @@ class DownloadCard(_PaintedCard):
 
     # ------------------------------------------------------------ content ---
     def set_thumbnail(self, pixmap):
+        # RoundedImage covers its 16:9 box and crops the overflow evenly, so
+        # a 4:3 source (YouTube serves those for some older uploads) fills
+        # the tile instead of being letterboxed inside it.
         if pixmap is not None and not pixmap.isNull():
-            # KeepAspectRatioByExpanding + crop keeps the tile exactly 16:9
-            # even when the source thumbnail isn't (YouTube serves 4:3 for
-            # some older uploads), instead of letterboxing it inside the box.
-            scaled = pixmap.scaled(THUMB_W, THUMB_H, Qt.KeepAspectRatioByExpanding,
-                                    Qt.SmoothTransformation)
-            x = max(0, (scaled.width() - THUMB_W) // 2)
-            y = max(0, (scaled.height() - THUMB_H) // 2)
-            self.thumb_label.setPixmap(scaled.copy(x, y, THUMB_W, THUMB_H))
+            self.thumb_label.setPixmap(pixmap)
             self.thumb_label.setText("")
         else:
             self.thumb_label.setPixmap(QPixmap())
@@ -150,9 +148,6 @@ class DownloadCard(_PaintedCard):
 
     def set_title(self, text):
         self.title_label.setText(text)
-
-    def set_meta(self, text):
-        self.meta_label.setText(text)
 
     def set_playable(self, playable):
         """Called once a real, openable file exists on disk for this job --
@@ -162,6 +157,25 @@ class DownloadCard(_PaintedCard):
         self._playable = playable
         self.play_btn.setVisible(playable)
 
+    # ------------------------------------------------------------ waiting ---
+    def set_waiting(self, position):
+        """In line behind the running downloads (Settings > Simultaneous
+        downloads). Pause means nothing for a download that hasn't started,
+        so it is hidden; Cancel still takes it out of line."""
+        self._waiting = True
+        self.progress_bar.set_animating(False)
+        self.detail_label.setText(
+            "Waiting for a free slot  ·  next up" if position == 1
+            else f"Waiting for a free slot  ·  #{position} in line")
+        self.pause_btn.setVisible(False)
+
+    def set_started(self):
+        if not getattr(self, "_waiting", False):
+            return
+        self._waiting = False
+        self.detail_label.setText("Starting...")
+        self.pause_btn.setVisible(self._on_pause_toggle is not None)
+
     # ----------------------------------------------------------- progress ---
     def set_progress(self, pct, detail):
         self.progress_bar.setValue(int(max(0.0, min(100.0, pct))))
@@ -170,18 +184,59 @@ class DownloadCard(_PaintedCard):
         if detail:
             self.detail_label.setText(detail)
 
-    def set_complete(self, text="✓ Completed"):
+    def _set_detail_state(self, state):
+        """"done" / "error" / "" -- the readout's colour, via the stylesheet."""
+        self.detail_label.setProperty("state", state)
+        self.detail_label.style().unpolish(self.detail_label)
+        self.detail_label.style().polish(self.detail_label)
+
+    def _flash(self, color):
+        """A soft ring of `color` round the card that fades over a second --
+        the moment a download finishes (or fails) is worth a glance."""
+        from .. import motion
+        self._ring_color = QColor(color)
+        motion.tween(self, 1.0, 0.0, 1100, self._set_ring)
+
+    def _set_ring(self, v):
+        self._ring = v
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        ring = getattr(self, "_ring", 0.0)
+        if ring > 0.01:
+            from PySide6.QtCore import QRectF
+            from PySide6.QtGui import QPainter, QPen
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -4.5)
+            for width, alpha in ((5.0, 0.10), (2.5, 0.22), (1.2, 0.55)):
+                c = QColor(self._ring_color)
+                c.setAlphaF(alpha * ring)
+                p.setPen(QPen(c, width))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(r, 15, 15)
+            p.end()
+
+    def set_complete(self, text="Completed"):
+        if not self.progress_bar._complete:
+            self._flash("#34d399")
         self.progress_bar.setValue(100)
         self.progress_bar.set_complete(True)
         self.pct_label.setText("100%")
-        self.detail_label.setText(text)
+        self.detail_label.setText(text.replace("✓", "").strip() or "Completed")
+        self._set_detail_state("done")
         self.cancel_btn.setVisible(False)
         self.pause_btn.setVisible(False)
         self.retry_btn.setVisible(False)
 
     def set_failed(self, text):
+        if not text.lower().startswith("cancel"):
+            self._flash("#ff6b6b")
         self.progress_bar.set_animating(False)
         self.detail_label.setText(text)
+        # Cancelled is not an error; only a real failure turns the line red.
+        self._set_detail_state("" if text.lower().startswith("cancel") else "error")
         self.cancel_btn.setText("Dismiss")
         self.cancel_btn.setEnabled(True)
         self.pause_btn.setVisible(False)
@@ -198,6 +253,7 @@ class DownloadCard(_PaintedCard):
         self.progress_bar.set_animating(True)
         self.pct_label.setText("0%")
         self.detail_label.setText("Retrying...")
+        self._set_detail_state("")
         self.cancel_btn.setText("Cancel")
         self.cancel_btn.setEnabled(True)
         # Undo set_failed()'s raw rewiring of this signal (Dismiss ->
@@ -213,15 +269,17 @@ class DownloadCard(_PaintedCard):
         self._restyle_overlay_icons()
 
     def _restyle_overlay_icons(self):
-        self.play_btn.setIcon(_play_icon(self._icon_color))
+        # Always a light glyph on a dark disc: it sits on the thumbnail, not
+        # on the theme's glass, so it follows the picture rather than the theme.
+        self.play_btn.setIcon(_play_icon("#ffffff"))
         self.play_btn.setIconSize(self.play_btn.size() * 0.55)
         self.play_btn.setStyleSheet("""
             QPushButton {
-                background: rgba(0, 0, 0, 140);
-                border: none;
+                background: rgba(8, 10, 14, 150);
+                border: 1px solid rgba(255, 255, 255, 60);
                 border-radius: 15px;
             }
-            QPushButton:hover { background: rgba(0, 0, 0, 190); }
+            QPushButton:hover { background: rgba(8, 10, 14, 200); border-color: rgba(255, 255, 255, 110); }
         """)
         self._update_pause_icon()
 
@@ -256,7 +314,7 @@ class DownloadCard(_PaintedCard):
 def _bar_colors(dark_mode):
     from .. import theme
     t = theme.tokens(dark_mode=dark_mode)
-    track = QColor(255, 255, 255, 26) if dark_mode else QColor(0, 0, 0, 26)
+    track = QColor(255, 255, 255, 20) if dark_mode else QColor(15, 23, 42, 20)
     return track, t["progress"], t["success"]
 
 

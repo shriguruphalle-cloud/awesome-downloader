@@ -18,7 +18,13 @@ The following components are redistributed with the application.
 | [PySideSix-Frameless-Window](https://github.com/zhiyiYo/PyQt-Frameless-Window) | 0.8.2 | LGPL v3 | Yes (inside the executable) |
 | [pywin32](https://github.com/mhammond/pywin32) | 312 | PSF | Yes (inside the executable) |
 | [Inter](https://rsms.me/inter/) typeface | variable | SIL Open Font License 1.1 | Yes (`ui_qt/fonts/InterVariable.ttf`) |
+| [Instrument Serif](https://github.com/Instrument/instrument-serif) typeface (regular, italic) | Latin subset, woff2 (and the same files unpacked to TrueType, unmodified, for Qt) | SIL Open Font License 1.1 | Yes (`ui_qt/browser_assets/home/fonts/`, `ui_qt/fonts/InstrumentSerif-*.ttf`) |
+| [Archivo](https://github.com/Omnibus-Type/Archivo) typeface (variable 400–700) | Latin subset, woff2 | SIL Open Font License 1.1 | Yes (`ui_qt/browser_assets/home/fonts/`) |
+| [IBM Plex Mono](https://github.com/IBM/plex) typeface (400, 500) | Latin subset, woff2 | SIL Open Font License 1.1 | Yes (`ui_qt/browser_assets/home/fonts/`) |
 | [Python](https://www.python.org/) | 3.12 | PSF License | Yes (runtime, via PyInstaller) |
+| [AdGuard AdBlocker](https://github.com/AdguardTeam/AdguardBrowserExtension) (Chrome MV3 build) | 5.5.2.3 | **GPL v3** | Yes (`_internal/adguard/`, unmodified) |
+| [Microsoft Edge WebView2 SDK](https://learn.microsoft.com/microsoft-edge/webview2/) (`Microsoft.Web.WebView2.Core.dll`, `WebView2Loader.dll`) | 1.0.3856.49 | BSD 3-Clause (Microsoft) | Yes (`_internal/webview2/`) |
+| [Python.NET](https://github.com/pythonnet/pythonnet) (pythonnet, clr_loader) | 3.1.0 / 0.3.1 | MIT | Yes (inside the executable) |
 
 ## Obtaining the source
 
@@ -27,6 +33,17 @@ source is available from [ffmpeg.org](https://ffmpeg.org/download.html), and
 the source for the exact bundled build from
 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/); FFmpeg is downloaded
 unmodified at build time by `build_exe.bat` and is not patched here.
+
+AdGuard AdBlocker is the unmodified official Chrome MV3 release,
+`chrome-mv3.zip` from
+[its GitHub releases](https://github.com/AdguardTeam/AdguardBrowserExtension/releases/tag/v5.5.2.3),
+downloaded at build time by `build_vendor.py`. Its complete source is at
+[github.com/AdguardTeam/AdguardBrowserExtension](https://github.com/AdguardTeam/AdguardBrowserExtension)
+(tag `v5.5.2.3`). It runs as a browser extension inside the Browser tab; the
+app only sends it the same messages its own settings page sends.
+
+The Browser tab's engine, Microsoft Edge WebView2, is part of Windows 10 and
+11 and is not redistributed; only the SDK files that load it are.
 
 ## LGPL relinking (Qt / PySide6)
 

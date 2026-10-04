@@ -120,6 +120,22 @@ def apply_frosted_glass(window, dark_mode=True):
     return effect
 
 
+def remove_frosted_glass(window):
+    """Turns the acrylic blur off again -- Settings > Appearance > Backdrop
+    moving away from "desktop". The painted backdrops fill every pixel, so
+    all this has to undo is DWM's own accent and blur region."""
+    if not IS_WINDOWS or window is None:
+        return
+    try:
+        effect = WindowsWindowEffect(window)
+        handle = window.winId()
+        effect.removeBackgroundEffect(handle)
+        effect.disableBlurBehindWindow(handle)
+        _apply_dwm_rounded_corners(handle, _should_round(window))
+    except Exception:
+        pass
+
+
 def set_rounded_corners(window, rounded):
     """Rounds the window's corners, or squares them off.
 

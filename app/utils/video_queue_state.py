@@ -23,7 +23,10 @@ STATE_PATH = os.path.join(config.APPDATA_DIR, "queued_links.json")
 
 # Everything a card needs to come back looking and behaving as it did.
 FIELDS = ("url", "mode", "height", "container", "bitrate", "time_range",
-          "title", "meta", "duration", "is_image", "thumbnail_url", "heights")
+          "title", "meta", "duration", "is_image", "thumbnail_url", "heights",
+          # A card that came from a playlist listing offers "Best" plus the
+          # standard ladder rather than heights it has actually seen.
+          "ladder")
 
 
 def to_entry(payload, heights=None):

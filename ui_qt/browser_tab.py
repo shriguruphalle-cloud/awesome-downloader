@@ -1,1205 +1,570 @@
-"""Browser tab: a real embedded Chromium (multiple QWebEngineView tabs) for
-downloading videos/files directly off the web without leaving the app --
-paste a link, watch a video, or hit the floating logo button to send the
-current page to the Video tab's own fetch/download pipeline. Kept in its
-own module (separate from video_tab.py/main_window.py) since it owns a
-large, self-contained subsystem: the persistent browser profile, ad-block
-request interception, and the JS-injected overlay button + its QWebChannel
-bridge back into Python.
+"""Browser tab: a real browser inside the app, running on Microsoft Edge
+WebView2 (see webview2.py for why it moved off Qt WebEngine: H.264).
 
-No VPN here -- dropped from the original ask (real server infra, ongoing
-cost, no-logs/jurisdiction concerns, out of scope for a downloader app).
+What it does beyond showing pages:
+  * the toolbar's ember Download button, and the floating one a page with a
+    video gets, send the page to the Video tab's downloader;
+  * files a page downloads are the engine's own downloads (so they carry the
+    page's session), shown as cards in the Download tab with pause, resume
+    and cancel; a .torrent offers itself to the Torrent tab;
+  * magnet links go straight to the Torrent tab;
+  * AdGuard runs inside it (browser_engine.py), with its blocked count on
+    the shield and a panel for "allow this site" / "pause everywhere";
+  * whatever plays in any tab shows in a Now Playing control;
+  * tabs left in the background for ten minutes go to sleep, the tabs that
+    were open come back next launch, and private tabs keep nothing.
+
+Engine start is lazy: nothing heavier than this widget exists until the
+Browser tab is first shown (or a download asks for its sign-in cookies).
 """
-import base64
-import math
+import ctypes
 import os
 import re
-import threading
+import time
 import webbrowser
+from urllib.parse import urlparse
 
-from PySide6.QtCore import (
-    QFile, QIODevice, QObject, QPoint, QPointF, QRectF, QSize, QStringListModel, QTimer, QUrl,
-    Qt, Signal, Slot,
-)
-from PySide6.QtGui import (
-    QAction, QColor, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut,
-)
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QStringListModel, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QCursor, QDesktopServices, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
-    QCompleter, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMenu, QMessageBox, QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QCompleter, QHBoxLayout, QLabel, QMenu, QPushButton, QStackedWidget,
+    QVBoxLayout, QWidget, QWidgetAction,
 )
-from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineCore import (
-    QWebEngineContextMenuRequest, QWebEngineDownloadRequest, QWebEngineNewWindowRequest,
-    QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineSettings,
-    QWebEngineUrlRequestInterceptor,
-)
-from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from app import config
-from app.core import adblock_updater, downloader, favicon
 from app.logging_setup import get_logger
 from app.utils import browser_data, download_history, formatting, settings as settings_store
 
-from . import theme
-from .browser_home import BrowserHomePage, _pil_to_pixmap_rgba
+from . import browser_engine, browser_scripts, motion, palettes, theme, webview2
+from .browser_chrome import (
+    ActionButton, AddressBar, AdGuardPanel, BookmarkPopup, BookmarksBar, BookmarksPanel, ChromeButton,
+    EngineMissing, LoadBar, NowPlaying, TabPill, TabStrip, favicons, icon, style_menu,
+)
+from .browser_home import HomeView
+from .widgets.toast import show_toast
 
 logger = get_logger("browser_tab")
 
-_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_assets")
-_ADBLOCK_LIST_PATH = os.path.join(_ASSETS_DIR, "adblock_domains.txt")
-_OVERLAY_LOGO_PATH = os.path.join(_ASSETS_DIR, "overlay_logo.png")
+WEBVIEW2_PAGE = "https://developer.microsoft.com/microsoft-edge/webview2/"
+_SCHEME_RE = re.compile(r"^(https?|file|about|chrome-extension|edge|view-source):", re.I)
+_HOST_RE = re.compile(r"^[^\s/]+\.[^\s/.]{2,}(:\d+)?(/\S*)?$")
+_IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?(/\S*)?$")
 
-# Loaded once per process (44k+ lines) rather than once per BrowserTab --
-# there's only ever one instance in practice, but this also means a second
-# instance (there isn't one) wouldn't re-parse the file.
-_adblock_domains = None
+VK_CONTROL, VK_SHIFT, VK_MENU = 0x11, 0x10, 0x12
+VK_TAB, VK_ESCAPE, VK_PRIOR, VK_NEXT, VK_HOME = 0x09, 0x1B, 0x21, 0x22, 0x24
+VK_F4, VK_F6 = 0x73, 0x75
 
 
-def _load_adblock_domains():
-    """Unions the bundled snapshot with whatever adblock_updater.py's
-    "Refresh ad-block list" has cached in APPDATA_DIR (if anything -- a
-    fresh install has nothing there yet and just gets the bundled list, no
-    different from before). Never reloaded mid-process: a refresh only
-    takes effect on the next restart, matching how the yt-dlp update
-    already works, and for the same reason -- keeping "what's currently
-    blocking requests" a single stable snapshot for the life of the
-    process, not something that can change out from under an open tab."""
-    global _adblock_domains
-    if _adblock_domains is not None:
-        return _adblock_domains
-    domains = set()
+def normalize_address(text):
+    """Address-bar text -> a URL: anything with a scheme as it is, a bare
+    host (has a dot, no spaces) as https, localhost/IPs as http, anything
+    else as a search with the chosen engine."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if _SCHEME_RE.match(text):
+        return text
+    if text.lower().startswith("localhost") or _IP_RE.match(text):
+        return "http://" + text
+    if _HOST_RE.match(text):
+        return "https://" + text
+    return browser_data.search_url(text)
+
+
+def _host(url):
     try:
-        with open(_ADBLOCK_LIST_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    domains.add(line)
-    except OSError:
-        logger.exception("Could not load ad-block domain list from %s", _ADBLOCK_LIST_PATH)
-    try:
-        with open(adblock_updater.EXTRA_DOMAINS_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    domains.add(line)
-    except OSError:
-        pass  # nothing refreshed yet, or refresh_domain_list() has never run -- fine, bundled list stands alone
-    _adblock_domains = domains
-    return domains
-
-
-class _AdBlockInterceptor(QWebEngineUrlRequestInterceptor):
-    """Blocks sub-resource requests (scripts, images, iframes, XHR -- not
-    the page navigation itself) whose host matches an EasyList domain rule
-    or any subdomain of one. `||domain^` blocks the domain and everything
-    under it, so a plain suffix check against each label of the host
-    reproduces that rule without needing a trie for a set this size.
-
-    Shared across every tab (one interceptor on the one shared profile) --
-    per-site disabling is why this re-reads the disabled-hosts set on
-    every request rather than caching it at construction: a toggle in one
-    tab needs to take effect immediately for requests already in flight
-    from any other tab on the same site."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._domains = _load_adblock_domains()
-        self.enabled = True
-
-    def interceptRequest(self, info):
-        if not self.enabled:
-            return
-        if info.resourceType() == info.ResourceType.ResourceTypeMainFrame:
-            return  # never block an actual page the user navigated to
-        page_host = info.firstPartyUrl().host().lower()
-        if page_host and page_host in browser_data.load_adblock_disabled_hosts():
-            return
-        host = info.requestUrl().host().lower()
-        if not host:
-            return
-        labels = host.split(".")
-        for i in range(len(labels) - 1):
-            if ".".join(labels[i:]) in self._domains:
-                info.block(True)
-                return
-
-
-class _Bridge(QObject):
-    """JS-to-Python callback target for the injected overlay button and the
-    video-playback-fallback banner. Registered on every tab's QWebChannel
-    as `bridge`. One shared instance -- it carries no per-tab state, just
-    relays whichever URL called it."""
-    urlReceived = Signal(str)
-    openSystemBrowserRequested = Signal(str)
-
-    @Slot(str)
-    def sendToVideoTab(self, url):
-        self.urlReceived.emit(url)
-
-    @Slot(str)
-    def openInSystemBrowser(self, url):
-        self.openSystemBrowserRequested.emit(url)
-
-
-_qwebchannel_js_cache = None
-
-
-def _qwebchannel_js():
-    """Qt ships qwebchannel.js as a compiled-in Qt resource (available the
-    moment QtWebChannel is imported, no loose file involved). Read directly
-    via QFile rather than a page-side <script src qrc:///...> fetch -- the
-    fetch approach requires setting .src on a <script> element, which sites
-    with a strict Trusted Types CSP (YouTube included) refuse as an
-    untrusted sink."""
-    global _qwebchannel_js_cache
-    if _qwebchannel_js_cache is not None:
-        return _qwebchannel_js_cache
-    f = QFile(":/qtwebchannel/qwebchannel.js")
-    if f.open(QIODevice.OpenModeFlag.ReadOnly | QIODevice.OpenModeFlag.Text):
-        _qwebchannel_js_cache = bytes(f.readAll()).decode("utf-8")
-        f.close()
-    else:
-        logger.error("Could not open the bundled qwebchannel.js Qt resource")
-        _qwebchannel_js_cache = ""
-    return _qwebchannel_js_cache
-
-
-def _overlay_button_script(logo_data_uri):
-    # Fixed bottom-right position per spec -- not per-video DOM detection.
-    # Re-injected on every DocumentReady, so it survives full navigations;
-    # `if (window.__adlOverlayInstalled) return;` guards against a second
-    # copy appearing on SPA soft-navigations that re-fire DocumentReady.
-    return f"""
-(function() {{
-    if (window.__adlOverlayInstalled) return;
-    window.__adlOverlayInstalled = true;
-
-    function install() {{
-        var btn = document.createElement('button');
-        btn.id = '__adl_overlay_btn';
-        btn.title = 'Download with Awesome Downloader';
-        // Built via DOM methods, not innerHTML -- sites with a Trusted
-        // Types CSP (YouTube included) throw on any innerHTML string
-        // assignment ("This document requires 'TrustedHTML' assignment"),
-        // which silently killed the whole script before this fix.
-        var img = document.createElement('img');
-        img.src = '{logo_data_uri}';
-        img.width = 48;
-        img.height = 48;
-        img.style.display = 'block';
-        img.style.pointerEvents = 'none';
-        // The artwork itself is already a self-contained circular badge
-        // (dark disc + neon ring) -- a solid-color circle drawn *behind* it
-        // just doubled up as an odd-looking ring-in-a-ring. This drop-shadow
-        // is what keeps it legible on light-background pages instead.
-        img.style.filter = 'drop-shadow(0 2px 6px rgba(0,0,0,0.45))';
-        btn.appendChild(img);
-        // Up and to the left of the bottom-right corner, and ~20% bigger
-        // than the original 56px -- reported directly as overlapping the
-        // page's own video-settings/fullscreen controls, which cluster
-        // tight in that exact corner.
-        btn.style.cssText = [
-            'position:fixed', 'right:64px', 'bottom:64px', 'z-index:2147483647',
-            'width:68px', 'height:68px', 'border-radius:50%', 'border:none',
-            'background:transparent',
-            'display:flex', 'align-items:center', 'justify-content:center',
-            'cursor:pointer', 'padding:0', 'opacity:0.92',
-            'transition:opacity 0.15s, transform 0.15s',
-        ].join(';');
-        // The extra padding around the icon is a real click target, not
-        // decoration -- reported directly as too easy to miss-click right
-        // next to a video's own on-page controls in the same corner.
-        btn.onmouseenter = function() {{ btn.style.opacity = '1'; btn.style.transform = 'scale(1.06)'; }};
-        btn.onmouseleave = function() {{ btn.style.opacity = '0.92'; btn.style.transform = 'scale(1)'; }};
-        btn.onclick = function(e) {{
-            e.preventDefault();
-            e.stopPropagation();
-            if (window.__adlBridge) {{
-                window.__adlBridge.sendToVideoTab(window.location.href);
-            }}
-        }};
-        (document.body || document.documentElement).appendChild(btn);
-    }}
-
-    // QWebChannel itself is injected as a separate DocumentCreation-time
-    // script (see _qwebchannel_lib_script()) rather than pulled in here via
-    // a dynamic <script src>: on Trusted-Types sites (YouTube included)
-    // setting .src on a script element is itself a blocked sink, same as
-    // the innerHTML problem above. By DocumentReady time (when this script
-    // runs) the QWebChannel class is already a real global.
-    new QWebChannel(qt.webChannelTransport, function(channel) {{
-        window.__adlBridge = channel.objects.bridge;
-    }});
-
-    if (document.body) install();
-    else document.addEventListener('DOMContentLoaded', install);
-}})();
-"""
-
-
-# Cosmetic hiding on top of the domain-level network blocking above: the
-# interceptor stops third-party ad *networks*, but plenty of ads (YouTube's
-# in-player overlay/companion ads especially) are served from the same
-# googlevideo.com/youtube.com domains as real video, so a domain block would
-# have to choose between blocking ads and blocking playback. These selectors
-# instead just hide the known ad-container elements after the fact -- a
-# curated, conservative list (well-known class/id patterns), not an attempt
-# at full EasyList cosmetic-rule parsing.
-_ADBLOCK_CSS = """
-.ad, .ads, .advert, .advertisement, .adsbygoogle, ins.adsbygoogle,
-[id^="google_ads"], [id*="google_ads_iframe"], [class*="-ad-container"],
-[class*="ad-banner"], [id*="ad-banner"], .ytp-ad-module, .ytp-ad-overlay-container,
-.video-ads, .ytp-ad-player-overlay, #player-ads, ytd-ad-slot-renderer,
-ytd-display-ad-renderer, ytd-promoted-sparkles-web-renderer,
-ytd-promoted-video-renderer
-{ display: none !important; }
-"""
-
-
-def _adblock_css_script():
-    return f"""
-(function() {{
-    if (window.__adlCssInstalled) return;
-    window.__adlCssInstalled = true;
-    function install() {{
-        var style = document.createElement('style');
-        style.id = '__adl_adblock_css';
-        // textContent, not innerHTML -- a plain text sink, unaffected by
-        // Trusted-Types-CSP sites the way the button injection was.
-        style.textContent = {_ADBLOCK_CSS!r};
-        (document.head || document.documentElement).appendChild(style);
-    }}
-    if (document.head || document.body) install();
-    else document.addEventListener('DOMContentLoaded', install);
-}})();
-"""
-
-
-def _video_fallback_script():
-    """QtWebEngine's bundled Chromium has no H.264/AAC decoder (a licensing
-    exclusion, confirmed directly against real playback failures) -- there's
-    no fixing that from inside this embedded browser. This offers a one-click
-    way out instead: hand the exact same URL to the user's actual default
-    browser, which has full codec support already.
-
-    Two separate detection paths, not just one -- checked directly against a
-    real previously-failing PornHub URL: that site's own player never even
-    assigns the <video> a src once it decides (client-side) the codec isn't
-    supported, so readyState sits at 0 and currentSrc stays empty forever --
-    no 'error' event ever fires, only a permanently blank player. The error
-    listener alone would have caught nothing there. The stall watcher (a
-    <video> that exists but never advances past readyState 0 for several
-    seconds) is what actually catches that real-world case; the error
-    listener stays as the fast path for sites that *do* attempt and fail
-    outright."""
-    return """
-(function() {
-    if (window.__adlVideoFallbackInstalled) return;
-    window.__adlVideoFallbackInstalled = true;
-    var banner = null;
-
-    function hideBanner() {
-        if (banner && banner.parentNode) banner.parentNode.removeChild(banner);
-        banner = null;
-    }
-
-    function showBanner() {
-        if (banner) return;
-        banner = document.createElement('div');
-        banner.id = '__adl_video_fallback_banner';
-        banner.style.cssText = [
-            'position:fixed', 'top:14px', 'left:50%', 'transform:translateX(-50%)',
-            'z-index:2147483647', 'background:#1c1c1e', 'color:#fff',
-            'padding:10px 12px 10px 16px', 'border-radius:10px',
-            'font:13px -apple-system,Segoe UI,Arial,sans-serif',
-            'display:flex', 'align-items:center', 'gap:10px',
-            'box-shadow:0 4px 18px rgba(0,0,0,0.45)',
-        ].join(';');
-
-        var text = document.createElement('span');
-        text.textContent = "This video didn't load here.";
-        banner.appendChild(text);
-
-        var openBtn = document.createElement('button');
-        openBtn.textContent = 'Open in default browser';
-        openBtn.style.cssText = [
-            'background:#0A84FF', 'color:#fff', 'border:none', 'border-radius:6px',
-            'padding:6px 10px', 'cursor:pointer', 'font:inherit', 'white-space:nowrap',
-        ].join(';');
-        openBtn.onclick = function() {
-            if (window.__adlBridge) window.__adlBridge.openInSystemBrowser(window.location.href);
-            hideBanner();
-        };
-        banner.appendChild(openBtn);
-
-        var closeBtn = document.createElement('button');
-        closeBtn.textContent = '\\u00d7';
-        closeBtn.title = 'Dismiss';
-        closeBtn.style.cssText = [
-            'background:transparent', 'color:#999', 'border:none', 'cursor:pointer',
-            'font-size:18px', 'line-height:1', 'padding:0 2px',
-        ].join(';');
-        closeBtn.onclick = hideBanner;
-        banner.appendChild(closeBtn);
-
-        (document.body || document.documentElement).appendChild(banner);
-    }
-
-    // 'error' on a <video>/<audio> element doesn't bubble -- capture phase
-    // is the only way to catch it via a single document-level listener
-    // instead of having to individually instrument every <video> tag a
-    // page might add dynamically.
-    document.addEventListener('error', function(e) {
-        var el = e.target;
-        if (el && el.tagName === 'VIDEO') {
-            showBanner();
-        }
-    }, true);
-
-    // Stall watcher: catches the sites where playback never even attempts
-    // to start (see the docstring on this function for the real case that
-    // motivated it) -- a WeakSet so re-scanning the page never double-
-    // instruments the same element.
-    var watched = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
-
-    function watchVideo(v) {
-        if (!watched || watched.has(v)) return;
-        watched.add(v);
-        var stalledTicks = 0;
-        var totalTicks = 0;
-        var interval = setInterval(function() {
-            totalTicks++;
-            if (!document.body || !document.body.contains(v) || banner) {
-                clearInterval(interval);
-                return;
-            }
-            if (v.readyState < 2 && v.currentTime === 0) {
-                stalledTicks++;
-            } else {
-                // Real progress -- this video is fine, stop watching it.
-                clearInterval(interval);
-                return;
-            }
-            if (stalledTicks >= 5) {  // ~5s with zero progress
-                showBanner();
-                clearInterval(interval);
-            } else if (totalTicks >= 15) {  // give up watching after ~15s either way
-                clearInterval(interval);
-            }
-        }, 1000);
-    }
-
-    function scanForVideos() {
-        var videos = document.querySelectorAll('video');
-        for (var i = 0; i < videos.length; i++) watchVideo(videos[i]);
-    }
-
-    function install() {
-        scanForVideos();
-        // Real players (PornHub/xHamster included) mount their <video>
-        // element via JS after the page's own initial load, not before --
-        // a one-time scan at DocumentReady would miss it entirely.
-        if (typeof MutationObserver !== 'undefined') {
-            new MutationObserver(scanForVideos).observe(
-                document.body || document.documentElement, {childList: true, subtree: true});
-        }
-    }
-    if (document.body) install();
-    else document.addEventListener('DOMContentLoaded', install);
-})();
-"""
-
-
-def _logo_data_uri():
-    try:
-        with open(_OVERLAY_LOGO_PATH, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("ascii")
-        return f"data:image/png;base64,{b64}"
-    except OSError:
-        logger.exception("Could not load overlay button logo from %s", _OVERLAY_LOGO_PATH)
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
         return ""
 
 
-_home_favicon_cache = {}
+def _title_for(url):
+    host = _host(url)
+    return host[4:] if host.startswith("www.") else (host or url)
 
 
-def _home_favicon_pixmap(size):
-    """The app's own logo, desaturated to grayscale, used as a tab's
-    favicon placeholder while it's showing the home page -- a real
-    favicon never gets fetched for a page that isn't a real site, and a
-    blank favicon slot there read as broken/unfinished. Cached per size
-    since every "New Tab" pill asks for the same pixmap."""
-    if size in _home_favicon_cache:
-        return _home_favicon_cache[size]
-    src = QPixmap(_OVERLAY_LOGO_PATH)
-    if src.isNull():
-        _home_favicon_cache[size] = None
-        return None
-    scaled = src.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-    img = scaled.toImage().convertToFormat(QImage.Format.Format_ARGB32)
-    for y in range(img.height()):
-        for x in range(img.width()):
-            c = img.pixelColor(x, y)
-            if c.alpha() == 0:
-                continue
-            gray = int(0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue())
-            c.setRed(gray)
-            c.setGreen(gray)
-            c.setBlue(gray)
-            img.setPixelColor(x, y, c)
-    result = QPixmap.fromImage(img)
-    _home_favicon_cache[size] = result
-    return result
+def _key_down(vk):
+    try:
+        return bool(ctypes.windll.user32.GetKeyState(vk) & 0x8000)
+    except Exception:   # noqa: BLE001
+        return False
 
 
-_URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
-_LOOKS_LIKE_HOST_RE = re.compile(r"^[^\s/]+\.[^\s/]{2,}(/.*)?$")
+def _unique_path(path):
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    n = 1
+    while os.path.exists(f"{base} ({n}){ext}"):
+        n += 1
+    return f"{base} ({n}){ext}"
 
 
-def _new_icon_painter(size):
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    return pixmap, painter
+_blocklist = None
 
 
-def _nav_icon(kind, color, size=18):
-    """Hand-drawn vector icons for the toolbar's nav/menu buttons -- not
-    Unicode glyphs (was "←"/"→"/"⟳"/"⌂"/"⋮" text).
-    Confirmed directly (rendered each glyph off-screen and counted actual
-    drawn pixels) that those glyphs paint only a handful of very faint
-    pixels in this font stack -- reported as "what are these buttons?",
-    four indistinguishable blank squares. A stroked vector shape always
-    covers a real, visible area regardless of what fonts are installed or
-    how a QSS font-size rule interacts with the app's font-fallback chain."""
-    pixmap, painter = _new_icon_painter(size)
-    c = QColor(color)
-    cx, cy = size / 2, size / 2
-    pen = QPen(c)
-    pen.setWidthF(max(1.6, size * 0.09))
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-
-    if kind in ("back", "forward"):
-        dx = size * 0.18
-        dy = size * 0.24
-        sign = -1 if kind == "back" else 1
-        path = QPainterPath()
-        path.moveTo(cx - sign * dx, cy - dy)
-        path.lineTo(cx + sign * dx, cy)
-        path.lineTo(cx - sign * dx, cy + dy)
-        painter.drawPath(path)
-    elif kind == "reload":
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        r = size * 0.28
-        rect = QRectF(cx - r, cy - r, r * 2, r * 2)
-        painter.drawArc(rect, 35 * 16, 280 * 16)
-        end_angle = math.radians(35 + 280)
-        ax = cx + r * math.cos(end_angle)
-        ay = cy - r * math.sin(end_angle)
-        head = size * 0.14
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(c)
-        arrow = QPainterPath()
-        arrow.moveTo(ax - head, ay - head * 0.3)
-        arrow.lineTo(ax + head * 0.7, ay + head * 0.5)
-        arrow.lineTo(ax - head * 0.5, ay + head)
-        arrow.closeSubpath()
-        painter.drawPath(arrow)
-    elif kind == "home":
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(c)
-        w, h = size * 0.5, size * 0.42
-        roof = QPainterPath()
-        roof.moveTo(cx, cy - h * 0.95)
-        roof.lineTo(cx - w * 0.62, cy - h * 0.15)
-        roof.lineTo(cx - w * 0.4, cy - h * 0.15)
-        roof.lineTo(cx - w * 0.4, cy + h * 0.55)
-        roof.lineTo(cx + w * 0.4, cy + h * 0.55)
-        roof.lineTo(cx + w * 0.4, cy - h * 0.15)
-        roof.lineTo(cx + w * 0.62, cy - h * 0.15)
-        roof.closeSubpath()
-        painter.drawPath(roof)
-    elif kind == "menu":
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(c)
-        r = max(1.3, size * 0.075)
-        for dy in (-size * 0.22, 0, size * 0.22):
-            painter.drawEllipse(QPointF(cx, cy + dy), r, r)
-    elif kind == "stop":
-        d = size * 0.22
-        painter.drawLine(QPointF(cx - d, cy - d), QPointF(cx + d, cy + d))
-        painter.drawLine(QPointF(cx + d, cy - d), QPointF(cx - d, cy + d))
-    elif kind == "zoom":
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        r = size * 0.24
-        lens_cx, lens_cy = cx - size * 0.06, cy - size * 0.06
-        painter.drawEllipse(QPointF(lens_cx, lens_cy), r, r)
-        handle_start = QPointF(lens_cx + r * 0.72, lens_cy + r * 0.72)
-        handle_end = QPointF(cx + size * 0.28, cy + size * 0.28)
-        painter.drawLine(handle_start, handle_end)
-    elif kind == "plus":
-        d = size * 0.26
-        painter.drawLine(QPointF(cx - d, cy), QPointF(cx + d, cy))
-        painter.drawLine(QPointF(cx, cy - d), QPointF(cx, cy + d))
-    elif kind in ("speaker", "mute"):
-        # Speaker cone (a small rect + triangle, filled) is the same shape
-        # for both -- only what's drawn to its right changes (sound-wave
-        # arcs vs. a crossed-out X), matching the standard mute/unmuted
-        # glyph pairing every browser uses.
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(c)
-        w, h = size * 0.16, size * 0.28
-        cone = QPainterPath()
-        cone.moveTo(cx - size * 0.32, cy - h / 2)
-        cone.lineTo(cx - size * 0.32 + w, cy - h / 2)
-        cone.lineTo(cx - size * 0.06, cy - size * 0.34)
-        cone.lineTo(cx - size * 0.06, cy + size * 0.34)
-        cone.lineTo(cx - size * 0.32 + w, cy + h / 2)
-        cone.lineTo(cx - size * 0.32, cy + h / 2)
-        cone.closeSubpath()
-        painter.drawPath(cone)
-
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        pen = QPen(c)
-        pen.setWidthF(max(1.4, size * 0.09))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        if kind == "speaker":
-            for r in (size * 0.16, size * 0.27):
-                rect = QRectF(cx + size * 0.04 - r, cy - r, r * 2, r * 2)
-                painter.drawArc(rect, -45 * 16, 90 * 16)
-        else:
-            d = size * 0.16
-            x0, y0 = cx + size * 0.12, cy - size * 0.18
-            painter.drawLine(QPointF(x0 - d, y0 - d), QPointF(x0 + d, y0 + d))
-            painter.drawLine(QPointF(x0 + d, y0 - d), QPointF(x0 - d, y0 + d))
-
-    painter.end()
-    return QIcon(pixmap)
+def private_blocklist():
+    """Ad and tracker domains for private tabs, where AdGuard can't run
+    (extensions are off in private mode): the list the Browser tab used
+    before AdGuard."""
+    global _blocklist
+    if _blocklist is None:
+        domains = set()
+        paths = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_assets", "adblock_domains.txt")]
+        for path in paths:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    domains.update(line.strip().lower() for line in f if line.strip())
+            except OSError:
+                pass
+        _blocklist = domains
+    return _blocklist
 
 
-def _star_icon(filled, color, size=20):
-    """5-pointed star, drawn as a real polygon -- replaces the "★"/
-    "☆" text glyphs used for the address-bar bookmark action, which
-    have the identical faint-glyph risk as the nav icons above."""
-    pixmap, painter = _new_icon_painter(size)
-    c = QColor(color)
-    cx, cy = size / 2, size / 2
-    outer = size * 0.46
-    inner = outer * 0.42
-    path = QPainterPath()
-    for i in range(10):
-        angle = math.radians(-90 + i * 36)
-        r = outer if i % 2 == 0 else inner
-        x, y = cx + r * math.cos(angle), cy + r * math.sin(angle)
-        if i == 0:
-            path.moveTo(x, y)
-        else:
-            path.lineTo(x, y)
-    path.closeSubpath()
-    if filled:
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(c)
-    else:
-        pen = QPen(c)
-        pen.setWidthF(max(1.3, size * 0.07))
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.drawPath(path)
-    painter.end()
-    return QIcon(pixmap)
+def blocked_host(host, domains):
+    """True if `host` or any parent domain of it is listed."""
+    labels = (host or "").lower().split(".")
+    return any(".".join(labels[i:]) in domains for i in range(len(labels) - 1))
 
 
-def _normalize_address(text):
-    """Address bar text -> a real URL. Anything that already has a scheme
-    is used as-is; anything shaped like a bare host (has a dot, no spaces)
-    gets https:// prepended; everything else is treated as a search query,
-    same as typing into any real browser's combined address/search bar."""
-    text = text.strip()
-    if not text:
-        return None
-    if _URL_RE.match(text):
-        return text
-    if _LOOKS_LIKE_HOST_RE.match(text) or text.startswith("localhost"):
-        return "https://" + text
-    return "https://duckduckgo.com/?q=" + QUrl.toPercentEncoding(text).data().decode("ascii")
+def _short_count(n):
+    return f"{n / 1000:.0f}k" if n >= 10000 else (f"{n / 1000:.1f}k" if n >= 1000 else str(n))
 
 
-_TAB_FAVICON_SIZE = 16
+class _Tab:
+    """One browser tab. Its page (a WebView2Widget) is created the first
+    time the tab is actually shown -- a tab opened in the background, or
+    restored from last session, costs nothing until then."""
+
+    def __init__(self, pill, private):
+        self.pill = pill
+        self.private = private
+        self.view = None
+        self.on_home = True
+        self.page_ahead = False      # Back from a tab's first page went home
+        self.url = ""
+        self.title = "New Tab"
+        self.icon = None
+        self.loading = False
+        self.progress = 0
+        self.audible = False
+        self.muted = False
+        self.pending_url = None
+        self.zoom = 1.0
+        self.media = None
+        self.media_at = 0.0
+        self.has_video = False
+        self.adguard = None
+        self.opener = None
+        self.hidden_since = time.monotonic()
 
 
-class _TabPill(QWidget):
-    """One entry in the tab strip -- favicon + title + close button, click
-    to switch. Real Chrome's own shape: top corners rounded, flat bottom
-    flush against the toolbar directly below it, no gap and no border --
-    the active tab's fill simply continues straight into the toolbar so
-    the two read as one connected surface, while inactive tabs stay flat
-    and nearly transparent until hovered. A stretch factor on each pill
-    (set where it's inserted into the strip's layout) lets tabs grow to
-    fill the available row width the way Chrome's own tabs do, rather
-    than sitting at a small fixed width with dead space beside them.
-    The close button only appears on hover or while active -- permanently
-    visible on every background tab reads as clutter once more than two
-    or three are open.
-    A plain QWidget (not a QPushButton) since it needs a child button of
-    its own (close) that a QPushButton can't cleanly host."""
+# ----------------------------------------------------- fullscreen exit ----
+class _FullscreenExit(QWidget):
+    """Chrome's exit control for a fullscreen video: touch the top edge of
+    the screen and a round button drops into view; click it to leave full
+    screen. A top-level window, because the page below is a native one."""
+
     clicked = Signal()
-    close_requested = Signal()
-    mute_toggled = Signal()
-    _favicon_ready = Signal(object)  # background-thread payload: a PIL Image
+    SIZE = 52
+    MARGIN = 10
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(32)
-        self.setMinimumWidth(90)
-        self.setMaximumWidth(168)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setMouseTracking(True)
-        self._hovered = False
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 0, 6, 0)
-        layout.setSpacing(6)
+    def __init__(self, owner):
+        super().__init__(owner, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Exit full screen (Esc)")
+        self.setFixedSize(self.SIZE + 2 * self.MARGIN, self.SIZE + 2 * self.MARGIN)
+        self._hover = False
+        self._anim = None
+        self._shown = False
 
-        self.favicon_label = QLabel()
-        self.favicon_label.setFixedSize(_TAB_FAVICON_SIZE, _TAB_FAVICON_SIZE)
-        # Explicit no-op style -- otherwise it inherits the pill's own
-        # unscoped `QWidget { border; border-radius }` rule (a plain QLabel
-        # is a QWidget too), showing a stray boxed outline around an empty
-        # favicon slot on the active tab.
-        self.favicon_label.setStyleSheet("border: none; background: transparent;")
-        layout.addWidget(self.favicon_label)
-
-        self.title_label = QLabel("New Tab")
-        layout.addWidget(self.title_label, 1)
-
-        # Hidden until the page actually produces sound (recentlyAudible),
-        # same as Chrome's own tab strip -- a permanently-visible speaker
-        # icon on every tab would just be noise.
-        self.mute_btn = QPushButton()
-        self.mute_btn.setFixedSize(22, 22)
-        self.mute_btn.setIconSize(QSize(13, 13))
-        self.mute_btn.setCursor(Qt.PointingHandCursor)
-        self.mute_btn.setVisible(False)
-        self.mute_btn.clicked.connect(self.mute_toggled.emit)
-        layout.addWidget(self.mute_btn)
-
-        # Icon, not a "×" glyph -- the same faint/invisible-glyph problem
-        # already hit (and fixed) on the toolbar buttons applies here too.
-        # Sized up from the original 16px -- reported as too small to
-        # comfortably click.
-        self.close_btn = QPushButton()
-        self.close_btn.setFixedSize(22, 22)
-        self.close_btn.setIconSize(QSize(12, 12))
-        self.close_btn.setCursor(Qt.PointingHandCursor)
-        self.close_btn.setToolTip("Close tab")
-        self.close_btn.setAccessibleName("Close tab")
-        self.close_btn.setVisible(False)
-        self.close_btn.clicked.connect(self.close_requested.emit)
-        layout.addWidget(self.close_btn)
-
-        self._checked = False
-        self._incognito = False
-        self._full_title = "New Tab"
-        self._current_favicon_url = None
-        self._favicon_ready.connect(self._apply_favicon)
-
-    def set_title(self, text):
-        self._full_title = text or "New Tab"
-        elided = self.title_label.fontMetrics().elidedText(
-            self._full_title, Qt.TextElideMode.ElideRight, 90)
-        self.title_label.setText(elided)
-        self.setToolTip(("Private -- " + self._full_title) if self._incognito else self._full_title)
-
-    def set_incognito(self, incognito):
-        """Visual marker so a private tab is never mistaken for a normal
-        one -- a real browser puts incognito in its own differently-themed
-        window; this app only has tabs, so a distinct dot (in the favicon
-        slot, where a real favicon never gets fetched for a private tab)
-        plus a permanent background tint is the closest equivalent."""
-        self._incognito = incognito
-        if incognito:
-            pixmap = QPixmap(_TAB_FAVICON_SIZE, _TAB_FAVICON_SIZE)
-            pixmap.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#9B7BFF"))
-            painter.drawEllipse(0, 0, _TAB_FAVICON_SIZE, _TAB_FAVICON_SIZE)
-            painter.end()
-            self.favicon_label.setPixmap(pixmap)
-        self.setToolTip(("Private -- " + self._full_title) if incognito else self._full_title)
-        self._restyle()
-
-    def set_url(self, url):
-        """Kicks off a background favicon fetch for this tab's current
-        page -- skipped entirely for a URL already fetched (every
-        urlChanged during a single page's own navigation would otherwise
-        refetch the same icon), and entirely for an incognito tab (its
-        favicon slot always shows the private-tab marker instead, set once
-        in set_incognito())."""
-        if self._incognito or not url or url == self._current_favicon_url:
+    def drop(self, screen_rect):
+        """Slides in from above the top edge of `screen_rect`."""
+        if self._shown:
             return
-        self._current_favicon_url = url
-        self.favicon_label.clear()
-        threading.Thread(target=self._fetch_favicon_thread, args=(url,), daemon=True).start()
+        self._shown = True
+        x = screen_rect.center().x() - self.width() // 2
+        top = screen_rect.top() + 6
+        self.move(x, top - self.height())
+        self.show()
+        self.raise_()
+        self._anim = motion.tween(self, top - self.height(), top, motion.MEDIUM,
+                                  lambda v: self.move(x, round(v)))
 
-    def show_home_state(self):
-        """Resets this pill to a fresh "New Tab" look -- title, favicon
-        (the app's own grayscale logo, not a blank slot), everything. Used
-        both when a tab is first created and whenever Back/Forward or the
-        Home button lands it back on the home page: without this, a tab
-        that had navigated away and come back via Back kept showing its
-        old page's title/favicon even though the home page was what was
-        actually on screen."""
-        self.set_title("New Tab")
-        self._current_favicon_url = None
-        if self._incognito:
+    def lift(self):
+        if not self._shown:
             return
-        pixmap = _home_favicon_pixmap(_TAB_FAVICON_SIZE)
-        if pixmap is not None:
-            self.favicon_label.setPixmap(pixmap)
-        else:
-            self.favicon_label.clear()
+        self._shown = False
+        y0, x = self.y(), self.x()
+        self._anim = motion.tween(self, y0, y0 - self.height() - 8, motion.MEDIUM,
+                                  lambda v: self.move(x, round(v)), self.hide)
 
-    def _fetch_favicon_thread(self, url):
-        img = favicon.get_favicon(url, size=_TAB_FAVICON_SIZE)
-        if img is not None:
-            self._favicon_ready.emit(img)
-
-    def set_audible(self, audible):
-        """Shows/hides the mute button -- only while the page is actually
-        producing sound, same as Chrome's own tab strip. Muted-but-silent
-        tabs (paused video, muted before playback started) don't need the
-        control visible; audible ones do."""
-        self._audible = audible
-        self.mute_btn.setVisible(audible or getattr(self, "_muted", False))
-        self._restyle_mute_icon()
-
-    def set_muted(self, muted):
-        self._muted = muted
-        self.mute_btn.setToolTip("Unmute tab" if muted else "Mute tab")
-        self.mute_btn.setAccessibleName("Unmute tab" if muted else "Mute tab")
-        self.mute_btn.setVisible(muted or getattr(self, "_audible", False))
-        self._restyle_mute_icon()
-
-    def _restyle_mute_icon(self):
-        t = getattr(self, "_t", None)
-        if not t:
-            return
-        color = t["text"] if self._checked else t["text_muted"]
-        self.mute_btn.setIcon(_nav_icon("mute" if getattr(self, "_muted", False) else "speaker", color, size=16))
-
-    def _apply_favicon(self, pil_image):
-        pixmap = _pil_to_pixmap_rgba(pil_image)
-        if pixmap is not None and not pixmap.isNull():
-            self.favicon_label.setPixmap(pixmap.scaled(
-                _TAB_FAVICON_SIZE, _TAB_FAVICON_SIZE,
-                Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-
-    def set_checked(self, checked):
-        self._checked = checked
-        self._restyle()
-
-    def apply_theme(self, t):
-        self._t = t
-        self._restyle()
-
-    def _update_close_visibility(self):
-        self.close_btn.setVisible(self._checked or self._hovered)
-
-    def _restyle(self):
-        t = getattr(self, "_t", None)
-        if not t:
-            return
-        # Fully rounded floating pill with a real gap on every side (the
-        # warm/Safari-esque direction) rather than Chrome's flat-bottomed
-        # flush shape -- the active pill sits raised off the strip with a
-        # soft shadow, inactive pills stay flat and nearly transparent
-        # until hovered. A private tab keeps a faint purple tint even when
-        # inactive -- the whole point of the marker is that it stays
-        # visible without needing to click into the tab first.
-        if self._checked:
-            bg = t["card_bg_solid"]
-        elif self._incognito:
-            bg = "rgba(155, 123, 255, 40)"
-        elif self._hovered:
-            bg = t["hover_overlay"]
-        else:
-            bg = "transparent"
-        fg = t["text"] if self._checked else t["text_muted"]
-        # Bold on every tab, not just the active one -- the site name is
-        # the one thing a tab exists to communicate, and the lighter
-        # inactive weight was reported as hard to read at this size.
-        weight = 700 if self._checked else 600
-        # A plain CSS border stands in for the "raised" shadow on the
-        # active pill -- a real QGraphicsDropShadowEffect forces Qt to
-        # composite this widget through an offscreen buffer on every
-        # tab-state change, which this project has already hit as a real
-        # DWM-Acrylic-desync trigger when it happens near a live
-        # QWebEngineView (see mica.py's own note on addWindowAnimation for
-        # the same underlying fragility). Reported directly as ghosting
-        # caption buttons and a window that goes fully invisible until the
-        # theme is toggled a few times -- removing the graphics effect
-        # here is the fix, not a cosmetic downgrade.
-        border = "rgba(255, 255, 255, 40)" if self._checked else "transparent"
-        self.setStyleSheet(f"""
-            QWidget {{
-                background: {bg};
-                border: 1px solid {border};
-                border-radius: 13px;
-            }}
-        """)
-        self.title_label.setStyleSheet(
-            f"color: {fg}; font-size: 11px; font-weight: {weight}; background: transparent; border: none;")
-        self.close_btn.setIcon(_nav_icon("stop", fg, size=12))
-        self.close_btn.setStyleSheet(f"""
-            QPushButton {{ background: transparent; border: none; border-radius: 11px; }}
-            QPushButton:hover {{ background: rgba(128,128,128,60); }}
-        """)
-        self.mute_btn.setStyleSheet(f"""
-            QPushButton {{ background: transparent; border: none; border-radius: 11px; }}
-            QPushButton:hover {{ background: rgba(128,128,128,60); }}
-        """)
-        self._restyle_mute_icon()
-        self._update_close_visibility()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
+    def is_down(self):
+        return self._shown
 
     def enterEvent(self, event):
-        self._hovered = True
-        self._restyle()
-        super().enterEvent(event)
+        self._hover = True
+        self.update()
 
     def leaveEvent(self, event):
-        self._hovered = False
-        self._restyle()
-        super().leaveEvent(event)
+        self._hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        m = self.MARGIN
+        r = QRectF(m, m, self.SIZE, self.SIZE)
+        for i in range(m, 0, -2):
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 6 * (m - i + 2) // 2))
+            p.drawEllipse(r.adjusted(-i + 2, -i + 4, i - 2, i))
+        p.setBrush(QColor(28, 34, 48, 235) if not self._hover else QColor(48, 58, 80, 245))
+        p.setPen(QPen(QColor(255, 255, 255, 60), 1))
+        p.drawEllipse(r)
+        pen = QPen(QColor(240, 244, 252), 2.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        c, d = r.center(), self.SIZE * 0.16
+        p.drawLine(QPointF(c.x() - d, c.y() - d), QPointF(c.x() + d, c.y() + d))
+        p.drawLine(QPointF(c.x() + d, c.y() - d), QPointF(c.x() - d, c.y() + d))
+        p.end()
 
 
+# ------------------------------------------------------------ downloads ----
+_INTERRUPT_REASONS = {
+    "FileNoSpace": "not enough disk space",
+    "FileAccessDenied": "the folder couldn't be written to",
+    "FileTooLarge": "the file is too large for this drive",
+    "FileNameTooLong": "the file name is too long",
+    "FileBlocked": "Windows blocked the file",
+    "FileFailed": "the file couldn't be written",
+    "NetworkFailed": "the network connection failed",
+    "NetworkTimeout": "the connection timed out",
+    "NetworkDisconnected": "the network disconnected",
+    "NetworkServerDown": "the server is down",
+    "ServerFailed": "the server failed",
+    "ServerBadContent": "the server sent a bad file",
+    "ServerUnauthorized": "the site needs you to sign in",
+    "ServerForbidden": "the site refused the download",
+    "ServerNoRange": "the server can't resume it",
+    "ServerCertificateProblem": "the site's certificate is invalid",
+    "DownloadProcessCrashed": "the download stopped unexpectedly",
+    "UserShutdown": "the app closed during the download",
+}
+
+
+class _NativeDownload(QObject):
+    """A file a page downloaded. The engine does the downloading (so the
+    page's cookies and session come along); this mirrors it onto a card in
+    the Download tab and drives pause, resume and cancel from there."""
+
+    def __init__(self, browser, op, path, host):
+        super().__init__(browser)
+        self.browser = browser
+        self.op = op
+        self.path = path
+        self.name = os.path.basename(path)
+        self.paused = False
+        self.cancelled = False
+        self.finished = False
+        self._samples = []
+        self._pct = 0.0
+        dt = browser.download_tab
+        self.job_id = dt.start_job(
+            self.name, f"From {host}" if host else "Browser download", None,
+            make_on_cancel=lambda _jid: self.cancel,
+            make_on_pause_toggle=lambda _jid: self.set_paused,
+            make_on_play=lambda _jid: self.play,
+            make_on_retry=lambda _jid: self.retry,
+        )
+        self._timer = QTimer(self)
+        self._timer.setInterval(400)
+        self._timer.timeout.connect(self._poll)
+        self._timer.start()
+
+    def cancel(self):
+        self.cancelled = True
+        try:
+            self.op.Cancel()
+        except Exception:   # noqa: BLE001
+            pass
+        self._poll()
+
+    def set_paused(self, paused):
+        self.paused = bool(paused)
+        try:
+            if paused:
+                self.op.Pause()
+            elif self.op.CanResume:
+                self.op.Resume()
+        except Exception:   # noqa: BLE001
+            logger.exception("Pause/resume failed")
+
+    def retry(self):
+        try:
+            if self.op.CanResume:
+                self.finished = False
+                self.browser.download_tab.reset_for_retry(self.job_id)
+                self.op.Resume()
+                self._timer.start()
+        except Exception:   # noqa: BLE001
+            logger.exception("Resume failed")
+
+    def play(self):
+        if self.path and os.path.exists(self.path):
+            os.startfile(self.path)
+
+    def _end(self):
+        self.finished = True
+        self._timer.stop()
+
+    def _poll(self):
+        dt = self.browser.download_tab
+        try:
+            state = str(self.op.State)
+            received = int(self.op.BytesReceived)
+            total = self.op.TotalBytesToReceive
+            total = int(total) if total is not None else 0
+        except Exception:   # noqa: BLE001 -- the operation is gone
+            self._end()
+            return
+        now = time.monotonic()
+        self._samples.append((now, received))
+        self._samples = [s for s in self._samples if now - s[0] <= 4.0]
+        t0, b0 = self._samples[0]
+        speed = (received - b0) / (now - t0) if now - t0 > 0.6 else 0.0
+        size = (f"{formatting.humanize_size(received)} / {formatting.humanize_size(total)}"
+                if total else formatting.humanize_size(received))
+        if total:
+            self._pct = received / total * 100
+        if state == "InProgress":
+            parts = [size]
+            if self.paused:
+                parts.insert(0, "Paused")
+            elif speed > 0:
+                parts.append(f"{formatting.humanize_size(speed)}/s")
+                if total:
+                    parts.append("ETA " + formatting.format_eta((total - received) / speed))
+            dt.update_progress(self.job_id, self._pct, "  •  ".join(parts))
+        elif state == "Interrupted":
+            reason = str(self.op.InterruptReason)
+            if self.cancelled or reason == "UserCanceled":
+                dt.mark_cancelled(self.job_id)
+                self._end()
+            elif self.paused or reason == "UserPaused":
+                dt.update_progress(self.job_id, self._pct, "Paused  •  " + size)
+            else:
+                pretty = _INTERRUPT_REASONS.get(reason) or re.sub(r"(?<!^)([A-Z])", r" \1", reason).lower()
+                dt.mark_failed(self.job_id, f"Failed: {pretty}")
+                self._end()
+        elif state == "Completed":
+            try:
+                self.path = str(self.op.ResultFilePath) or self.path
+            except Exception:   # noqa: BLE001
+                pass
+            dt.set_playable(self.job_id, True)
+            try:
+                size_bytes = os.path.getsize(self.path)
+            except OSError:
+                size_bytes = total or received
+            download_history.add_entry("file", self.name, self.path, os.path.dirname(self.path), size_bytes)
+            dt.mark_done(self.job_id, "✓ Completed")
+            self._end()
+            self.browser._download_finished(self)
+
+
+# -------------------------------------------------------------- the tab ----
 class BrowserTab(QWidget):
-    # Overlay button click, carrying the page URL to hand off to the Video
-    # tab's existing fetch/download flow.
+    # Page URL for the Video tab's own fetch and download.
     open_in_video_tab = Signal(str)
-    # A page's own video asked to go fullscreen (its Fullscreen API, e.g.
-    # YouTube's fullscreen button) -- MainWindow hides its own titlebar/tab
-    # island and resizes to fill the screen while this is True.
+    # A page's player went fullscreen: the window hides its own chrome.
     fullscreen_requested = Signal(bool)
-    _progress_sig = Signal(int, float, str)
-    _download_done_sig = Signal(int, str)
-    _download_error_sig = Signal(int, str)
-    # progress_hook runs on the download thread -- can't touch download_tab's
-    # widgets directly, same reason _progress_sig exists.
-    _playable_sig = Signal(int)
-    # adblock_updater.refresh_domain_list() runs on a background thread (real
-    # network call) -- same cross-thread-to-GUI marshaling reason as above.
-    _adblock_refresh_sig = Signal(bool, str)
+    # A magnet link was opened; a downloaded .torrent was offered.
+    magnet_requested = Signal(str)
+    torrent_file_requested = Signal(str)
+    # "Show" on a download toast.
+    show_downloads_requested = Signal()
+
+    SLEEP_AFTER_S = 10 * 60
+    TOOLBAR_H = 48
+
+    # Web pages are native windows: MainWindow's page cross-fade skips this tab.
+    hosts_native_views = True
 
     def __init__(self, settings, download_tab, parent=None):
         super().__init__(parent)
         self.settings = settings
         self.download_tab = download_tab
-        self._loading = False
         self.download_dir = settings_store.get_save_dir(settings, "video", config.DEFAULT_DOWNLOAD_DIR)
-        os.makedirs(self.download_dir, exist_ok=True)
-        # job_id -> {"cancel", "pause_event", "path", "title"} -- the card
-        # itself lives in download_tab, keyed by this same id. Kept around
-        # indefinitely rather than popped on completion (see video_tab.py's
-        # _forget_job for why) -- the Play button stays live on a completed
-        # card for several seconds and still needs "path" to resolve.
-        self._jobs = {}
-        self._progress_sig.connect(self._update_progress)
-        self._download_done_sig.connect(self._on_download_done)
-        self._download_error_sig.connect(self._on_download_error)
-        self._playable_sig.connect(lambda jid: self.download_tab.set_playable(jid, True))
-        self._adblock_refresh_sig.connect(self._on_adblock_refresh_done)
-        self._adblock_refreshing = False
-
-        # Multi-tab state. Each entry: {"view", "page", "home_page",
-        # "stack" (home vs. real page), "pill"}. One shared profile (so
-        # cookies/logins carry across tabs, same as any real browser).
         self._tabs = []
-        self._current_index = -1
-        self._closed_urls = []  # recently-closed tab URLs, for reopen (Ctrl+Shift+T)
-        self._zoom_factor = 1.0
+        self._cur = None
+        self._closed = []
+        self._page_fullscreen = False
+        self._fs_exit = None
+        self._fs_away = 0
+        self._fs_timer = QTimer(self)
+        self._fs_timer.setInterval(100)
+        self._fs_timer.timeout.connect(self._fs_poll)
+        self._downloads = []
+        self._status_busy = False
+        self._panel = None
+        self._watched_window = None
+        self._dark = self._dark_mode()
+        self._t = theme.browser_tokens(accent=browser_data.get_browser_accent(), dark_mode=self._dark)
+        self.services = browser_engine.services()
+        self.services.failed.connect(self._on_engine_failed)
+        self.services.adguard_ready.connect(lambda ok: self._sync_shield())
 
-        self._setup_shared_profile()
         self._build_ui()
-        self._create_tab(activate=True)
         self._setup_shortcuts()
 
-    # --------------------------------------------------------- Profile ----
-    def _setup_shared_profile(self):
-        profile_dir = os.path.join(config.APPDATA_DIR, "browser_profile")
-        os.makedirs(profile_dir, exist_ok=True)
-        # A named, non-off-the-record profile persists cookies/logins across
-        # app restarts (the same as any real browser) -- kept even though
-        # the headline use case is YouTube "without login", since any other
-        # site the user browses to still needs normal session handling.
-        self.profile = QWebEngineProfile("awesome-downloader-browser", self)
-        self.profile.setPersistentStoragePath(profile_dir)
-        self.profile.setCachePath(os.path.join(profile_dir, "cache"))
-        self.profile.setPersistentCookiesPolicy(
-            QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(1500)
+        self._status_timer.timeout.connect(self._poll_adguard)
+        # The shield's count only changes while a page loads or just after:
+        # asked often then, rarely after.
+        self._status_fast_until = 0.0
+        self._browser_hidden_at = None
+        self._sleep_timer = QTimer(self)
+        self._sleep_timer.setInterval(60 * 1000)
+        self._sleep_timer.timeout.connect(self._sleep_idle_tabs)
+        self._sleep_timer.start()
+        self._session_timer = QTimer(self)
+        self._session_timer.setSingleShot(True)
+        self._session_timer.setInterval(1000)
+        self._session_timer.timeout.connect(self.save_state)
+        self._completer_timer = QTimer(self)
+        self._completer_timer.setSingleShot(True)
+        self._completer_timer.setInterval(800)
+        self._completer_timer.timeout.connect(self._refresh_completer)
 
-        # Kept as real attributes (not locals) -- PySide6 does not keep a C++-
-        # side owning reference to Python QObjects handed to setters like
-        # this one, so an unreferenced interceptor gets garbage-collected out
-        # from under the profile and crashes the process on the next request.
-        self._interceptor = _AdBlockInterceptor(self)
-        self.profile.setUrlRequestInterceptor(self._interceptor)
-        self.profile.downloadRequested.connect(self._on_download_requested)
+        self.apply_theme()
+        self._restore_session()
 
-        self._bridge = _Bridge(self)
-        self._bridge.urlReceived.connect(self.open_in_video_tab.emit)
-        self._bridge.openSystemBrowserRequested.connect(self._open_in_system_browser)
-
-        self._attach_shared_scripts(self.profile)
-
-        # Incognito: a genuinely separate, off-the-record profile -- no
-        # storage name passed in, which is what tells QtWebEngine to keep
-        # everything (cookies, cache, history) in memory only, gone the
-        # moment the tab closes. Same ad-block/download-button/find-in-page
-        # behavior as a normal tab (own interceptor + own copies of the
-        # same scripts, not shared QWebEngineScript instances with the
-        # persistent profile -- keeps the two profiles fully independent
-        # rather than relying on Qt's implicit-sharing semantics holding up
-        # under removal/teardown of either one).
-        self._incognito_profile = QWebEngineProfile(self)
-        self._incognito_interceptor = _AdBlockInterceptor(self)
-        self._incognito_profile.setUrlRequestInterceptor(self._incognito_interceptor)
-        self._incognito_profile.downloadRequested.connect(self._on_download_requested)
-        self._attach_shared_scripts(self._incognito_profile)
-
-    def _attach_shared_scripts(self, profile):
-        """Builds fresh QWebEngineScript objects and attaches them to
-        `profile` -- called once for the normal profile and once for the
-        incognito one, so every tab (private or not) gets the overlay
-        download button, ad-block cosmetic CSS, the QWebChannel bridge, and
-        the H.264-fallback banner, regardless of which profile it's using."""
-        qwebchannel_lib_script = QWebEngineScript()
-        qwebchannel_lib_script.setName("adl_qwebchannel_lib")
-        qwebchannel_lib_script.setSourceCode(_qwebchannel_js())
-        qwebchannel_lib_script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
-        qwebchannel_lib_script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
-        qwebchannel_lib_script.setRunsOnSubFrames(False)
-        profile.scripts().insert(qwebchannel_lib_script)
-
-        logo_uri = _logo_data_uri()
-        overlay_script = QWebEngineScript()
-        overlay_script.setName("adl_overlay_button")
-        overlay_script.setSourceCode(_overlay_button_script(logo_uri))
-        overlay_script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
-        overlay_script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
-        overlay_script.setRunsOnSubFrames(False)
-        profile.scripts().insert(overlay_script)
-
-        adblock_css_script = QWebEngineScript()
-        adblock_css_script.setName("adl_adblock_css")
-        adblock_css_script.setSourceCode(_adblock_css_script())
-        adblock_css_script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
-        adblock_css_script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
-        adblock_css_script.setRunsOnSubFrames(True)
-        profile.scripts().insert(adblock_css_script)
-
-        video_fallback_script_obj = QWebEngineScript()
-        video_fallback_script_obj.setName("adl_video_fallback")
-        video_fallback_script_obj.setSourceCode(_video_fallback_script())
-        video_fallback_script_obj.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
-        video_fallback_script_obj.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
-        video_fallback_script_obj.setRunsOnSubFrames(False)
-        profile.scripts().insert(video_fallback_script_obj)
-        # Kept alive on the instance (not just local variables) -- PySide6
-        # does not keep a C++-side owning reference to Python QObjects handed
-        # to a profile's script collection, so unreferenced scripts would be
-        # garbage-collected out from under it. Namespaced by profile identity
-        # so the normal and incognito profiles' copies don't overwrite each
-        # other's references.
-        self._script_refs = getattr(self, "_script_refs", [])
-        self._script_refs.extend([
-            qwebchannel_lib_script, overlay_script, adblock_css_script, video_fallback_script_obj,
-        ])
-
-    # ---------------------------------------------------------------- UI ---
+    # ------------------------------------------------------------- UI ----
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Tab strip -- above the toolbar, real Chrome's own layout: tabs
-        # grow to fill the row (stretch factor set where each is inserted),
-        # sit nearly flush against each other, and the active one's fill
-        # continues straight down into the toolbar with no visible seam.
-        self.tabstrip_frame = QFrame()
-        self.tabstrip_frame.setObjectName("browserTabstrip")
-        tabstrip = QHBoxLayout(self.tabstrip_frame)
-        # Chrome's own tab strip and toolbar are about 34px and 40px; ours
-        # were 43 each. The difference was all padding, and on this window it
-        # was padding taken directly off the page.
-        tabstrip.setContentsMargins(8, 2, 8, 2)
-        tabstrip.setSpacing(6)
-        self._tabstrip_layout = tabstrip
-        self.new_tab_btn = QPushButton()
-        self.new_tab_btn.setToolTip("New tab (Ctrl+T) -- right-click for a private tab")
-        self.new_tab_btn.setAccessibleName("New tab")
-        self.new_tab_btn.setFixedSize(30, 30)
-        self.new_tab_btn.setIconSize(QSize(17, 17))
-        self.new_tab_btn.setCursor(Qt.PointingHandCursor)
-        self.new_tab_btn.clicked.connect(lambda: self._create_tab(activate=True))
-        self.new_tab_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.new_tab_btn.customContextMenuRequested.connect(self._show_new_tab_menu)
-        tabstrip.addWidget(self.new_tab_btn)
-        tabstrip.addStretch(1)
-        root.addWidget(self.tabstrip_frame)
+        self.chrome = QWidget()
+        chrome = QVBoxLayout(self.chrome)
+        chrome.setContentsMargins(0, 0, 0, 0)
+        chrome.setSpacing(0)
+        self.strip = TabStrip()
+        self.strip.new_tab_clicked.connect(lambda: self._create_tab(activate=True))
+        self.strip.close_all_clicked.connect(self.close_all_tabs)
+        self.strip.reordered.connect(self._on_reordered)
+        self.strip.new_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.strip.new_btn.customContextMenuRequested.connect(self._new_tab_menu)
+        chrome.addWidget(self.strip)
 
-        # Wrapped in one card-style frame (not a bare row of buttons floating
-        # on the transparent background) to actually read as a browser
-        # toolbar rather than loose controls. Layout/ordering follows
-        # Chrome's own: nav cluster hugging the left edge, address bar
-        # (with the bookmark star embedded in it, not beside it) claiming
-        # all the remaining space, overflow menu at the far right.
-        self.toolbar_frame = QFrame()
-        self.toolbar_frame.setObjectName("browserToolbar")
-        toolbar = QHBoxLayout(self.toolbar_frame)
-        toolbar.setContentsMargins(6, 3, 8, 3)
-        toolbar.setSpacing(4)
+        self.toolbar = QWidget()
+        self.toolbar.setFixedHeight(self.TOOLBAR_H)
+        bar = QHBoxLayout(self.toolbar)
+        bar.setContentsMargins(8, 6, 10, 8)
+        bar.setSpacing(4)
+        self.back_btn = ChromeButton("back", "Back (Alt+Left)")
+        self.fwd_btn = ChromeButton("forward", "Forward (Alt+Right)")
+        self.reload_btn = ChromeButton("reload", "Reload (Ctrl+R)")
+        self.home_btn = ChromeButton("home", "Home (Alt+Home)")
+        for b in (self.back_btn, self.fwd_btn, self.reload_btn, self.home_btn):
+            bar.addWidget(b)
+        bar.addSpacing(4)
+        self.address = AddressBar()
+        bar.addWidget(self.address, 1)
+        bar.addSpacing(6)
+        self.now_playing = NowPlaying()
+        bar.addWidget(self.now_playing)
+        self.download_btn = ActionButton("Download")
+        self.download_btn.setToolTip("Download this page's video with Awesome Downloader")
+        bar.addWidget(self.download_btn)
+        bar.addSpacing(2)
+        # Bookmarks this page (and puts it on the bookmarks bar); right-click
+        # -- or a click on a New Tab -- lists every bookmark.
+        self.bookmarks_btn = ChromeButton("bookmark", "Bookmark this page (Ctrl+D) -- right-click for all bookmarks")
+        self.bookmarks_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.bookmarks_btn.customContextMenuRequested.connect(
+            lambda _pos: self._show_bookmarks_panel(self.bookmarks_btn))
+        bar.addWidget(self.bookmarks_btn)
+        self.shield_btn = ChromeButton("shield_check", "AdGuard ad blocker")
+        self.menu_btn = ChromeButton("menu", "Menu")
+        bar.addWidget(self.shield_btn)
+        bar.addWidget(self.menu_btn)
+        chrome.addWidget(self.toolbar)
+        self.load_bar = LoadBar(self.toolbar)
 
-        self.back_btn = QPushButton()
-        self.fwd_btn = QPushButton()
-        self.reload_btn = QPushButton()
-        self.home_btn = QPushButton()
-        self.back_btn.setToolTip("Back (Alt+Left)")
-        self.fwd_btn.setToolTip("Forward (Alt+Right)")
-        self.reload_btn.setToolTip("Reload (Ctrl+R)")
-        self.home_btn.setToolTip("Home")
-        # Every icon-only button in this toolbar gets a real accessible
-        # name, not just a tooltip -- a screen reader announces
-        # accessibleName(), and Qt doesn't reliably fall back to tooltip
-        # text for that on its own. Otherwise every one of these buttons
-        # reads as silent/unlabeled to anyone using one.
-        self.back_btn.setAccessibleName("Back")
-        self.fwd_btn.setAccessibleName("Forward")
-        self.reload_btn.setAccessibleName("Reload")
-        self.home_btn.setAccessibleName("Home")
-        self.back_btn.setEnabled(False)
-        self.fwd_btn.setEnabled(False)
-        for btn in (self.back_btn, self.fwd_btn, self.reload_btn, self.home_btn):
-            btn.setFixedSize(30, 30)
-            btn.setIconSize(QSize(16, 16))
-            btn.setCursor(Qt.PointingHandCursor)
-            toolbar.addWidget(btn)
+        self.bookmarks_bar = BookmarksBar()
+        self.bookmarks_bar.open_url.connect(self._open_bookmark)
+        self.bookmarks_bar.remove_requested.connect(self._remove_bookmark)
+        self.bookmarks_bar.all_clicked.connect(lambda: self._show_bookmarks_panel(self.bookmarks_bar.all_btn))
+        # On by default: a bookmark you can't see anywhere reads as one that
+        # didn't save (reported as "the bookmark button doesn't work").
+        self.bookmarks_bar.setVisible(bool(browser_data.get_pref("bookmarks_bar", True)))
+        if self.bookmarks_bar.isVisible():
+            self.bookmarks_bar.set_bookmarks(browser_data.load_bookmarks())
+        chrome.addWidget(self.bookmarks_bar)
+        root.addWidget(self.chrome)
 
-        # Claims every pixel of empty space once the wide text-label
-        # buttons that used to sit beside it are gone -- both the bookmarks
-        # and history lists moved into the "⋮" overflow menu instead.
-        self.address_bar = QLineEdit()
-        self.address_bar.setPlaceholderText("Search or enter a web address")
-        self.address_bar.setFixedHeight(30)
-        # Chrome-style: the bookmark star lives inside the address bar's own
-        # trailing edge, not as a separate button next to it.
-        self._bookmark_action = QAction(self)
-        self._bookmark_action.triggered.connect(self._show_bookmark_dialog)
-        self.address_bar.addAction(self._bookmark_action, QLineEdit.ActionPosition.TrailingPosition)
-        toolbar.addWidget(self.address_bar, 1)
+        self.pages = QStackedWidget()
+        self.home = HomeView(self)
+        self.home.go.connect(self._home_go)
+        self.home.surfaced.connect(self._home_surfaced)
+        self.home.strip_ready.connect(self._apply_home_backdrop)
+        self.pages.addWidget(self.home.placeholder)
+        self.missing = EngineMissing()
+        self.missing.get_clicked.connect(lambda: QDesktopServices.openUrl(QUrl(WEBVIEW2_PAGE)))
+        self.pages.addWidget(self.missing)
+        root.addWidget(self.pages, 1)
 
-        # Address-bar autocomplete over history + bookmark URLs, Chrome-style
-        # (contains-match, case-insensitive). The model is refreshed lazily
-        # whenever history/bookmarks change rather than kept live, since
-        # QCompleter has no notion of "data changed under me".
-        self._address_completer_model = QStringListModel(self)
-        self._address_completer = QCompleter(self)
-        self._address_completer.setModel(self._address_completer_model)
-        self._address_completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self._address_completer.setFilterMode(Qt.MatchContains)
-        self._address_completer.setCompletionMode(QCompleter.PopupCompletion)
-        self.address_bar.setCompleter(self._address_completer)
-        self._refresh_address_completer()
+        self._completer_model = QStringListModel(self)
+        self._completer = QCompleter(self._completer_model, self)
+        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._completer.setMaxVisibleItems(8)
+        self.address.edit.setCompleter(self._completer)
+        self._refresh_completer()
 
-        # No Go button. Enter in the address bar already navigates, and every
-        # mainstream browser dropped this control years ago -- it was the only
-        # filled accent block in the toolbar, so removing it is what lets the
-        # bar read as one quiet strip rather than a form with a submit.
+        self.back_btn.clicked.connect(self.go_back)
+        self.fwd_btn.clicked.connect(self.go_forward)
+        self.reload_btn.clicked.connect(self.reload_or_stop)
+        self.home_btn.clicked.connect(self.go_home)
+        self.address.submitted.connect(lambda text: self.navigate(text))
+        self.address.escaped.connect(self._focus_page)
+        self.address.star_clicked.connect(self.bookmark_current)
+        self.address.zoom_reset.connect(lambda: self._set_zoom(1.0))
+        self.download_btn.clicked.connect(self._send_current_to_video_tab)
+        self.bookmarks_btn.clicked.connect(self._on_bookmark_button)
+        self.shield_btn.clicked.connect(self._show_adguard_panel)
+        self.menu_btn.clicked.connect(self._show_menu)
+        self.now_playing.activated.connect(self._goto_media_tab)
+        self.now_playing.toggle_clicked.connect(lambda: self._media_command("toggle"))
+        self.now_playing.next_clicked.connect(lambda: self._media_command("next"))
+        self.now_playing.prev_clicked.connect(lambda: self._media_command("prev"))
 
-        # Zoom control -- sits with the other secondary controls at the
-        # right edge, next to the overflow menu.
-        self.zoom_btn = QPushButton()
-        self.zoom_btn.setToolTip("Page zoom")
-        self.zoom_btn.setAccessibleName("Page zoom")
-        self.zoom_btn.setFixedSize(32, 32)
-        self.zoom_btn.setIconSize(QSize(18, 18))
-        self.zoom_btn.setCursor(Qt.PointingHandCursor)
-        toolbar.addWidget(self.zoom_btn)
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.load_bar.setGeometry(0, self.toolbar.height() - self.load_bar.height() + 1,
+                                  self.toolbar.width(), self.load_bar.height())
+        QTimer.singleShot(0, self._apply_home_backdrop)
 
-        self.menu_btn = QPushButton()
-        self.menu_btn.setToolTip("Bookmarks and history")
-        self.menu_btn.setAccessibleName("Browser menu")
-        self.menu_btn.setFixedSize(32, 32)
-        self.menu_btn.setIconSize(QSize(18, 18))
-        self.menu_btn.setCursor(Qt.PointingHandCursor)
-        toolbar.addWidget(self.menu_btn)
-        root.addWidget(self.toolbar_frame)
-
-        # Find-in-page -- a small floating tool window, not a row built
-        # into this widget's own layout: QWebEngineView renders through a
-        # native compositor surface, and an ordinary child widget isn't
-        # guaranteed to actually draw on top of that through normal Qt
-        # z-ordering. A real top-level window sidesteps that entirely --
-        # Qt.Tool rather than Qt.Popup so clicking the page underneath
-        # (e.g. to follow a found link) doesn't immediately close it the
-        # way a popup would.
-        self.find_frame = QFrame(self, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
-        self.find_frame.setObjectName("browserFindBar")
-        self.find_frame.setFixedSize(230, 38)
-        find_layout = QHBoxLayout(self.find_frame)
-        find_layout.setContentsMargins(10, 4, 6, 4)
-        find_layout.setSpacing(4)
-        self.find_input = QLineEdit()
-        self.find_input.setPlaceholderText("Find in page")
-        self.find_input.setFixedHeight(28)
-        self.find_input.textChanged.connect(lambda text: self._find_in_page(text))
-        self.find_input.returnPressed.connect(lambda: self._find_in_page(self.find_input.text()))
-        find_layout.addWidget(self.find_input, 1)
-        self.find_prev_btn = QPushButton()
-        self.find_next_btn = QPushButton()
-        self.find_close_btn = QPushButton()
-        self.find_prev_btn.setToolTip("Previous match")
-        self.find_prev_btn.setAccessibleName("Previous match")
-        self.find_next_btn.setToolTip("Next match")
-        self.find_next_btn.setAccessibleName("Next match")
-        self.find_close_btn.setToolTip("Close find bar (Esc)")
-        self.find_close_btn.setAccessibleName("Close find bar")
-        for b in (self.find_prev_btn, self.find_next_btn, self.find_close_btn):
-            b.setFixedSize(22, 22)
-            b.setIconSize(QSize(11, 11))
-            b.setCursor(Qt.PointingHandCursor)
-            find_layout.addWidget(b)
-        self.find_prev_btn.clicked.connect(lambda: self._find_in_page(self.find_input.text(), backward=True))
-        self.find_next_btn.clicked.connect(lambda: self._find_in_page(self.find_input.text()))
-        self.find_close_btn.clicked.connect(self._hide_find_bar)
-        find_escape = QShortcut(QKeySequence("Escape"), self.find_frame)
-        find_escape.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        find_escape.activated.connect(self._hide_find_bar)
-
-        # One entry per open tab, only the active one visible.
-        self._tabs_stack = QStackedWidget()
-        root.addWidget(self._tabs_stack, 1)
-
-        self.back_btn.clicked.connect(self._on_back_clicked)
-        self.fwd_btn.clicked.connect(self._on_forward_clicked)
-        self.reload_btn.clicked.connect(self._on_reload_clicked)
-        self.home_btn.clicked.connect(self._show_home_page)
-        self.address_bar.returnPressed.connect(self._navigate_from_address_bar)
-        self.menu_btn.clicked.connect(self._show_overflow_menu)
-        self.zoom_btn.clicked.connect(self._show_zoom_menu)
-
-        self.apply_theme()
+    def paintEvent(self, event):
+        # A hairline between the browser's chrome and the page.
+        if not self.chrome.isVisible():
+            return
+        p = QPainter(self)
+        y = self.chrome.geometry().bottom()
+        p.fillRect(0, y, self.width(), 1, theme.qcolor(self._t["divider"]))
+        p.end()
 
     def _setup_shortcuts(self):
         def add(seq, slot):
@@ -1208,1057 +573,1383 @@ class BrowserTab(QWidget):
             return sc
 
         self._shortcuts = [
-            add("Ctrl+L", lambda: (self.address_bar.setFocus(), self.address_bar.selectAll())),
-            add("Ctrl+D", self._show_bookmark_dialog),
-            add("Ctrl+F", self._show_find_bar),
-            add("Escape", self._on_escape_pressed),
             add("Ctrl+T", lambda: self._create_tab(activate=True)),
-            add("Ctrl+W", lambda: self._close_tab(self._current_index)),
-            # Ctrl+Shift+T only -- a bare Shift+T loses to normal typing
-            # any time a text field has focus (address bar, find bar),
-            # since Shift+T there just types the letter T. This is the
-            # actual industry-standard binding for reopen-closed-tab
-            # anyway (every major browser uses it).
-            add("Ctrl+Shift+T", self._reopen_closed_tab),
-            add("Ctrl+R", self._on_reload_clicked),
-            add(QKeySequence.StandardKey.Refresh, self._on_reload_clicked),
-            add("Alt+Left", self._on_back_clicked),
-            add("Alt+Right", self._on_forward_clicked),
-            # Chrome's own binding for a new private/incognito window --
-            # this app only has tabs, not separate windows, so it opens a
-            # private tab instead; same keyboard muscle memory either way.
-            add("Ctrl+Shift+N", lambda: self._create_tab(activate=True, incognito=True)),
+            add("Ctrl+Shift+T", self.reopen_closed_tab),
+            add("Ctrl+W", self.close_current_tab),
+            add("Ctrl+Shift+W", self.close_all_tabs),
+            add("Ctrl+Shift+O", lambda: self._show_bookmarks_panel(self.bookmarks_btn)),
+            add("Ctrl+F4", self.close_current_tab),
+            add("Ctrl+Tab", lambda: self._cycle(1)),
+            add("Ctrl+Shift+Tab", lambda: self._cycle(-1)),
+            add("Ctrl+PgDown", lambda: self._cycle(1)),
+            add("Ctrl+PgUp", lambda: self._cycle(-1)),
+            add("Ctrl+L", self.address.focus_and_select),
+            add("Alt+D", self.address.focus_and_select),
+            add("F6", self.address.focus_and_select),
+            add("Ctrl+D", self.bookmark_current),
+            add("Ctrl+F", self._find),
+            add("Ctrl+R", self.reload),
+            add("F5", self.reload),
+            add("Alt+Left", self.go_back),
+            add("Alt+Right", self.go_forward),
+            add("Alt+Home", self.go_home),
+            add("Ctrl+Shift+N", lambda: self._create_tab(activate=True, private=True)),
+            add("Ctrl+Shift+B", self._toggle_bookmarks_bar),
+            add("Escape", self._escape_fallback),
         ]
+        for n in range(1, 10):
+            self._shortcuts.append(add(f"Ctrl+{n}", lambda n=n: self._select_number(n)))
 
-    # ------------------------------------------------------------ Tabs ----
-    def _current_tab(self):
-        if 0 <= self._current_index < len(self._tabs):
-            return self._tabs[self._current_index]
-        return None
-
-    def _active_view(self):
-        tab = self._current_tab()
-        return tab["view"] if tab else None
-
-    @property
-    def view(self):
-        return self._active_view()
-
-    @property
-    def page(self):
-        tab = self._current_tab()
-        return tab["page"] if tab else None
-
-    @property
-    def home_page(self):
-        tab = self._current_tab()
-        return tab["home_page"] if tab else None
-
-    def _tab_index_of(self, key, obj):
-        """Resolves a tab's CURRENT position by identity (its pill/view/
-        page/home_page, whichever never gets recreated) rather than trusting
-        a numeric index captured once at tab-creation time. Every per-tab
-        signal below used to close over that fixed "index" via a default
-        lambda arg -- looked safe (default args do capture a snapshot, not
-        a live reference), but _close_tab() does self._tabs.pop(index),
-        which shifts every later tab's real position in the list. Their
-        callbacks kept firing with the stale pre-close index, closing or
-        switching to the wrong tab (or silently no-op'ing when the stale
-        index no longer existed) -- reported as tabs "not closing or adding
-        properly". Returns -1 if the tab's already gone (e.g. a signal from
-        a view mid-teardown after its own close), which every caller below
-        already treats as a safe no-op via its own bounds check."""
-        for i, tab in enumerate(self._tabs):
-            if tab.get(key) is obj:
-                return i
-        return -1
-
-    def _create_tab(self, url=None, activate=True, incognito=False):
-        index = len(self._tabs)
-
-        profile = self._incognito_profile if incognito else self.profile
-        view = QWebEngineView(self)
-        page = QWebEnginePage(profile, view)
-        view.setPage(page)
-
-        channel = QWebChannel(page)
-        channel.registerObject("bridge", self._bridge)
-        page.setWebChannel(channel)
-        page.settings().setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
-        # A tab opened in the background must not start playing. Chromium keeps
-        # background tabs fully alive -- it does not pause them for us -- so a
-        # link middle-clicked into a new tab would sit there playing audio out
-        # of a tab nobody had looked at yet. Requiring a user gesture before
-        # playback is Chromium's own mechanism for exactly this; the gate is
-        # lifted the first time the tab is actually opened (_switch_to_tab), so
-        # once you are looking at it the tab behaves like any other.
-        if not activate:
-            page.settings().setAttribute(
-                QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, True)
-        page.fullScreenRequested.connect(self._on_fullscreen_requested)
-        # Middle-click (and Ctrl+click) on a link, or a page's own
-        # target="_blank"/window.open() -- Chromium's renderer already
-        # recognizes all of these as "open elsewhere", QtWebEngine just
-        # surfaces them here instead of silently doing nothing, which is
-        # what happens without a handler connected at all.
-        page.newWindowRequested.connect(self._on_new_window_requested)
-
-        # Right-click "Download this video/image" -- the floating overlay
-        # button covers the common case (download the page's own video),
-        # but it can end up hidden behind a site's own on-page controls in
-        # that same corner; a right-click option is the standard second way
-        # a real browser offers this.
-        view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        view.customContextMenuRequested.connect(
-            lambda pos, v=view: self._show_web_context_menu(pos, v))
-
-        bg = QColor(24, 24, 27) if self._dark_mode() else QColor(255, 255, 255)
-        page.setBackgroundColor(bg)
-
-        view.urlChanged.connect(
-            lambda qurl, v=view: self._on_url_changed(self._tab_index_of("view", v), qurl))
-        view.loadStarted.connect(
-            lambda v=view: self._on_load_started(self._tab_index_of("view", v)))
-        view.loadFinished.connect(
-            lambda ok, v=view: self._on_load_finished(self._tab_index_of("view", v), ok))
-        page.titleChanged.connect(
-            lambda title, p=page: self._on_title_changed(self._tab_index_of("page", p), title))
-        # Mute tab -- Chrome-parity. recentlyAudibleChanged shows/hides the
-        # tab's speaker icon (only while sound is actually playing);
-        # audioMutedChanged keeps the icon correct if muted state changes
-        # any other way than this button (there isn't one yet, but a page
-        # calling document.mute() territory isn't a thing -- this is just
-        # defensive symmetry with how the maximize button etc. stay in
-        # sync with state changes from outside this app's own controls).
-        page.recentlyAudibleChanged.connect(
-            lambda audible, p=page: self._on_audible_changed(self._tab_index_of("page", p), audible))
-        page.audioMutedChanged.connect(
-            lambda muted, p=page: self._on_muted_changed(self._tab_index_of("page", p), muted))
-
-        home_page = BrowserHomePage(self.settings, self)
-        home_page.navigate_requested.connect(
-            lambda text, hp=home_page: self._navigate_to(text, self._tab_index_of("home_page", hp)))
-        # The accent toggle changes a single Browser-tab-wide setting, not
-        # just this one tab's home page -- re-run the whole apply_theme(),
-        # which already cascades to every open tab's toolbar/pills/home page.
-        home_page.accent_changed.connect(self.apply_theme)
-
-        inner_stack = QStackedWidget()
-        inner_stack.addWidget(home_page)
-        inner_stack.addWidget(view)
-        self._tabs_stack.addWidget(inner_stack)
-
-        pill = _TabPill()
-        pill.clicked.connect(lambda pl=pill: self._switch_to_tab(self._tab_index_of("pill", pl)))
-        pill.close_requested.connect(lambda pl=pill: self._close_tab(self._tab_index_of("pill", pl)))
-        pill.mute_toggled.connect(lambda pl=pill: self._toggle_tab_mute(self._tab_index_of("pill", pl)))
-        # Inserted right before new_tab_btn's own current position (not a
-        # fixed index) -- each new pill lands after every existing one but
-        # still ahead of the "+" button, so tabs grow left-to-right with
-        # "+" immediately following the last one, Chrome's own placement
-        # (it used to sit to the left of every tab instead).
-        self._tabstrip_layout.insertWidget(
-            self._tabstrip_layout.indexOf(self.new_tab_btn), pill, 1)
-        if hasattr(self, "_theme_tokens"):
-            pill.apply_theme(self._theme_tokens)
-
-        self._tabs.append({
-            "view": view, "page": page, "home_page": home_page,
-            "stack": inner_stack, "pill": pill, "incognito": incognito,
-            # Back/Forward's own history -- separate from the QWebEngineView's
-            # built-in one, which has no concept of "the home page" at all
-            # (switching to it is a plain widget-stack swap, not a real
-            # navigation the view ever sees), so relying on view.history()
-            # alone meant Back stopped working the moment a tab's history
-            # was just one real page deep with no way back to Home. "home"
-            # or a URL string, walked by nav_index; nav_stepping suppresses
-            # a duplicate push while a Back/Forward click is itself driving
-            # a URL load (its own urlChanged would otherwise re-push it).
-            "nav_stack": ["home"], "nav_index": 0, "nav_stepping": False,
-            # True while this tab has never been looked at and its media is
-            # therefore held behind the user-gesture requirement above.
-            "playback_gated": not activate,
-        })
-        if incognito:
-            pill.set_incognito(True)
-
-        if url:
-            inner_stack.setCurrentWidget(view)
-            view.load(QUrl(url))
-        else:
-            inner_stack.setCurrentWidget(home_page)
-            pill.show_home_state()
-
-        if activate:
-            self._switch_to_tab(index)
-        return index
-
-    def _switch_to_tab(self, index):
-        if not (0 <= index < len(self._tabs)):
-            return
-        self._current_index = index
-        self._tabs_stack.setCurrentWidget(self._tabs[index]["stack"])
-        for i, tab in enumerate(self._tabs):
-            tab["pill"].set_checked(i == index)
-        tab = self._tabs[index]
-        if tab["stack"].currentWidget() is tab["home_page"]:
-            self.address_bar.clear()
-        else:
-            view = self._active_view()
-            if view is not None:
-                self.address_bar.setText(view.url().toString())
-        if tab.get("playback_gated"):
-            # First time this tab has actually been opened: hand it back the
-            # normal autoplay behaviour it would have had if it had been
-            # opened in the foreground to begin with.
-            tab["playback_gated"] = False
-            tab["page"].settings().setAttribute(
-                QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
-        self._update_back_forward_buttons(index)
-        self._update_bookmark_button()
-
-    def _close_tab(self, index):
-        if not (0 <= index < len(self._tabs)):
-            return
-        if len(self._tabs) == 1:
-            # This app always keeps at least one Browser tab open (there's
-            # no "no tab" state alongside the Video/Torrent/etc tabs), but
-            # silently refusing to do anything when the user closes their
-            # only tab read as a bug ("tab doesn't close"). Open a genuinely
-            # fresh tab in its place -- the exact same path "New Tab" itself
-            # uses, so it's correctly initialized -- then fall through and
-            # remove the old one below exactly like any other close.
-            self._create_tab(activate=True)
-            index = 0
-        tab = self._tabs.pop(index)
-        url = tab["view"].url().toString()
-        if url and url != "about:blank":
-            self._closed_urls.append(url)
-        self._tabs_stack.removeWidget(tab["stack"])
-        self._tabstrip_layout.removeWidget(tab["pill"])
-        tab["stack"].deleteLater()
-        tab["pill"].deleteLater()
-
-        if self._current_index >= len(self._tabs):
-            self._current_index = len(self._tabs) - 1
-        elif self._current_index > index:
-            self._current_index -= 1
-        self._switch_to_tab(self._current_index)
-
-    def _reopen_closed_tab(self):
-        if self._closed_urls:
-            self._create_tab(url=self._closed_urls.pop(), activate=True)
-
-    # ---------------------------------------------------------- Actions ----
-    def _show_home_page(self):
-        tab = self._current_tab()
-        if tab:
-            tab["stack"].setCurrentWidget(tab["home_page"])
-            tab["pill"].show_home_state()
-            self.address_bar.clear()
-            self._push_nav_entry(self._current_index, "home")
-
-    def _navigate_to(self, raw_text, tab_index=None):
-        """Single entry point for 'go somewhere in the real browser' --
-        used by the address bar, the home page's search bar, and its
-        shortcut tiles alike, so normalization and the home-page-to-view
-        switch only need to happen in one place."""
-        target = _normalize_address(raw_text)
-        if not target:
-            return
-        index = tab_index if tab_index is not None else self._current_index
-        if not (0 <= index < len(self._tabs)):
-            return
-        tab = self._tabs[index]
-        tab["stack"].setCurrentWidget(tab["view"])
-        tab["view"].load(QUrl(target))
-        # Swapping the home page out for the real QWebEngineView is exactly
-        # the moment Chromium's own compositor surface (a real native child
-        # HWND, not something Qt's raster backing store draws) goes from
-        # dormant to live -- reported directly as the window's frosted
-        # background vanishing to a flat/washed-out fill right as a
-        # shortcut or search result loads, fixable only by toggling the
-        # theme twice. Same underlying Acrylic-blur-behind desync this
-        # project has hit before at other trigger points (DPI change,
-        # every window-state change); this is one more of those points,
-        # not a new problem. A short delay so it runs after the view has
-        # actually started painting, not synchronously with this call.
-        win = self.window()
-        if hasattr(win, "_on_dpi_or_scale_changed"):
-            QTimer.singleShot(150, win._on_dpi_or_scale_changed)
-
-    def _navigate_from_address_bar(self):
-        self._navigate_to(self.address_bar.text())
-
-    def _show_find_bar(self):
-        # Positioned relative to this widget's own top-right corner (just
-        # under the toolbar), recomputed on every open since the window
-        # may have moved or resized since the last time.
-        margin = 14
-        top_right = self.mapToGlobal(QPoint(self.width(), self.toolbar_frame.geometry().bottom()))
-        self.find_frame.move(top_right.x() - self.find_frame.width() - margin, top_right.y() + margin)
-        self.find_frame.show()
-        self.find_input.setFocus()
-        self.find_input.selectAll()
-
-    def _on_escape_pressed(self):
-        """Hides the find bar (the shortcut's original job) and, as a
-        guaranteed fallback, also tells the page to exit fullscreen if it's
-        in it. Chromium normally handles Escape-to-exit-fullscreen
-        entirely on its own, but reported directly: stuck in fullscreen
-        video with no way out except Task Manager -- something about the
-        embedded QtWebEngine setup isn't reliably delivering that key to
-        Chromium's own fullscreen controller. This shortcut is bound at
-        the window level (Qt's default WindowShortcut context, active
-        whenever this tab's top-level window is the active one), so it
-        fires regardless of which specific child widget currently holds
-        keyboard focus -- it doesn't depend on the fix it's a fallback for."""
-        self._hide_find_bar()
-        view = self._active_view()
-        if view is not None:
-            view.page().runJavaScript(
-                "if (document.fullscreenElement) { document.exitFullscreen(); }")
-        # Second, independent layer: force the window's own chrome back
-        # directly, in case the page's fullscreen state already flipped
-        # (so the JS call above is a no-op) while the window itself never
-        # actually got restored -- covers the window staying stuck even
-        # when the page/signal side is already consistent.
-        win = self.window()
-        if hasattr(win, "isFullScreen") and win.isFullScreen() and hasattr(win, "set_video_fullscreen"):
-            self.toolbar_frame.setVisible(True)
-            self.tabstrip_frame.setVisible(True)
-            win.set_video_fullscreen(False)
-
-    def _hide_find_bar(self):
-        # Unconditional -- hiding an already-hidden widget and clearing an
-        # empty search are both harmless, and an isVisible() guard here is
-        # unreliable besides: it reflects whether the whole window is
-        # actually on-screen, not just this widget's own shown/hidden state.
-        self.find_frame.setVisible(False)
-        page = self.page
-        if page:
-            page.findText("")  # clears the highlight
-
-    def _find_in_page(self, text, backward=False):
-        page = self.page
-        if not page:
-            return
-        flags = QWebEnginePage.FindFlag.FindBackward if backward else QWebEnginePage.FindFlag(0)
-        page.findText(text, flags)
-
-    def _show_zoom_menu(self):
-        """A small floating slider, not a menu of preset steps -- click
-        the zoom button, drag to any zoom level continuously. Qt.Popup
-        gives it the same "closes on an outside click" behaviour a QMenu
-        has, without actually being one."""
-        t = getattr(self, "_theme_tokens", None) or theme.browser_tokens(accent=self._browser_accent(), dark_mode=self._dark_mode())
-        popup = QWidget(self, Qt.WindowType.Popup)
-        popup.setStyleSheet(f"""
-            QWidget {{ background: {t['card_bg_solid']}; border: 1px solid {t['card_border']}; border-radius: 10px; }}
-        """)
-        layout = QHBoxLayout(popup)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
-
-        minus_btn = QPushButton("−")
-        plus_btn = QPushButton("+")
-        for b in (minus_btn, plus_btn):
-            b.setFixedSize(24, 24)
-            b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet(f"""
-                QPushButton {{ background: {t['hover_overlay']}; color: {t['text']};
-                    border: none; border-radius: 12px; font-weight: 700; }}
-                QPushButton:hover {{ background: {t['pressed_overlay']}; }}
-            """)
-
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setMinimum(25)
-        slider.setMaximum(300)
-        slider.setValue(round(self._zoom_factor * 100))
-        slider.setFixedWidth(150)
-        slider.setStyleSheet(f"""
-            QSlider::groove:horizontal {{ height: 4px; background: {t['hover_overlay']}; border-radius: 2px; }}
-            QSlider::sub-page:horizontal {{ background: {t['accent']}; border-radius: 2px; }}
-            QSlider::handle:horizontal {{
-                background: {t['accent']}; width: 14px; height: 14px;
-                margin: -5px 0; border-radius: 7px;
-            }}
-        """)
-
-        pct_label = QLabel(f"{slider.value()}%")
-        pct_label.setFixedWidth(38)
-        pct_label.setStyleSheet(f"color: {t['text']};")
-
-        def on_change(value):
-            self._set_zoom(value / 100)
-            pct_label.setText(f"{value}%")
-
-        slider.valueChanged.connect(on_change)
-        minus_btn.clicked.connect(lambda: slider.setValue(max(25, slider.value() - 10)))
-        plus_btn.clicked.connect(lambda: slider.setValue(min(300, slider.value() + 10)))
-
-        layout.addWidget(minus_btn)
-        layout.addWidget(slider)
-        layout.addWidget(plus_btn)
-        layout.addWidget(pct_label)
-
-        popup.adjustSize()
-        anchor = self.zoom_btn.mapToGlobal(self.zoom_btn.rect().bottomRight())
-        popup.move(anchor.x() - popup.sizeHint().width(), anchor.y() + 4)
-        popup.show()
-
-    def _set_zoom(self, factor):
-        self._zoom_factor = max(0.25, min(3.0, round(factor, 2)))
-        page = self.page
-        if page:
-            page.setZoomFactor(self._zoom_factor)
-
-    def _update_reload_icon(self):
-        t = getattr(self, "_theme_tokens", None) or theme.browser_tokens(accent=self._browser_accent(), dark_mode=self._dark_mode())
-        self.reload_btn.setIcon(_nav_icon("stop" if self._loading else "reload", t["text"]))
-
-    def _on_reload_clicked(self):
-        view = self._active_view()
-        if not view:
-            return
-        if self._loading:
-            view.stop()
-        else:
-            view.reload()
-
-    def _on_url_changed(self, tab_index, qurl):
-        if 0 <= tab_index < len(self._tabs):
-            self._tabs[tab_index]["pill"].set_url(qurl.toString())
-        if tab_index == self._current_index:
-            self.address_bar.setText(qurl.toString())
-            self._update_bookmark_button()
-        url = qurl.toString()
-        if url and url != "about:blank":
-            self._push_nav_entry(tab_index, url)
-
-    def _push_nav_entry(self, index, entry):
-        """Records a real navigation ("home" or a URL) into this tab's own
-        Back/Forward list. A no-op while nav_stepping is set -- that means
-        this call is the *result* of a Back/Forward click re-loading a URL
-        (see _apply_nav_entry), not a fresh navigation to record again."""
-        if not (0 <= index < len(self._tabs)):
-            return
-        tab = self._tabs[index]
-        if tab.get("nav_stepping"):
-            tab["nav_stepping"] = False
-            self._update_back_forward_buttons(index)
-            return
-        stack = tab["nav_stack"]
-        ni = tab["nav_index"]
-        if stack and 0 <= ni < len(stack) and stack[ni] == entry:
-            self._update_back_forward_buttons(index)
-            return
-        del stack[ni + 1:]
-        stack.append(entry)
-        tab["nav_index"] = len(stack) - 1
-        self._update_back_forward_buttons(index)
-
-    def _update_back_forward_buttons(self, index):
-        if index != self._current_index or not (0 <= index < len(self._tabs)):
-            return
-        tab = self._tabs[index]
-        self.back_btn.setEnabled(tab["nav_index"] > 0)
-        self.fwd_btn.setEnabled(tab["nav_index"] < len(tab["nav_stack"]) - 1)
-
-    def _apply_nav_entry(self, index):
-        tab = self._tabs[index]
-        entry = tab["nav_stack"][tab["nav_index"]]
-        if entry == "home":
-            tab["stack"].setCurrentWidget(tab["home_page"])
-            tab["pill"].show_home_state()
-            if index == self._current_index:
-                self.address_bar.clear()
-        else:
-            tab["nav_stepping"] = True
-            tab["stack"].setCurrentWidget(tab["view"])
-            tab["view"].load(QUrl(entry))
-        self._update_back_forward_buttons(index)
-
-    def _on_back_clicked(self):
-        index = self._current_index
-        if not (0 <= index < len(self._tabs)):
-            return
-        tab = self._tabs[index]
-        if tab["nav_index"] <= 0:
-            return
-        tab["nav_index"] -= 1
-        self._apply_nav_entry(index)
-
-    def _on_forward_clicked(self):
-        index = self._current_index
-        if not (0 <= index < len(self._tabs)):
-            return
-        tab = self._tabs[index]
-        if tab["nav_index"] >= len(tab["nav_stack"]) - 1:
-            return
-        tab["nav_index"] += 1
-        self._apply_nav_entry(index)
-
-    def _on_title_changed(self, tab_index, title):
-        if 0 <= tab_index < len(self._tabs):
-            self._tabs[tab_index]["pill"].set_title(title)
-
-    def _on_audible_changed(self, tab_index, audible):
-        if 0 <= tab_index < len(self._tabs):
-            self._tabs[tab_index]["pill"].set_audible(audible)
-
-    def _on_muted_changed(self, tab_index, muted):
-        if 0 <= tab_index < len(self._tabs):
-            self._tabs[tab_index]["pill"].set_muted(muted)
-
-    def _toggle_tab_mute(self, tab_index):
-        if 0 <= tab_index < len(self._tabs):
-            page = self._tabs[tab_index]["page"]
-            page.setAudioMuted(not page.isAudioMuted())
-
-    def _on_load_started(self, tab_index):
-        if tab_index == self._current_index:
-            self._loading = True
-            self._update_reload_icon()
-
-    def _on_load_finished(self, tab_index, ok):
-        if not (0 <= tab_index < len(self._tabs)):
-            return
-        tab = self._tabs[tab_index]
-        if tab_index == self._current_index:
-            self._loading = False
-            self._update_reload_icon()
-        url = tab["view"].url().toString()
-        if ok and url.startswith("http") and not tab.get("incognito"):
-            browser_data.add_history_entry(url, tab["page"].title())
-            self._refresh_address_completer()
-
-    def _refresh_address_completer(self):
-        urls = set()
-        for entry in browser_data.load_history():
-            u = entry.get("url")
-            if u:
-                urls.add(u)
-        for entry in browser_data.load_bookmarks():
-            u = entry.get("url")
-            if u:
-                urls.add(u)
-        self._address_completer_model.setStringList(sorted(urls))
-
-    def _on_download_requested(self, download: QWebEngineDownloadRequest):
-        # Cancel Chromium's own download UI/manager entirely -- the file is
-        # instead handed to this tab's own start_direct_download() below,
-        # so it shows up as a real progress card in the shared Download
-        # tab (no extension, no separate download manager window), and
-        # still lands in the shared History tab once it finishes.
-        url = download.url().toString()
-        suggested_name = download.downloadFileName() or None
-        download.cancel()
-        self.start_direct_download(url, suggested_name or None)
-
-    def _open_in_system_browser(self, url):
-        """Fallback for sites this embedded Chromium can't play video on --
-        QtWebEngine ships without H.264/AAC decoding (a licensing exclusion,
-        confirmed directly against real PornHub/xHamster playback failures),
-        and there's no fixing that from inside this browser. The user's own
-        installed default browser has full codec support already, so handing
-        off the exact same URL there is a real fix, not a dead end. Reached
-        either from the overflow menu (manual, any page) or the injected
-        video-error banner (automatic, only when a <video> actually fails)."""
-        if url:
-            webbrowser.open(url)
-
-    # ------------------------------------------------------ Downloads -----
-    def start_direct_download(self, url, suggested_filename=None):
-        title = suggested_filename or url
-        job_id = self.download_tab.start_job(
-            title, "Direct download", None,
-            make_on_cancel=lambda jid: (lambda: self._cancel_job(jid)),
-            make_on_pause_toggle=lambda jid: (lambda paused: self._toggle_pause(jid, paused)),
-            make_on_play=lambda jid: (lambda: self._play_job(jid)),
-        )
-        pause_event = threading.Event()
-        pause_event.set()  # set == not paused
-        self._jobs[job_id] = {"cancel": False, "pause_event": pause_event, "path": None, "title": title}
-        threading.Thread(
-            target=self._direct_download_thread,
-            args=(job_id, url, suggested_filename),
-            daemon=True,
-        ).start()
-
-    def _direct_download_thread(self, job_id, url, suggested_filename):
-        hook = lambda d: self._progress_hook(job_id, d)
-        try:
-            final_path = downloader.download_direct_file(url, self.download_dir, hook, suggested_filename)
-            self._download_done_sig.emit(job_id, final_path)
-        except Exception as e:
-            logger.exception("Direct download failed for %s", url)
-            self._download_error_sig.emit(job_id, str(e))
-
-    def _progress_hook(self, job_id, d):
-        job = self._jobs.get(job_id)
-        if job is None or job["cancel"]:
-            raise downloader.DownloadCancelled("Cancelled by user")
-        # Segmented direct downloads call this from several worker threads
-        # at once (see download_direct_file) -- Event.wait()/the dict
-        # lookups above are all thread-safe, so pausing here genuinely
-        # stalls every one of them together, not just the reporting thread.
-        job["pause_event"].wait()
-        if job["cancel"]:
-            raise downloader.DownloadCancelled("Cancelled by user")
-
-        path = d.get("filename")
-        if path and path != job.get("path") and os.path.exists(path):
-            job["path"] = path
-            self._playable_sig.emit(job_id)
-
-        if d.get("status") == "downloading":
-            total = d.get("total_bytes")
-            downloaded = d.get("downloaded_bytes", 0)
-            speed = d.get("speed")
-            eta = d.get("eta")
-            pct = (downloaded / total * 100) if total else 0
-            parts = []
-            if total:
-                parts.append(f"{formatting.humanize_size(downloaded)} / {formatting.humanize_size(total)}")
-            if speed:
-                parts.append(f"{formatting.humanize_size(speed)}/s")
-            eta_str = formatting.format_eta(eta) if eta is not None else None
-            if eta_str:
-                parts.append(f"ETA {eta_str}")
-            self._progress_sig.emit(job_id, pct, "  •  ".join(parts) if parts else "Downloading...")
-
-    def _update_progress(self, job_id, pct, label):
-        if job_id in self._jobs:
-            self.download_tab.update_progress(job_id, pct, label)
-
-    def _on_download_done(self, job_id, final_path):
-        job = self._jobs.get(job_id)
-        if job is None:
-            return
-        # Set path/playable *before* mark_done()/job_finished, not after --
-        # anything reacting to "this job is done" should already see the
-        # correct final path, not a stale one (real bug, caught via a direct
-        # end-to-end test: video_tab.py's audio path updated job["path"]
-        # after mark_done() and a job_finished listener observed the old,
-        # already-deleted intermediate file instead of the real one).
-        if final_path and os.path.exists(final_path):
-            job["path"] = final_path
-            self.download_tab.set_playable(job_id, True)
-            try:
-                size_bytes = os.path.getsize(final_path)
-            except OSError:
-                size_bytes = 0
-            download_history.add_entry(
-                "file", job["title"] or os.path.basename(final_path),
-                final_path, self.download_dir, size_bytes,
-            )
-        self.download_tab.mark_done(job_id, "✓ Completed")
-        # Not popped -- see the _jobs comment in __init__: the card's Play
-        # button stays live for a few seconds after completion and still
-        # needs "path" to resolve.
-
-    def _on_download_error(self, job_id, err):
-        job = self._jobs.pop(job_id, None)
-        if job is None:
-            return
-        if job["cancel"]:
-            self.download_tab.mark_cancelled(job_id)
-            return
-        self.download_tab.mark_failed(
-            job_id, f"Failed: {err.splitlines()[0][:120]}" if err else "Failed.")
-        logger.error("Direct download job %s failed: %s", job_id, err)
-
-    def _cancel_job(self, job_id):
-        job = self._jobs.get(job_id)
-        if job:
-            job["cancel"] = True
-            job["pause_event"].set()  # wake a paused thread so it reaches the cancel check
-
-    def _toggle_pause(self, job_id, paused):
-        job = self._jobs.get(job_id)
-        if not job:
-            return
-        if paused:
-            job["pause_event"].clear()
-        else:
-            job["pause_event"].set()
-
-    def _play_job(self, job_id):
-        job = self._jobs.get(job_id)
-        path = job.get("path") if job else None
-        if path and os.path.exists(path):
-            os.startfile(path)
-
-    def _on_fullscreen_requested(self, request):
-        request.accept()
-        is_fullscreen = request.toggleOn()
-        self.toolbar_frame.setVisible(not is_fullscreen)
-        self.tabstrip_frame.setVisible(not is_fullscreen)
-        self.fullscreen_requested.emit(is_fullscreen)
-
-    def _on_new_window_requested(self, request):
-        # Middle-click/Ctrl+click background-opens without stealing focus
-        # from the page you were reading -- exactly Chrome's own behaviour.
-        # Everything else (target="_blank", window.open(), a genuine
-        # new-window request) activates the new tab immediately, since
-        # those represent explicit intent to go look at it now.
-        background = request.destination() == QWebEngineNewWindowRequest.DestinationType.InNewBackgroundTab
-        new_index = self._create_tab(activate=not background)
-        tab = self._tabs[new_index]
-        # No url= passed to _create_tab above -- openIn() below is what
-        # actually starts the navigation (it hands the in-flight request,
-        # referrer/POST-data and all, straight to the target page). Passing
-        # a URL there too would have fired a second, separate load.
-        tab["stack"].setCurrentWidget(tab["view"])
-        request.openIn(tab["page"])
-
-    # -------------------------------------------------- Bookmarks/History --
-    def _current_url(self):
-        view = self._active_view()
-        return view.url().toString() if view else ""
-
-    def _update_bookmark_button(self):
-        bookmarked = browser_data.is_bookmarked(browser_data.load_bookmarks(), self._current_url())
-        t = getattr(self, "_theme_tokens", None) or theme.browser_tokens(accent=self._browser_accent(), dark_mode=self._dark_mode())
-        color = t["accent"] if bookmarked else t["text_muted"]
-        self._bookmark_action.setIcon(_star_icon(bookmarked, color))
-        self._bookmark_action.setToolTip("Edit bookmark" if bookmarked else "Bookmark this page")
-
-    def _show_bookmark_dialog(self):
-        """Chrome's own flow: clicking the star adds the bookmark
-        immediately, then opens a small popup to rename or remove it --
-        not a plain on/off toggle with no feedback."""
-        url = self._current_url()
-        if not url or url == "about:blank":
-            return
-        page = self.page
-        bookmarks = browser_data.load_bookmarks()
-        existing = next((b for b in bookmarks if b.get("url") == url), None)
-        if existing is None:
-            browser_data.add_bookmark(url, (page.title() if page else "") or url)
-            self._update_bookmark_button()
-            self._refresh_address_completer()
-            existing = {"url": url, "title": (page.title() if page else "") or url}
-
-        t = getattr(self, "_theme_tokens", None) or theme.browser_tokens(accent=self._browser_accent(), dark_mode=self._dark_mode())
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Bookmark added")
-        dlg.setFixedWidth(320)
-        dlg.setStyleSheet(f"QDialog {{ background: {t['card_bg_solid']}; color: {t['text']}; }}")
-        layout = QVBoxLayout(dlg)
-        name_label = QLabel("Name")
-        name_label.setStyleSheet(f"color: {t['text_muted']}; font-size: 11px;")
-        layout.addWidget(name_label)
-        name_edit = QLineEdit(existing.get("title", url))
-        name_edit.setStyleSheet(f"""
-            QLineEdit {{
-                background: {'#1c1c1e' if self._dark_mode() else '#ffffff'};
-                color: {t['text']}; border: 1px solid {t['card_border']};
-                border-radius: 6px; padding: 6px 8px;
-            }}
-        """)
-        layout.addWidget(name_edit)
-
-        btn_row = QHBoxLayout()
-        remove_btn = QPushButton("Remove")
-        done_btn = QPushButton("Done")
-        done_btn.setObjectName("accent")
-        for b in (remove_btn, done_btn):
-            b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet(f"""
-                QPushButton {{ border-radius: 6px; padding: 6px 14px;
-                    background: {t['hover_overlay']}; color: {t['text']}; border: none; }}
-                QPushButton:hover {{ background: {t['pressed_overlay']}; }}
-            """)
-        done_btn.setStyleSheet(f"""
-            QPushButton {{ border-radius: 6px; padding: 6px 14px;
-                background: {t['accent']}; color: {t['accent_text']}; border: none; font-weight: 600; }}
-            QPushButton:hover {{ background: {t['accent_hover']}; }}
-        """)
-        btn_row.addWidget(remove_btn)
-        btn_row.addStretch(1)
-        btn_row.addWidget(done_btn)
-        layout.addLayout(btn_row)
-
-        def _save_and_close():
-            browser_data.remove_bookmark(url)
-            browser_data.add_bookmark(url, name_edit.text().strip() or url)
-            self._update_bookmark_button()
-            self._refresh_address_completer()
-            dlg.accept()
-
-        def _remove_and_close():
-            browser_data.remove_bookmark(url)
-            self._update_bookmark_button()
-            self._refresh_address_completer()
-            dlg.accept()
-
-        done_btn.clicked.connect(_save_and_close)
-        remove_btn.clicked.connect(_remove_and_close)
-        dlg.exec()
-
-    def _show_web_context_menu(self, pos, view):
-        """Right-click on the page itself. Video specifically routes through
-        the *page* URL (open_in_video_tab -> the Video tab's own yt-dlp
-        fetch), not the raw mediaUrl() -- confirmed necessary: sites like
-        YouTube stream video via MediaSource Extensions, so mediaUrl() for
-        a right-clicked <video> is often a blob: URL that isn't independently
-        downloadable, while the existing overlay-button pipeline (page URL
-        in, yt-dlp handles real extraction) already works reliably. Images
-        do have a real, direct URL, so those go straight to a direct
-        download instead."""
-        req = view.lastContextMenuRequest()
-        menu = QMenu(self)
-        menu.setStyleSheet(self._menu_stylesheet())
-
-        media_type = req.mediaType()
-        added_download_action = False
-        if media_type == QWebEngineContextMenuRequest.MediaType.MediaTypeVideo:
-            action = menu.addAction("Download this video with Awesome Downloader")
-            action.triggered.connect(lambda: self.open_in_video_tab.emit(view.url().toString()))
-            added_download_action = True
-        elif media_type == QWebEngineContextMenuRequest.MediaType.MediaTypeImage and not req.mediaUrl().isEmpty():
-            action = menu.addAction("Download this image")
-            action.triggered.connect(
-                lambda u=req.mediaUrl().toString(): self.start_direct_download(u))
-            added_download_action = True
-
-        if added_download_action:
-            menu.addSeparator()
-
-        # The rest of Chromium's own default menu (Back/Forward/Reload,
-        # Copy, Inspect, ...) still underneath -- this adds a download
-        # option on top of the normal menu, not instead of it.
-        standard = view.createStandardContextMenu()
-        for standard_action in standard.actions():
-            menu.addAction(standard_action)
-
-        menu.exec(view.mapToGlobal(pos))
-
-    def _show_new_tab_menu(self, pos):
-        """Right-click on the "+" button -- the explicit, discoverable way
-        to open a private tab, for anyone who doesn't already know the
-        Ctrl+Shift+N shortcut."""
-        menu = QMenu(self)
-        menu.setStyleSheet(self._menu_stylesheet())
-        new_tab_action = menu.addAction("New Tab")
-        new_tab_action.triggered.connect(lambda: self._create_tab(activate=True))
-        private_action = menu.addAction("New Private Tab")
-        private_action.triggered.connect(lambda: self._create_tab(activate=True, incognito=True))
-        menu.exec(self.new_tab_btn.mapToGlobal(pos))
-
-    def _show_overflow_menu(self):
-        """The "⋮" menu -- Bookmarks and History as cascading submenus,
-        plus a per-site ad-block toggle, Chrome/uBlock-style."""
-        menu = QMenu(self)
-        menu.setStyleSheet(self._menu_stylesheet())
-
-        # Manual escape hatch for the sites this embedded Chromium can't play
-        # video on (no H.264/AAC decoder, a licensing exclusion) -- always
-        # available here rather than only appearing after a video visibly
-        # fails, since not every failure trips the auto-detect banner
-        # (silent black-screen players that never fire a real 'error' event).
-        open_system_action = menu.addAction("Open this page in your default browser")
-        open_system_action.triggered.connect(
-            lambda: self._open_in_system_browser(self._current_url()))
-        menu.addSeparator()
-
-        host = QUrl(self._current_url()).host()
-        if host:
-            disabled_hosts = browser_data.load_adblock_disabled_hosts()
-            is_disabled = host in disabled_hosts
-            adblock_action = menu.addAction(
-                f"{'Enable' if is_disabled else 'Disable'} ad-block on {host}")
-            adblock_action.triggered.connect(lambda: self._toggle_adblock_for_current_site(host, is_disabled))
-
-        refresh_label = "Refreshing ad-block list..." if self._adblock_refreshing else "Refresh ad-block list"
-        refresh_action = menu.addAction(refresh_label)
-        refresh_action.setEnabled(not self._adblock_refreshing)
-        refresh_action.triggered.connect(self._refresh_adblock_list)
-        menu.addSeparator()
-
-        bookmarks_menu = menu.addMenu("★  Bookmarks")
-        bookmarks_menu.setStyleSheet(self._menu_stylesheet())
-        bookmarks = browser_data.load_bookmarks()
-        if not bookmarks:
-            empty = bookmarks_menu.addAction("No bookmarks yet")
-            empty.setEnabled(False)
-        else:
-            for b in bookmarks:
-                title = b.get("title") or b.get("url", "")
-                action = bookmarks_menu.addAction(title[:60])
-                action.setToolTip(b.get("url", ""))
-                action.triggered.connect(lambda _c=False, u=b.get("url"): self._navigate_to(u))
-
-        history_menu = menu.addMenu("🕘  History")
-        history_menu.setStyleSheet(self._menu_stylesheet())
-        entries = browser_data.load_history()
-        if not entries:
-            empty = history_menu.addAction("No history yet")
-            empty.setEnabled(False)
-        else:
-            for e in entries[:25]:
-                title = e.get("title") or e.get("url", "")
-                action = history_menu.addAction(title[:60])
-                action.setToolTip(e.get("url", ""))
-                action.triggered.connect(lambda _c=False, u=e.get("url"): self._navigate_to(u))
-            history_menu.addSeparator()
-            clear_action = history_menu.addAction("Clear history")
-            clear_action.triggered.connect(browser_data.clear_history)
-            clear_action.triggered.connect(self._refresh_address_completer)
-
-        # bottomRight, not bottomLeft: the button sits at the toolbar's right
-        # edge now, so a left-anchored popup would try to open mostly off
-        # the window -- anchoring to its right edge keeps the menu on-screen
-        # and matches where a real browser opens this same menu from.
-        menu.exec(self.menu_btn.mapToGlobal(self.menu_btn.rect().bottomRight() - QPoint(menu.sizeHint().width(), 0)))
-
-    def _toggle_adblock_for_current_site(self, host, currently_disabled):
-        browser_data.set_adblock_disabled(host, not currently_disabled)
-        view = self._active_view()
-        if view:
-            view.reload()  # the new rule only affects requests made after this point
-
-    def _refresh_adblock_list(self):
-        """Pulls a fresh, actively maintained ad/tracker domain list (see
-        adblock_updater.py) to supplement the bundled snapshot, which was
-        confirmed to have real gaps (doubleclick.net, googlesyndication.com,
-        facebook.net and others were missing entirely). Lives here in the
-        Browser tab's own menu, not the app-wide Updates dialog -- this is
-        specifically a Browser-tab concern, same reasoning as the per-site
-        ad-block toggle right above it."""
-        if self._adblock_refreshing:
-            return
-        self._adblock_refreshing = True
-        threading.Thread(target=self._adblock_refresh_thread, daemon=True).start()
-
-    def _adblock_refresh_thread(self):
-        try:
-            count = adblock_updater.refresh_domain_list()
-            self._adblock_refresh_sig.emit(True, str(count))
-        except Exception as e:
-            logger.exception("Ad-block list refresh failed")
-            self._adblock_refresh_sig.emit(False, str(e))
-
-    def _on_adblock_refresh_done(self, ok, result):
-        self._adblock_refreshing = False
-        if ok:
-            QMessageBox.information(
-                self, config.APP_NAME,
-                f"Ad-block list refreshed ({int(result):,} domains). "
-                f"Restart the app for it to take effect."
-            )
-        else:
-            QMessageBox.critical(self, config.APP_NAME, f"Couldn't refresh the ad-block list:\n{result}")
-
-    # ----------------------------------------------------------- Theme -----
+    # ---------------------------------------------------------- theme ----
     def _dark_mode(self):
         return (self.settings or {}).get("theme", "dark") != "light"
 
-    def _browser_accent(self):
-        return browser_data.get_browser_accent()
+    def _page_bg(self):
+        return QColor(*palettes.page_background(self._dark))
 
     def apply_theme(self):
-        """Called at startup and again by MainWindow after a live theme
-        toggle -- matches the app's own dark/light window theme, per spec."""
-        t = theme.browser_tokens(accent=self._browser_accent(), dark_mode=self._dark_mode())
-        self._theme_tokens = t
-        # One continuous rounded card spanning both rows -- the tab strip's
-        # top corners and the toolbar's bottom corners share the same
-        # radius and border, meeting with no gap between them, the way the
-        # address bar's own pill reads as one seamless shape rather than
-        # two separate floating cards stacked with a visible seam.
-        self.toolbar_frame.setStyleSheet(f"""
-            QFrame#browserToolbar {{
-                background: transparent;
-                border: none;
-                border-bottom: 1px solid {t['card_border']};
-            }}
-        """)
-        # Still a distinct, slightly darker fill than the toolbar/active-tab
-        # so inactive tabs (transparent) visibly recede against it while
-        # the active tab's toolbar-matched background pops forward -- only
-        # the outer shape (rounded top corners, matching border, no gap)
-        # merges with the toolbar below, not the fill color.
-        self.tabstrip_frame.setStyleSheet(f"""
-            QFrame#browserTabstrip {{
-                background: transparent;
-                border: none;
-                border-bottom: 1px solid {t['divider']};
-            }}
-        """)
-        self.find_frame.setStyleSheet(f"""
-            QFrame#browserFindBar {{
-                background: {t['card_bg_solid']};
-                border: 1px solid {t['card_border']};
-                border-radius: 8px;
-            }}
-        """)
-        button_style = f"""
-            QPushButton {{
-                background: transparent;
-                color: {t['text']};
-                border: 1px solid {t['card_border']};
-                border-radius: 12px;
-                font-size: 14px;
-            }}
-            QPushButton:hover {{ background: {t['hover_overlay']}; }}
-            QPushButton:pressed {{ background: {t['pressed_overlay']}; }}
-            QPushButton:disabled {{ color: {t['text_muted']}; border-color: transparent; }}
-        """
-        for btn in (self.zoom_btn, self.menu_btn, self.back_btn, self.fwd_btn, self.reload_btn, self.home_btn):
-            btn.setStyleSheet(button_style)
-        icon_color = t["text"]
-        self.zoom_btn.setIcon(_nav_icon("zoom", icon_color))
-        self.menu_btn.setIcon(_nav_icon("menu", icon_color))
-        self.back_btn.setIcon(_nav_icon("back", icon_color))
-        self.fwd_btn.setIcon(_nav_icon("forward", icon_color))
-        self.home_btn.setIcon(_nav_icon("home", icon_color))
-        self.new_tab_btn.setIcon(_nav_icon("plus", icon_color))
-        self.new_tab_btn.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {t['text']}; border: none; border-radius: 15px; }}
-            QPushButton:hover {{ background: {t['hover_overlay']}; }}
-        """)
-        self._update_reload_icon()
-        for btn in (self.find_prev_btn, self.find_next_btn, self.find_close_btn):
-            btn.setStyleSheet(button_style)
-        self.find_prev_btn.setIcon(_nav_icon("back", icon_color, size=11))
-        self.find_next_btn.setIcon(_nav_icon("forward", icon_color, size=11))
-        self.find_close_btn.setIcon(_nav_icon("stop", icon_color, size=11))
-        self.find_input.setStyleSheet(f"""
-            QLineEdit {{ background: {'#1c1c1e' if self._dark_mode() else '#ffffff'};
-                color: {t['text']}; border: 1px solid {t['card_border']}; border-radius: 6px; padding: 0 8px; }}
-        """)
+        self._dark = self._dark_mode()
+        t = self._t = theme.browser_tokens(accent=browser_data.get_browser_accent(), dark_mode=self._dark)
+        for b in (self.back_btn, self.fwd_btn, self.reload_btn, self.home_btn, self.shield_btn, self.menu_btn,
+                  self.bookmarks_btn):
+            b.apply_theme(t)
+        self.strip.apply_theme(t, self._dark)
+        self.address.apply_theme(t, self._dark)
+        self.download_btn.apply_theme(t)
+        self.now_playing.apply_theme(t)
+        self.load_bar.apply_theme(t)
+        self.bookmarks_bar.apply_theme(t, self._dark)
+        self.home.apply_theme()
+        popup = self._completer.popup()
+        popup.setStyleSheet(
+            f"QListView {{ background: {t['card_bg_solid']}; color: {t['text']}; border: 1px solid {t['card_border']};"
+            f" border-radius: 10px; padding: 4px; outline: none; font-size: 12px; }}"
+            f"QListView::item {{ padding: 6px 10px; border-radius: 7px; }}"
+            f"QListView::item:selected {{ background: {t['hover_overlay']}; color: {t['text']}; }}")
         for tab in self._tabs:
-            tab["pill"].apply_theme(t)
-            bg = QColor(24, 24, 27) if self._dark_mode() else QColor(255, 255, 255)
-            tab["page"].setBackgroundColor(bg)
-            tab["home_page"].apply_theme()
-        self.address_bar.setStyleSheet(f"""
-            QLineEdit {{
-                background: {'#1c1c1e' if self._dark_mode() else '#ffffff'};
-                color: {t['text']};
-                border: 1px solid {t['card_border']};
-                border-radius: 16px;
-                padding: 0 12px;
-            }}
-        """)
-        if hasattr(self, "_bookmark_action"):
-            self._update_bookmark_button()
+            tab.pill.apply_theme(t, self._dark)
+            if tab.view is not None:
+                tab.view.set_background(self._page_bg())
+                tab.view.set_color_scheme(self._dark)
+        self._sync_toolbar()
+        self.update()
 
-    def _menu_stylesheet(self):
-        t = getattr(self, "_theme_tokens", None) or theme.browser_tokens(accent=self._browser_accent(), dark_mode=self._dark_mode())
-        return f"""
-            QMenu {{
-                background: {t['card_bg_solid']};
-                color: {t['text']};
-                border: 1px solid {t['card_border']};
-                border-radius: 8px;
-                padding: 4px;
-            }}
-            QMenu::item {{ padding: 6px 24px 6px 12px; border-radius: 6px; }}
-            QMenu::item:selected {{ background: {t['hover_overlay']}; }}
-            QMenu::item:disabled {{ color: {t['text_muted']}; }}
-            QMenu::separator {{ height: 1px; background: {t['divider']}; margin: 4px 8px; }}
-        """
+    def settings_changed(self):
+        self.download_dir = settings_store.get_save_dir(self.settings, "video", config.DEFAULT_DOWNLOAD_DIR)
+
+    # ----------------------------------------------------------- tabs ----
+
+    def _current(self):
+        return self._cur if self._cur in self._tabs else None
+
+    def current_view(self):
+        tab = self._current()
+        return tab.view if tab is not None else None
+
+    def _create_tab(self, url=None, activate=True, private=False, index=None, opener=None):
+        pill = TabPill()
+        pill.set_private(private)
+        pill.apply_theme(self._t, self._dark)
+        tab = _Tab(pill, private)
+        tab.opener = opener
+        pill.clicked.connect(lambda t=tab: self._switch_to(t))
+        pill.close_clicked.connect(lambda t=tab: self._close(t))
+        pill.mute_clicked.connect(lambda t=tab: self._toggle_mute(t))
+        pill.context_requested.connect(lambda pos, t=tab: self._tab_menu(t, pos))
+        if index is None or index > len(self._tabs):
+            index = len(self._tabs)
+        self._tabs.insert(index, tab)
+        self.strip.add_pill(pill, index, animate=self.isVisible())
+        if url:
+            tab.on_home = False
+            tab.url = url
+            tab.title = _title_for(url)
+            tab.pending_url = url
+            pill.set_url(url, home=False)
+            pill.set_title(tab.title)
+            icon_pm = favicons().get(url)
+            if icon_pm is not None:
+                pill.set_icon(icon_pm)
+            else:
+                favicons().ready.connect(lambda host, pm, t=tab: self._early_icon(t, host, pm))
+        else:
+            pill.set_url("", home=True)
+        if activate:
+            self._switch_to(tab)
+        self._schedule_save()
+        return tab
+
+    def _early_icon(self, tab, host, pixmap):
+        if tab.icon is None and _host(tab.url) == host:
+            tab.pill.set_icon(pixmap)
+
+    def _ensure_view(self, tab):
+        if tab.view is not None:
+            return tab.view
+        self.services.start()
+        if self.services.error is not None or self.services.engine is None:
+            self._on_engine_failed(self.services.error or "WebView2 didn't start")
+            return None
+        view = webview2.WebView2Widget(self.services.engine, private=tab.private, parent=self.pages,
+                                       background=self._page_bg())
+        for js in browser_scripts.all_scripts():
+            view.add_startup_script(js)
+        view.created.connect(lambda v=view: v.set_color_scheme(self._dark))
+        view.urlChanged.connect(lambda u, t=tab: self._on_url(t, u))
+        view.titleChanged.connect(lambda s, t=tab: self._on_title(t, s))
+        view.loadStarted.connect(lambda t=tab: self._on_load_started(t))
+        view.loadProgress.connect(lambda v, t=tab: self._on_progress(t, v))
+        view.loadFinished.connect(lambda ok, t=tab: self._on_load_finished(t, ok))
+        view.iconChanged.connect(lambda pm, t=tab: self._on_icon(t, pm))
+        view.historyChanged.connect(lambda t=tab: self._sync_toolbar() if t is self._cur else None)
+        view.audibleChanged.connect(lambda on, t=tab: self._on_audio(t, audible=on))
+        view.mutedChanged.connect(lambda on, t=tab: self._on_audio(t, muted=on))
+        view.zoomChanged.connect(lambda z, t=tab: self._on_zoom(t, z))
+        view.fullScreenChanged.connect(lambda on, t=tab: self._on_fullscreen(t, on))
+        view.webMessage.connect(lambda msg, t=tab: self._on_message(t, msg))
+        view.newWindowRequested.connect(lambda args, t=tab: self._on_new_window(t, args))
+        view.downloadStarting.connect(lambda args, t=tab: self._on_download_starting(t, args))
+        view.contextMenuRequested.connect(lambda args, t=tab: self._on_context_menu(t, args))
+        view.acceleratorKey.connect(lambda args, t=tab: self._on_accelerator(t, args))
+        view.externalUri.connect(lambda args, t=tab: self._on_external_uri(t, args))
+        view.windowCloseRequested.connect(lambda t=tab: QTimer.singleShot(0, lambda: self._close(t)))
+        view.processFailed.connect(lambda kind, t=tab: self._on_process_failed(t, kind))
+        if tab.private:
+            view.created.connect(lambda v=view, t=tab: self._block_in_private(v, t))
+        self.pages.addWidget(view)
+        tab.view = view
+        return view
+
+    def _block_in_private(self, view, tab):
+        """Network blocking for a private tab, from the built-in list: every
+        request the page makes is checked, and one to a listed ad or tracker
+        domain is answered with a 403 instead of going out. The page's own
+        top-level address is never blocked."""
+        domains = private_blocklist()
+        if not domains or view.core is None:
+            return
+        wv = webview2.WV
+        env = self.services.engine.env
+
+        def on_request(sender, args):
+            try:
+                uri = str(args.Request.Uri)
+                if uri == view.nav_uri or not uri.startswith(("http://", "https://")):
+                    return
+                if blocked_host(_host(uri), domains):
+                    args.Response = env.CreateWebResourceResponse(None, 403, "Blocked", "")
+                    tab.private_blocked = getattr(tab, "private_blocked", 0) + 1
+            except Exception:   # noqa: BLE001 -- never break the page over a check
+                pass
+        view.core.AddWebResourceRequestedFilter("*", wv.CoreWebView2WebResourceContext.All)
+        view.core.WebResourceRequested += on_request
+        view._private_handler = on_request
+
+    def _load_in(self, tab, url):
+        view = self._ensure_view(tab)
+        if view is None:
+            return
+        tab.on_home = False
+        tab.page_ahead = False
+        tab.pending_url = None
+        tab.url = url
+        view.load(url)
+        tab.pill.set_url(url, home=False)
+        if tab is self._cur:
+            self._show_surface(tab)
+            self._sync_toolbar()
+
+    def _show_surface(self, tab):
+        if self.services.error is not None and not tab.on_home:
+            self.pages.setCurrentWidget(self.missing)
+        elif tab.on_home or tab.view is None:
+            if self.isVisible():
+                self.home.ensure()
+            self.home.show_for(tab)
+            self.pages.setCurrentWidget(self.home.surface())
+            self._apply_home_backdrop()
+            return
+        else:
+            self.pages.setCurrentWidget(tab.view)
+            # Its place straight away: the stack only lays out the page it
+            # shows on its next layout pass, and until then a page shown for
+            # the first time (or after the window changed size) sits wherever
+            # it last was -- its native window with it.
+            tab.view.setGeometry(self.pages.contentsRect())
+        self._apply_home_backdrop()
+
+    def _chrome_top(self):
+        win = self.window()
+        if win is None or win is self:
+            return 0
+        return max(0, self.pages.mapTo(win, QPoint(0, 0)).y())
+
+    def _apply_home_backdrop(self):
+        """On the home page, its wallpaper runs on up behind the browser's
+        bars and the title bar, frosted there (the window paints the strip
+        the page hands over); anywhere else, the window's own backdrop."""
+        surface = getattr(self.window(), "backdrop_surface", None)
+        if surface is None or not hasattr(surface, "set_top_image"):
+            return
+        top = self._chrome_top()
+        self.home.set_chrome_top(top)
+        cur = self._current()
+        showing = (self.isVisible() and cur is not None and (cur.on_home or cur.view is None)
+                   and self.home.view is not None and self.pages.currentWidget() is self.home.view
+                   and self.home.strip is not None)
+        surface.set_top_image(self.home.strip if showing else None, top)
+
+    def _switch_to(self, tab):
+        if tab not in self._tabs:
+            return
+        prev = self._current()
+        if prev is not None and prev is not tab:
+            prev.pill.set_active(False)
+            prev.hidden_since = time.monotonic()
+            if prev.view is not None:
+                prev.view.set_active(False)
+        self._cur = tab
+        self._status_fast()
+        tab.pill.set_active(True)
+        tab.pill.set_sleeping(False)
+        if tab.pending_url and self.isVisible():
+            self._load_in(tab, tab.pending_url)
+        self._show_surface(tab)
+        if tab.view is not None:
+            tab.view.set_active(True)
+            if not tab.on_home:
+                QTimer.singleShot(0, lambda: self._focus_page())
+        self._sync_toolbar()
+        self._update_now_playing()
+        self._schedule_save()
+        self._sync_private_look()
+
+    def _sync_private_look(self):
+        """A private tab in view puts the whole window in black and white --
+        its wallpaper, its glass, its colours; site icons and pictures keep
+        theirs -- so there's no mistaking which kind of tab this is. Any
+        other tab, or another part of the app, has the chosen palette back."""
+        win = self.window()
+        if win is None or win is self or not hasattr(win, "set_palette_override"):
+            return
+        cur = self._current()
+        private = bool(self.isVisible() and cur is not None and cur.private)
+        win.set_palette_override(palettes.MONO if private else None)
+
+    def _home_go(self, text, where):
+        """A link or a search from the home page: here, in a new tab, or behind."""
+        cur = self._current()
+        if where == "current" or cur is None:
+            self.navigate(text, tab=cur)
+            return
+        url = normalize_address(text)
+        if url.lower().startswith("magnet:"):
+            self._handle_magnet(url)
+            return
+        self._open_link(cur, url, background=(where == "background"))
+
+    def _home_surfaced(self):
+        cur = self._current()
+        if cur is not None and (cur.on_home or cur.view is None) and self.isVisible():
+            self.pages.setCurrentWidget(self.home.surface())
+            self._apply_home_backdrop()
+
+    def _close(self, tab, record=True):
+        if tab not in self._tabs:
+            return
+        if len(self._tabs) == 1:
+            # A Browser always keeps a tab; closing the last one leaves a
+            # fresh home tab rather than refusing (which read as a bug).
+            self._create_tab(activate=False)
+        was_current = tab is self._cur
+        idx = self._tabs.index(tab)
+        if record and tab.url and not tab.on_home and tab.url.startswith(("http://", "https://")):
+            self._closed.append({"url": tab.url, "private": tab.private})
+            self._closed = self._closed[-browser_data.CLOSED_LIMIT:]
+        self._tabs.remove(tab)
+        self.strip.remove_pill(tab.pill, animate=self.isVisible())
+        if tab.view is not None:
+            view, tab.view = tab.view, None
+            view.close_page()
+            self.pages.removeWidget(view)
+            view.deleteLater()
+        if was_current:
+            target = tab.opener if tab.opener in self._tabs else self._tabs[min(idx, len(self._tabs) - 1)]
+            self._cur = None
+            self._switch_to(target)
+        self._update_now_playing()
+        self._schedule_save()
+
+    def close_current_tab(self):
+        if self._cur is not None:
+            self._close(self._cur)
+
+    def close_all_tabs(self):
+        """The strip's close-all button: every tab goes, a fresh New Tab is
+        left, and Ctrl+Shift+T -- or Undo on the toast -- brings them all
+        back at once."""
+        doomed = list(self._tabs)
+        if len(doomed) == 1 and doomed[0].on_home and doomed[0].view is None and not doomed[0].pending_url:
+            return
+        urls = [t.url for t in doomed if not t.private and not t.on_home
+                and (t.url or "").startswith(("http://", "https://"))]
+        # The fresh tab first, made current, so closing the rest never
+        # switches through them (which would load each one on its way out).
+        self._create_tab(activate=True)
+        for tab in doomed:
+            self._close(tab, record=False)
+        if urls:
+            self._closed.append({"session": urls})
+            self._closed = self._closed[-browser_data.CLOSED_LIMIT:]
+        n = len(doomed)
+        show_toast(self.pages, "Closed %d tab%s" % (n, "" if n == 1 else "s"),
+                   action="Undo" if urls else None, on_action=self.reopen_closed_tab if urls else None,
+                   kind="info", ms=6000)
+        self._schedule_save()
+
+    def reopen_closed_tab(self):
+        """Ctrl+Shift+T: the last closed tab comes back -- or, right after a
+        restart that didn't reopen them, every tab the last run had open. The
+        list survives restarts (URLs only, a few KB); restored tabs stay
+        unloaded until they're looked at, so they cost next to no memory."""
+        if not self._closed:
+            return
+        entry = self._closed.pop()
+        if "session" in entry:
+            first = None
+            for url in entry["session"]:
+                tab = self._create_tab(url=url, activate=False)
+                first = first or tab
+            if first is not None:
+                self._switch_to(first)
+        else:
+            self._create_tab(url=entry["url"], activate=True, private=entry.get("private", False))
+        self._schedule_save()
+
+    def _cycle(self, step):
+        if self._cur in self._tabs and len(self._tabs) > 1:
+            i = (self._tabs.index(self._cur) + step) % len(self._tabs)
+            self._switch_to(self._tabs[i])
+
+    def _select_number(self, n):
+        if not self._tabs:
+            return
+        self._switch_to(self._tabs[-1] if n == 9 else self._tabs[min(n, len(self._tabs)) - 1])
+
+    def _on_reordered(self, old, new):
+        tab = self._tabs.pop(old)
+        self._tabs.insert(new, tab)
+        self._schedule_save()
+
+    def _toggle_mute(self, tab):
+        if tab.view is not None:
+            tab.view.set_muted(not tab.muted)
+
+    # ------------------------------------------------------ navigation ----
+    def navigate(self, text, tab=None):
+        text = (text or "").strip()
+        if not text:
+            return
+        if text.lower().startswith("magnet:"):
+            self._handle_magnet(text)
+            return
+        url = normalize_address(text)
+        tab = tab or self._current() or self._create_tab(activate=True)
+        if not self.isVisible():
+            # Loaded when the Browser is next shown (showEvent), the way a
+            # restored tab is -- not spun up in the background.
+            tab.on_home = False
+            tab.page_ahead = False
+            tab.url = url
+            tab.title = _title_for(url)
+            tab.pending_url = url
+            tab.pill.set_url(url, home=False)
+            tab.pill.set_title(tab.title)
+            if tab is self._cur:
+                self._show_surface(tab)
+                self._sync_toolbar()
+            self._schedule_save()
+            return
+        self._load_in(tab, url)
+        if tab is self._cur:
+            QTimer.singleShot(0, self._focus_page)
+
+    def open_for_sign_in(self, url):
+        """Opens the link a download needed a sign-in for, in a new tab: the
+        site shows its own login there, and once signed in the downloader
+        uses this browser's session for it."""
+        if url and url.startswith(("http://", "https://")):
+            self._create_tab(url=url, activate=True)
+            show_toast(self.pages, "Sign in on this page, then fetch the link again", kind="info", ms=6000)
+
+    def _open_link(self, opener, url, background):
+        index = self._tabs.index(opener) + 1 if opener in self._tabs else None
+        return self._create_tab(url=url, activate=not background, private=opener.private if opener else False,
+                                index=index, opener=opener)
+
+    def go_back(self):
+        tab = self._current()
+        if tab is None or tab.on_home:
+            return
+        if tab.view is not None and tab.view.can_go_back():
+            tab.view.back()
+            return
+        # The tab's first page: one more step back is its home page.
+        tab.on_home = True
+        tab.page_ahead = True
+        tab.pill.set_url("", home=True)
+        tab.pill.set_title("New Tab")
+        self._show_surface(tab)
+        self._sync_toolbar()
+
+    def go_forward(self):
+        tab = self._current()
+        if tab is None:
+            return
+        if tab.on_home and tab.page_ahead and (tab.view is not None or tab.pending_url):
+            tab.on_home = False
+            tab.page_ahead = False
+            tab.pill.set_url(tab.url, home=False)
+            tab.pill.set_title(tab.title)
+            if tab.pending_url:
+                self._load_in(tab, tab.pending_url)
+            self._show_surface(tab)
+            self._sync_toolbar()
+        elif not tab.on_home and tab.view is not None and tab.view.can_go_forward():
+            tab.view.forward()
+
+    def go_home(self):
+        tab = self._current()
+        if tab is None or tab.on_home:
+            return
+        tab.on_home = True
+        tab.page_ahead = tab.view is not None
+        tab.pill.set_url("", home=True)
+        tab.pill.set_title("New Tab")
+        self._show_surface(tab)
+        self._sync_toolbar()
+
+    def reload(self):
+        tab = self._current()
+        if tab is not None and not tab.on_home and tab.view is not None:
+            tab.view.reload()
+
+    def reload_or_stop(self):
+        tab = self._current()
+        if tab is None or tab.on_home or tab.view is None:
+            return
+        if tab.loading:
+            tab.view.stop()
+        else:
+            tab.view.reload()
+
+    def _focus_page(self):
+        tab = self._current()
+        if tab is not None and not tab.on_home and tab.view is not None:
+            tab.view.setFocus(Qt.FocusReason.OtherFocusReason)
+            tab.view.focus_page()
+
+    def _find(self):
+        view = self.current_view()
+        if view is not None and not self._cur.on_home:
+            view.find_in_page()
+
+    def _set_zoom(self, factor):
+        view = self.current_view()
+        if view is not None:
+            view.set_zoom(max(0.25, min(5.0, factor)))
+
+    # ------------------------------------------------------ page events ----
+    def _on_url(self, tab, url):
+        if not url or url == "about:blank" and tab.url:
+            return
+        tab.url = url
+        if not tab.on_home:
+            tab.pill.set_url(url, home=False)
+        if tab is self._cur:
+            self._sync_toolbar()
+        self._schedule_save()
+
+    def _on_title(self, tab, title):
+        tab.title = title or _title_for(tab.url)
+        if not tab.on_home:
+            tab.pill.set_title(tab.title)
+
+    def _on_load_started(self, tab):
+        if tab is self._cur:
+            self._status_fast()
+        tab.loading = True
+        tab.has_video = False
+        tab.adguard = None
+        tab.private_blocked = 0
+        tab.pill.set_loading(True)
+        if tab is self._cur:
+            self.load_bar.begin()
+            self._sync_toolbar()
+
+    def _on_progress(self, tab, value):
+        tab.progress = value
+        if tab is self._cur and value < 100:
+            self.load_bar.stage(value)
+
+    def _on_load_finished(self, tab, ok):
+        tab.loading = False
+        tab.pill.set_loading(False)
+        if tab is self._cur and tab.private:
+            QTimer.singleShot(1500, self._sync_shield)
+        if tab is self._cur:
+            self.load_bar.finish()
+            self._sync_toolbar()
+            QTimer.singleShot(900, self._poll_adguard)
+        if ok and not tab.private and tab.url.startswith(("http://", "https://")):
+            browser_data.add_history_entry(tab.url, tab.title)
+            self._completer_timer.start()
+
+    def _on_icon(self, tab, pixmap):
+        tab.icon = pixmap
+        if not tab.on_home:
+            tab.pill.set_icon(pixmap)
+
+    def _on_audio(self, tab, audible=None, muted=None):
+        if audible is not None:
+            tab.audible = audible
+        if muted is not None:
+            tab.muted = muted
+        tab.pill.set_audio(tab.audible, tab.muted)
+
+    def _on_zoom(self, tab, factor):
+        tab.zoom = factor
+        if tab is self._cur:
+            self.address.set_zoom(factor)
+
+    def _on_fullscreen(self, tab, on):
+        if tab is not self._cur and on:
+            return
+        self._set_page_fullscreen(on)
+
+    def _set_page_fullscreen(self, on):
+        if on == self._page_fullscreen:
+            return
+        self._page_fullscreen = on
+        self.chrome.setVisible(not on)
+        self.fullscreen_requested.emit(on)
+        self.update()
+        # While fullscreen, watch for the pointer reaching the top edge (the
+        # page is a native window: it gets the mouse moves, not Qt).
+        if on:
+            if self._fs_exit is None:
+                owner = self.window()
+                self._fs_exit = _FullscreenExit(owner if isinstance(owner, QWidget) else None)
+                self._fs_exit.clicked.connect(self._escape_fallback)
+            self._fs_timer.start()
+        else:
+            self._fs_timer.stop()
+            if self._fs_exit is not None:
+                self._fs_exit.lift()
+
+    def _fs_poll(self, pos=None):
+        """Drops the exit button when the pointer touches the top of the
+        screen, lifts it once the pointer has moved well away."""
+        if not self._page_fullscreen or self._fs_exit is None:
+            return
+        pos = QCursor.pos() if pos is None else pos
+        screen = self.window().screen()
+        area = screen.geometry() if screen is not None else self.window().frameGeometry()
+        if not area.contains(pos):
+            return
+        if pos.y() <= area.top() + 2:
+            self._fs_exit.drop(area)
+            self._fs_away = 0
+        elif self._fs_exit.is_down() and not self._fs_exit.geometry().adjusted(-40, -10, 40, 90).contains(pos):
+            self._fs_away += 1
+            if self._fs_away >= 8:          # ~0.8 s away from it
+                self._fs_exit.lift()
+        else:
+            self._fs_away = 0
+
+    def _escape_fallback(self):
+        """Escape (or the exit button that drops from the top of the screen)
+        always gets the window out of a page's fullscreen, even if the page and
+        the window have fallen out of step."""
+        if self._fs_exit is not None:
+            self._fs_exit.lift()
+        win = self.window()
+        stuck = self._page_fullscreen or (hasattr(win, "isFullScreen") and win.isFullScreen())
+        if not stuck:
+            return
+        view = self.current_view()
+        if view is not None:
+            view.run_js("document.fullscreenElement && document.exitFullscreen()")
+        self._page_fullscreen = False
+        self._fs_timer.stop()
+        self.chrome.setVisible(True)
+        if hasattr(win, "set_video_fullscreen") and win.isFullScreen():
+            win.set_video_fullscreen(False)
+
+    def _on_process_failed(self, tab, kind):
+        logger.warning("WebView2 process failure (%s) in tab %s", kind, tab.url)
+        if "BrowserProcessExited" in kind:
+            show_toast(self.pages, "The browser engine stopped. Reopen the app to restart it.", kind="error")
+
+    def _on_message(self, tab, msg):
+        if not isinstance(msg, dict):
+            return
+        kind = msg.get("type")
+        if kind == "download":
+            url = msg.get("url") or tab.url
+            if url.startswith(("http://", "https://")):
+                self.open_in_video_tab.emit(url)
+        elif kind == "media-present":
+            tab.has_video = bool(msg.get("value"))
+            if tab is self._cur:
+                self.download_btn.set_lit(tab.has_video)
+        elif kind == "media":
+            tab.media = msg if msg.get("present") else None
+            tab.media_at = time.monotonic()
+            self._update_now_playing()
+        elif kind == "open-tab":
+            url = str(msg.get("url") or "")
+            if url.startswith(("http://", "https://")):
+                self._open_link(tab, url, background=bool(msg.get("background", True)))
+
+    def _on_new_window(self, opener, args):
+        """window.open(), target=_blank, and the engine's own "open in new
+        window". The new page is handed the request itself (NewWindow), so
+        the opener relationship survives -- sign-in popups depend on it."""
+        uri = str(args.Uri or "")
+        ag = self.services.adguard_id
+        if ag and uri.startswith("chrome-extension://%s/" % ag) and ("post-install" in uri or "thankyou" in uri):
+            self.services.engine.adopt_extension_window(args)
+            return
+        if not args.IsUserInitiated and uri.startswith(("http://", "https://")):
+            # A page opening a window on its own -- the classic pop-up ad.
+            args.Handled = True
+            show_toast(self.pages, "Blocked a pop-up from %s" % _title_for(opener.url), action="Open",
+                       on_action=lambda: self._open_link(opener, uri, background=False), kind="warning")
+            return
+        deferral = args.GetDeferral()
+        index = self._tabs.index(opener) + 1 if opener in self._tabs else None
+        tab = self._create_tab(activate=True, private=opener.private, index=index, opener=opener)
+        view = self._ensure_view(tab)
+        if view is None:
+            deferral.Complete()
+            return
+        tab.on_home = False
+        tab.url = uri
+        tab.pill.set_url(uri, home=False)
+        tab.pill.set_title(_title_for(uri))
+        self._show_surface(tab)
+        self._sync_toolbar()
+
+        def attach():
+            try:
+                args.NewWindow = view.core
+                args.Handled = True
+            except Exception:   # noqa: BLE001
+                logger.exception("Couldn't hand the new window its page")
+            finally:
+                deferral.Complete()
+        view.when_scripts_ready(attach)
+
+    def _on_external_uri(self, tab, args):
+        uri = str(args.Uri or "")
+        if uri.lower().startswith("magnet:"):
+            args.Cancel = True
+            QTimer.singleShot(0, lambda: self._handle_magnet(uri))
+
+    def _handle_magnet(self, uri):
+        self.magnet_requested.emit(uri)
+
+    def _on_accelerator(self, tab, args):
+        kind = str(args.KeyEventKind)
+        if kind not in ("KeyDown", "SystemKeyDown"):
+            return
+        vk = int(args.VirtualKey)
+        ctrl, shift, alt = _key_down(VK_CONTROL), _key_down(VK_SHIFT), _key_down(VK_MENU)
+        action = None
+        if ctrl and not alt:
+            letter = chr(vk) if 0x41 <= vk <= 0x5A else None
+            if letter == "T":
+                action = self.reopen_closed_tab if shift else (lambda: self._create_tab(activate=True))
+            elif letter == "N":
+                action = (lambda: self._create_tab(activate=True, private=True)) if shift else (
+                    lambda: self._create_tab(activate=True))
+            elif letter == "W" or vk == VK_F4:
+                action = self.close_current_tab
+            elif letter == "L":
+                action = self.address.focus_and_select
+            elif letter == "D" and not shift:
+                action = self.bookmark_current
+            elif letter == "B" and shift:
+                action = self._toggle_bookmarks_bar
+            elif vk == VK_TAB:
+                action = (lambda: self._cycle(-1)) if shift else (lambda: self._cycle(1))
+            elif vk in (VK_PRIOR, VK_NEXT):
+                action = (lambda: self._cycle(-1)) if vk == VK_PRIOR else (lambda: self._cycle(1))
+            elif 0x31 <= vk <= 0x39 and not shift:
+                action = lambda n=vk - 0x30: self._select_number(n)
+        elif alt and not ctrl:
+            if vk == 0x44:          # Alt+D
+                action = self.address.focus_and_select
+            elif vk == VK_HOME:
+                action = self.go_home
+        elif vk == VK_F6 and not (ctrl or alt):
+            action = self.address.focus_and_select
+        elif vk == VK_ESCAPE:
+            QTimer.singleShot(0, self._escape_fallback)
+            return
+        if action is not None:
+            args.Handled = True
+            QTimer.singleShot(0, action)
+
+    def _on_context_menu(self, tab, args):
+        """Adds this app's items above the engine's own menu."""
+        try:
+            env = self.services.engine.env
+            kinds = webview2.WV.CoreWebView2ContextMenuItemKind
+            target = args.ContextMenuTarget
+            items = args.MenuItems
+            ours = []
+            target_kind = str(target.Kind)
+            page_url = str(target.PageUri or tab.url)
+            if target_kind in ("Video", "Audio"):
+                ours.append(("Download this video with Awesome Downloader",
+                             lambda: self.open_in_video_tab.emit(page_url)))
+            if target.HasLinkUri:
+                link = str(target.LinkUri)
+                low = link.lower()
+                if low.startswith(("http://", "https://")):
+                    ours.append(("Open link in new tab", lambda: self._open_link(tab, link, background=False)))
+                    ours.append(("Open link in background tab", lambda: self._open_link(tab, link, background=True)))
+                    if not tab.private:
+                        ours.append(("Open link in private tab",
+                                     lambda: self._create_tab(url=link, activate=True, private=True)))
+                    ours.append(("Download link with Awesome Downloader", lambda: self.open_in_video_tab.emit(link)))
+                elif low.startswith("magnet:"):
+                    ours.append(("Add to the Torrent tab", lambda: self._handle_magnet(link)))
+                # Tabs are what this browser has; the engine's "new window" would just be one more.
+                for i in range(items.Count - 1, -1, -1):
+                    if str(items[i].Name) in ("openLinkInNewWindow", "openLinkInNewWindowInPrivate"):
+                        items.RemoveAt(i)
+            if not ours:
+                return
+            made = []
+            for label, fn in ours:
+                item = env.CreateContextMenuItem(label, None, kinds.Command)
+                item.CustomItemSelected += (lambda s, a, f=fn: QTimer.singleShot(0, f))
+                made.append(item)
+            made.append(env.CreateContextMenuItem("", None, kinds.Separator))
+            for i, item in enumerate(made):
+                items.Insert(i, item)
+        except Exception:   # noqa: BLE001 -- the default menu still shows
+            logger.exception("Couldn't extend the page's context menu")
+
+    # ------------------------------------------------------ downloads ----
+    def _on_download_starting(self, tab, args):
+        try:
+            suggested = os.path.basename(str(args.ResultFilePath or "")) or "download"
+            os.makedirs(self.download_dir, exist_ok=True)
+            path = _unique_path(os.path.join(self.download_dir, suggested))
+            args.ResultFilePath = path
+            args.Handled = True     # no engine download flyout: the Download tab shows it
+            dl = _NativeDownload(self, args.DownloadOperation, path, _title_for(tab.url))
+            self._downloads.append(dl)
+            show_toast(self.pages, "Downloading %s" % os.path.basename(path), action="Show",
+                       on_action=self.show_downloads_requested.emit)
+        except Exception:   # noqa: BLE001 -- the engine's own download UI takes over
+            logger.exception("Couldn't take over a download")
+
+    def _download_finished(self, dl):
+        if dl in self._downloads:
+            self._downloads.remove(dl)
+        if dl.path.lower().endswith(".torrent"):
+            show_toast(self.pages, "Downloaded %s" % os.path.basename(dl.path), action="Add to Torrent tab",
+                       on_action=lambda p=dl.path: self.torrent_file_requested.emit(p), kind="success", ms=8000)
+
+    def _send_current_to_video_tab(self):
+        tab = self._current()
+        if tab is not None and not tab.on_home and tab.url.startswith(("http://", "https://")):
+            self.open_in_video_tab.emit(tab.url)
+
+    # ---------------------------------------------------- toolbar state ----
+    def _sync_toolbar(self):
+        tab = self._current()
+        if tab is None:
+            return
+        page = not tab.on_home
+        self.address.set_url(tab.url if page else "")
+        self.address.set_zoom(tab.zoom if page else 1.0)
+        # One bookmark control, the toolbar's (the address bar's star was a second).
+        self.address.set_star_visible(False)
+        marked = page and browser_data.is_bookmarked(browser_data.load_bookmarks(), tab.url)
+        self.bookmarks_btn.set_kind("bookmark_filled" if marked else "bookmark")
+        self.bookmarks_btn.tint = self._t["brand"] if marked else None
+        self.bookmarks_btn.set_tip(("Edit bookmark (Ctrl+D)" if marked else "Bookmark this page (Ctrl+D)")
+                                   + " -- right-click for all bookmarks")
+        self.bookmarks_btn.update()
+        can_back = page
+        can_fwd = (tab.on_home and tab.page_ahead) or (page and tab.view is not None and tab.view.can_go_forward())
+        self.back_btn.setEnabled(can_back)
+        self.fwd_btn.setEnabled(bool(can_fwd))
+        self.reload_btn.setEnabled(page)
+        self.reload_btn.set_kind("stop" if page and tab.loading else "reload")
+        self.reload_btn.set_tip("Stop loading (Esc)" if page and tab.loading else "Reload (Ctrl+R)")
+        self.download_btn.setEnabled(page and tab.url.startswith(("http://", "https://")))
+        self.download_btn.set_lit(page and tab.has_video)
+        if not (page and tab.loading):
+            self.load_bar.reset()
+        self._sync_shield()
+
+    def _sync_shield(self):
+        tab = self._current()
+        if tab is not None and tab.private:
+            count = getattr(tab, "private_blocked", 0) if not tab.on_home else 0
+            self.shield_btn.set_kind("shield_check")
+            self.shield_btn.set_badge(_short_count(count) if count else "")
+            return
+        ok = self.services.adguard_ok
+        status = tab.adguard if tab is not None and not tab.on_home else None
+        off = not ok or bool(status and (status.get("paused") or status.get("allowlisted")))
+        self.shield_btn.set_kind("shield_off" if off and self.services.engine is not None else "shield_check")
+        blocked = int(status.get("blocked") or 0) if status else 0
+        self.shield_btn.set_badge(_short_count(blocked) if blocked else "")
+
+    def _status_fast(self, seconds=20):
+        self._status_fast_until = time.monotonic() + seconds
+        if self._status_timer.interval() != 1500:
+            self._status_timer.setInterval(1500)
+
+    def _poll_adguard(self):
+        if time.monotonic() > self._status_fast_until and self._status_timer.interval() != 6000:
+            self._status_timer.setInterval(6000)
+        tab = self._current()
+        if tab is not None and tab.private:
+            self._sync_shield()
+            return
+        if (not self.isVisible() or tab is None or tab.on_home or tab.private or self._status_busy
+                or not self.services.adguard_ok or not tab.url.startswith(("http://", "https://"))):
+            return
+        self._status_busy = True
+        url = tab.url
+
+        def done(status):
+            self._status_busy = False
+            if tab is not self._current() or tab.url != url:
+                return
+            tab.adguard = status
+            self._sync_shield()
+            if self._panel is not None:
+                try:
+                    self._panel.set_status(status)
+                except RuntimeError:
+                    self._panel = None
+        self.services.page_status(url, done)
+
+    # ------------------------------------------------------ now playing ----
+    def _media_tab(self):
+        playing = [t for t in self._tabs if t.media and t.media.get("playing")]
+        pool = playing or [t for t in self._tabs if t.media]
+        return max(pool, key=lambda t: t.media_at) if pool else None
+
+    def _update_now_playing(self):
+        tab = self._media_tab()
+        self._media_source = tab
+        self.now_playing.set_media(tab.media if tab is not None else None)
+
+    def _goto_media_tab(self):
+        tab = getattr(self, "_media_source", None)
+        if tab in self._tabs:
+            self._switch_to(tab)
+
+    def _media_command(self, command):
+        tab = getattr(self, "_media_source", None)
+        if tab in self._tabs and tab.view is not None:
+            tab.view.run_js("window.__awdMedia && window.__awdMedia.%s()" % command)
+
+    # -------------------------------------------------------- sleeping ----
+    # With the Browser tab itself out of sight this long, every page sleeps
+    # -- the one that was showing and the home page too -- unless it is
+    # playing sound or still loading; they wake when looked at again.
+    BROWSER_AWAY_S = 3 * 60
+
+    def _sleep_idle_tabs(self):
+        now = time.monotonic()
+        away = self._browser_hidden_at is not None and now - self._browser_hidden_at >= self.BROWSER_AWAY_S
+        for tab in self._tabs:
+            if tab.view is None or tab.audible or tab.loading:
+                continue
+            if not away and (tab is self._cur or now - tab.hidden_since < self.SLEEP_AFTER_S):
+                continue
+            if not tab.view.is_suspended():
+                tab.view.suspend()
+                if tab is not self._cur:
+                    tab.pill.set_sleeping(True)
+        if away and self.home.view is not None and not self.home.view.isVisible():
+            self.home.view.suspend()
+
+    # ------------------------------------------------------ bookmarks ----
+    def _on_bookmark_button(self):
+        tab = self._current()
+        if tab is None or tab.on_home or not (tab.url or "").startswith(("http://", "https://", "file:")):
+            # Nothing here to bookmark: show what's saved instead.
+            self._show_bookmarks_panel(self.bookmarks_btn)
+            return
+        self.bookmark_current()
+
+    def bookmark_current(self):
+        tab = self._current()
+        if tab is None or tab.on_home or not tab.url:
+            return
+        url = tab.url
+        bookmarks = browser_data.load_bookmarks()
+        existing = next((b for b in bookmarks if b.get("url") == url), None)
+        added = existing is None
+        if added:
+            browser_data.add_bookmark(url, tab.title or url)
+            existing = {"url": url, "title": tab.title or url}
+            if not self.bookmarks_bar.isVisible():
+                browser_data.set_pref("bookmarks_bar", True)
+                self.bookmarks_bar.setVisible(True)
+            self._bookmarks_changed()
+            self.bookmarks_bar.flash(url)
+        popup = BookmarkPopup(self, self._t, self._dark, existing.get("title") or url, added)
+
+        def save(title):
+            browser_data.remove_bookmark(url)
+            browser_data.add_bookmark(url, title or url)
+            self._bookmarks_changed()
+
+        def remove():
+            browser_data.remove_bookmark(url)
+            self._bookmarks_changed()
+        popup.saved.connect(save)
+        popup.removed.connect(remove)
+        popup.show_all.connect(lambda: QTimer.singleShot(0, lambda: self._show_bookmarks_panel(self.bookmarks_btn)))
+        popup.open_under(self.bookmarks_btn)
+
+    def _remove_bookmark(self, url):
+        browser_data.remove_bookmark(url)
+        self._bookmarks_changed()
+
+    def _bookmarks_changed(self):
+        self._sync_toolbar()
+        self._refresh_completer()
+        self.home.refresh()
+        if self.bookmarks_bar.isVisible():
+            self.bookmarks_bar.set_bookmarks(browser_data.load_bookmarks())
+
+    def _toggle_bookmarks_bar(self):
+        on = not self.bookmarks_bar.isVisible()
+        browser_data.set_pref("bookmarks_bar", on)
+        if on:
+            self.bookmarks_bar.set_bookmarks(browser_data.load_bookmarks())
+        self.bookmarks_bar.setVisible(on)
+        self.update()
+        QTimer.singleShot(0, self._apply_home_backdrop)
+
+    def _open_bookmark(self, url, background):
+        """A bookmark opens in a new tab, so the page you're on stays put.
+        Two exceptions, both so tabs don't pile up: a bookmark that's
+        already open is switched to, and a blank New Tab is used rather than
+        left behind."""
+        if not url:
+            return
+        cur = self._current()
+        if not background:
+            for tab in self._tabs:
+                if tab.url == url and not tab.on_home and not tab.private:
+                    self._switch_to(tab)
+                    return
+            if (cur is not None and cur.on_home and cur.view is None and not cur.pending_url
+                    and not cur.page_ahead):
+                self.navigate(url, tab=cur)
+                return
+        self._open_link(cur, url, background=background)
+
+    def _show_bookmarks_panel(self, anchor=None):
+        anchor = anchor or self.bookmarks_btn
+        tab = self._current()
+        page = tab is not None and not tab.on_home and (tab.url or "").startswith(("http://", "https://"))
+        bookmarks = browser_data.load_bookmarks()
+        added = page and browser_data.is_bookmarked(bookmarks, tab.url)
+        panel = BookmarksPanel(self, self._t, self._dark, bookmarks,
+                               bar_visible=self.bookmarks_bar.isVisible(), can_add=page, added=added)
+        panel.open_url.connect(self._open_bookmark)
+        panel.remove_requested.connect(self._remove_bookmark)
+        panel.add_current.connect(self.bookmark_current)
+        panel.bar_toggled.connect(lambda on: self._toggle_bookmarks_bar() if on != self.bookmarks_bar.isVisible()
+                                  else None)
+        panel.open_under(anchor)
+        return panel
+
+    def _refresh_completer(self):
+        urls = {e.get("url") for e in browser_data.load_history() if e.get("url")}
+        urls |= {b.get("url") for b in browser_data.load_bookmarks() if b.get("url")}
+        self._completer_model.setStringList(sorted(urls))
+
+    # ---------------------------------------------------------- menus ----
+    def _new_tab_menu(self, pos):
+        menu = style_menu(QMenu(self), self._t)
+        menu.addAction(icon("tab", self._t["text_muted"]), "New tab\tCtrl+T").triggered.connect(
+            lambda: self._create_tab(activate=True))
+        menu.addAction(icon("private", self._t["text_muted"]), "New private tab\tCtrl+Shift+N").triggered.connect(
+            lambda: self._create_tab(activate=True, private=True))
+        menu.exec(self.strip.new_btn.mapToGlobal(pos))
+
+    def _tab_menu(self, tab, pos):
+        t = self._t
+        menu = style_menu(QMenu(self), t)
+        page = not tab.on_home
+        a = menu.addAction(icon("reload", t["text_muted"]), "Reload")
+        a.setEnabled(page and tab.view is not None)
+        a.triggered.connect(lambda: tab.view.reload() if tab.view else None)
+        a = menu.addAction(icon("tab", t["text_muted"]), "Duplicate")
+        a.setEnabled(page)
+        a.triggered.connect(lambda: self._open_link(tab, tab.url, background=False))
+        a = menu.addAction(icon("speaker" if tab.muted else "mute", t["text_muted"]),
+                           "Unmute tab" if tab.muted else "Mute tab")
+        a.setEnabled(tab.view is not None)
+        a.triggered.connect(lambda: self._toggle_mute(tab))
+        menu.addSeparator()
+        menu.addAction(icon("close", t["text_muted"]), "Close tab\tCtrl+W").triggered.connect(
+            lambda: self._close(tab))
+        others = [x for x in self._tabs if x is not tab]
+        a = menu.addAction("Close other tabs")
+        a.setEnabled(bool(others))
+        a.triggered.connect(lambda: [self._close(x) for x in list(others)])
+        right = self._tabs[self._tabs.index(tab) + 1:] if tab in self._tabs else []
+        a = menu.addAction("Close tabs to the right")
+        a.setEnabled(bool(right))
+        a.triggered.connect(lambda: [self._close(x) for x in list(right)])
+        menu.addSeparator()
+        a = menu.addAction("Reopen closed tab\tCtrl+Shift+T")
+        a.setEnabled(bool(self._closed))
+        a.triggered.connect(self.reopen_closed_tab)
+        menu.exec(pos)
+
+    def _zoom_row(self, menu):
+        t = self._t
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(10, 4, 8, 4)
+        lay.setSpacing(6)
+        label = QLabel("Zoom")
+        label.setStyleSheet(f"color: {t['text']}; background: transparent;")
+        lay.addWidget(label, 1)
+        tab = self._current()
+        zoom = tab.zoom if tab is not None else 1.0
+        pct = QLabel(f"{round(zoom * 100)}%")
+        pct.setStyleSheet(f"color: {t['text_muted']}; background: transparent; min-width: 40px;")
+        pct.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        minus = ChromeButton("zoom_out", "Zoom out (Ctrl+-)", size=28, icon_size=15)
+        plus = ChromeButton("zoom_in", "Zoom in (Ctrl++)", size=28, icon_size=15)
+        for b in (minus, plus):
+            b.apply_theme(t)
+        steps = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0]
+
+        def bump(direction):
+            cur = self._current()
+            if cur is None or cur.view is None or cur.on_home:
+                return
+            z = cur.zoom
+            if direction > 0:
+                nxt = next((s for s in steps if s > z + 0.001), steps[-1])
+            else:
+                nxt = next((s for s in reversed(steps) if s < z - 0.001), steps[0])
+            self._set_zoom(nxt)
+            pct.setText(f"{round(nxt * 100)}%")
+        minus.clicked.connect(lambda: bump(-1))
+        plus.clicked.connect(lambda: bump(1))
+        lay.addWidget(minus)
+        lay.addWidget(pct)
+        lay.addWidget(plus)
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(row)
+        return action
+
+    def _show_menu(self):
+        t = self._t
+        muted = t["text_muted"]
+        tab = self._current()
+        page = tab is not None and not tab.on_home and tab.view is not None
+        menu = style_menu(QMenu(self), t)
+        menu.addAction(icon("tab", muted), "New tab\tCtrl+T").triggered.connect(
+            lambda: self._create_tab(activate=True))
+        menu.addAction(icon("private", muted), "New private tab\tCtrl+Shift+N").triggered.connect(
+            lambda: self._create_tab(activate=True, private=True))
+        a = menu.addAction(icon("reload", muted), "Reopen closed tab\tCtrl+Shift+T")
+        a.setEnabled(bool(self._closed))
+        a.triggered.connect(self.reopen_closed_tab)
+        menu.addSeparator()
+
+        bm = style_menu(menu.addMenu(icon("star", muted), "Bookmarks"), t)
+        a = bm.addAction("Show bookmarks bar\tCtrl+Shift+B")
+        a.setCheckable(True)
+        a.setChecked(self.bookmarks_bar.isVisible())
+        a.triggered.connect(self._toggle_bookmarks_bar)
+        bm.addSeparator()
+        bookmarks = browser_data.load_bookmarks()
+        if not bookmarks:
+            bm.addAction("No bookmarks yet").setEnabled(False)
+        for b in bookmarks[:40]:
+            act = bm.addAction((b.get("title") or b.get("url", ""))[:60])
+            act.setToolTip(b.get("url", ""))
+            act.triggered.connect(lambda _c=False, u=b.get("url"): self._open_bookmark(u, False))
+
+        hist = style_menu(menu.addMenu(icon("clock", muted), "History"), t)
+        entries = browser_data.load_history()
+        if not entries:
+            hist.addAction("No history yet").setEnabled(False)
+        for e in entries[:25]:
+            act = hist.addAction((e.get("title") or e.get("url", ""))[:60])
+            act.setToolTip(e.get("url", ""))
+            act.triggered.connect(lambda _c=False, u=e.get("url"): self.navigate(u))
+        if entries:
+            hist.addSeparator()
+            hist.addAction("Clear history").triggered.connect(
+                lambda: (browser_data.clear_history(), self._refresh_completer()))
+        menu.addSeparator()
+
+        menu.addAction(self._zoom_row(menu))
+        for label, kind, fn in (("Find on page\tCtrl+F", "search", self._find),
+                                ("Print\tCtrl+P", "print", lambda: self.current_view().print_page()),
+                                ("Save page as\tCtrl+S", "save", lambda: self.current_view().save_page_as())):
+            a = menu.addAction(icon(kind, muted), label)
+            a.setEnabled(page)
+            a.triggered.connect(fn)
+        menu.addSeparator()
+
+        engines = style_menu(menu.addMenu(icon("search", muted), "Search engine"), t)
+        current_engine = browser_data.get_search_engine()
+        for key, (label, _url) in browser_data.SEARCH_ENGINES.items():
+            act = engines.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(key == current_engine)
+            act.triggered.connect(lambda _c=False, k=key: browser_data.set_search_engine(k))
+        restore = menu.addAction("Reopen tabs on start")
+        restore.setCheckable(True)
+        restore.setChecked(bool(browser_data.get_pref("restore_tabs", True)))
+        restore.triggered.connect(lambda on: browser_data.set_pref("restore_tabs", bool(on)))
+        menu.addAction(icon("trash", muted), "Clear browsing data...").triggered.connect(self._clear_data_dialog)
+        menu.addSeparator()
+
+        a = menu.addAction(icon("external", muted), "Open in your default browser")
+        a.setEnabled(page)
+        a.triggered.connect(lambda: webbrowser.open(self._cur.url))
+        a = menu.addAction(icon("code", muted), "Developer tools\tF12")
+        a.setEnabled(page)
+        a.triggered.connect(lambda: self.current_view().open_devtools())
+        a = menu.addAction(icon("gauge", muted), "Browser task manager")
+        a.setEnabled(page)
+        a.triggered.connect(lambda: self.current_view().open_task_manager())
+        a = menu.addAction(icon("shield", muted), "AdGuard filters and settings")
+        a.setEnabled(bool(self.services.adguard_id))
+        a.triggered.connect(self._open_adguard_settings)
+        menu.exec(self.menu_btn.mapToGlobal(QPoint(self.menu_btn.width() - menu.sizeHint().width(),
+                                                   self.menu_btn.height() + 4)))
+
+    def _clear_data_dialog(self):
+        from .dialogs.base import CinematicDialog, button_row, header
+        dlg = CinematicDialog(self, "Clear browsing data", self._dark)
+        dlg.setFixedWidth(440)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(24, 22, 24, 18)
+        lay.setSpacing(12)
+        lay.addLayout(header("Clear browsing data", "From the Browser tab only. Downloads on disk aren't touched."))
+        boxes = {
+            "history": QCheckBox("Browsing history"),
+            "cookies": QCheckBox("Cookies -- signs you out of sites"),
+            "cache": QCheckBox("Cached images and files"),
+        }
+        boxes["history"].setChecked(True)
+        boxes["cache"].setChecked(True)
+        for box in boxes.values():
+            lay.addWidget(box)
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("quiet")
+        clear = QPushButton("Clear")
+        clear.setObjectName("danger")
+        cancel.clicked.connect(dlg.reject)
+        clear.clicked.connect(dlg.accept)
+        lay.addSpacing(6)
+        lay.addLayout(button_row(cancel, clear))
+        if dlg.exec() != CinematicDialog.DialogCode.Accepted:
+            return
+        kinds = [k for k, box in boxes.items() if box.isChecked()]
+        if "history" in kinds:
+            browser_data.clear_history()
+            self._refresh_completer()
+        self.services.clear_browsing_data(
+            kinds, lambda ok: show_toast(self.pages, "Browsing data cleared" if ok else
+                                         "Couldn't clear everything -- try again with the page closed",
+                                         kind="success" if ok else "warning"))
+
+    # ------------------------------------------------------- AdGuard ----
+    def _show_adguard_panel(self):
+        tab = self._current()
+        host = _title_for(tab.url) if tab is not None and not tab.on_home else ""
+        available = self.services.adguard_ok and not (tab is not None and tab.private)
+        message = ""
+        if tab is not None and tab.private:
+            count = getattr(tab, "private_blocked", 0)
+            message = ("AdGuard doesn't run in private tabs. The built-in block list does here: "
+                       "%d ad and tracker request%s stopped in this tab." % (count, "" if count == 1 else "s"))
+        elif not available:
+            if self.services.error:
+                message = "The browser engine isn't running, so neither is AdGuard."
+            elif not browser_engine.adguard_bundled():
+                message = "This build doesn't include AdGuard."
+            else:
+                message = "AdGuard is still starting -- it takes a few seconds the first time."
+        panel = AdGuardPanel(self, self._t, self._dark, host,
+                             tab.adguard if tab is not None else None, available, message)
+        panel.site_toggled.connect(lambda protect: self._set_site_protection(protect))
+        panel.pause_toggled.connect(lambda paused: self.services.set_paused_everywhere(
+            paused, lambda _r: self._after_adguard_change()))
+        panel.open_settings.connect(self._open_adguard_settings)
+        panel.open_log.connect(lambda: self._open_extension_page("pages/filtering-log.html"))
+        panel.closed.connect(lambda: setattr(self, "_panel", None))
+        self._panel = panel
+        panel.open_under(self.shield_btn)
+        self._poll_adguard()
+
+    def _set_site_protection(self, protect):
+        tab = self._current()
+        if tab is None or tab.on_home:
+            return
+        status = tab.adguard or {}
+        self.services.set_site_paused(tab.url, status.get("tab"), not protect,
+                                      lambda _r: self._after_adguard_change())
+
+    def _after_adguard_change(self):
+        view = self.current_view()
+        if view is not None and not self._cur.on_home:
+            view.reload()
+        QTimer.singleShot(1500, self._poll_adguard)
+
+    def _open_adguard_settings(self):
+        self._open_extension_page("pages/options.html")
+
+    def _open_extension_page(self, path):
+        if self.services.adguard_id:
+            self._create_tab(url="chrome-extension://%s/%s" % (self.services.adguard_id, path), activate=True)
+
+    # --------------------------------------------------------- engine ----
+    def _on_engine_failed(self, message):
+        self.missing.set_error("Details: %s" % message if message else "")
+        tab = self._current()
+        if tab is not None and not tab.on_home:
+            self.pages.setCurrentWidget(self.missing)
+
+    # ------------------------------------------------ session and life ----
+    def _restore_session(self):
+        urls, current = browser_data.load_session()
+        self._closed = browser_data.load_closed()
+        if urls and not browser_data.get_pref("restore_tabs", True):
+            # Not reopened at start: they're one Ctrl+Shift+T away instead.
+            self._closed.append({"session": urls})
+            urls = []
+        if not urls:
+            self._create_tab(activate=True)
+            return
+        for url in urls:
+            self._create_tab(url=url, activate=False)
+        self._switch_to(self._tabs[min(current, len(self._tabs) - 1)])
+
+    def _schedule_save(self):
+        self._session_timer.start()
+
+    def save_state(self):
+        """The open (non-private) tabs, for next launch."""
+        keep = [t for t in self._tabs if not t.private and not t.on_home
+                and (t.url or "").startswith(("http://", "https://"))]
+        current = keep.index(self._cur) if self._cur in keep else 0
+        browser_data.save_session([t.url for t in keep], current)
+        browser_data.save_closed([{k: v for k, v in e.items() if k != "private"}
+                                  for e in self._closed if not e.get("private")])
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._browser_hidden_at = None
+        self._status_fast()
+        QTimer.singleShot(0, self._sync_private_look)
+        cur = self._current()
+        if cur is not None and cur.view is not None:
+            cur.view.set_active(True)
+        self.services.start()
+        tab = self._current()
+        if tab is not None and tab.pending_url:
+            self._load_in(tab, tab.pending_url)
+        elif tab is not None and tab.on_home:
+            self._show_surface(tab)
+        self._status_timer.start()
+        win = self.window()
+        if win is not self._watched_window:
+            self._watched_window = win
+            win.installEventFilter(self)
+        self.strip.relayout(False)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._status_timer.stop()
+        QTimer.singleShot(0, self._sync_private_look)
+        # Out of sight: every page down to the least memory the engine will
+        # keep it in, and the clock started for putting them to sleep.
+        self._browser_hidden_at = time.monotonic()
+        for tab in self._tabs:
+            if tab.view is not None:
+                tab.view.set_active(False)
+        surface = getattr(self.window(), "backdrop_surface", None)
+        if surface is not None and hasattr(surface, "set_top_image"):
+            surface.set_top_image(None, 0)
+
+    def eventFilter(self, obj, event):
+        # After the window comes back to the front, the page doesn't have
+        # keyboard focus until clicked, and that first click is spent on
+        # focus alone ("first click swallowed" -- found and fixed the same
+        # way in the user's own WebView2 browser project).
+        if obj is self._watched_window:
+            kind = event.type()
+            if kind == QEvent.Type.WindowActivate and self.isVisible():
+                QTimer.singleShot(0, self._refocus_after_activate)
+            if kind in (QEvent.Type.WindowActivate, QEvent.Type.WindowDeactivate):
+                # The home page's moving wallpaper moves only while the window
+                # is the one in use.
+                self.home.set_window_active(kind == QEvent.Type.WindowActivate)
+            elif kind == QEvent.Type.WindowStateChange:
+                self._on_window_state(obj)
+        return False
+
+    def _on_window_state(self, win):
+        """Minimized, the pages stop drawing: Qt keeps its widgets "visible"
+        in a minimized window, so the engine has to be told."""
+        minimized = bool(win.windowState() & Qt.WindowState.WindowMinimized)
+        for view in (self.current_view(), self.home.view):
+            if view is None or view.controller is None:
+                continue
+            try:
+                view.controller.IsVisible = (not minimized) and view.isVisible()
+            except Exception:   # noqa: BLE001
+                pass
+
+    def _refocus_after_activate(self):
+        if not self._should_refocus_page(QCursor.pos()):
+            return
+        self.current_view().focus_page()
+
+    def _should_refocus_page(self, global_pos):
+        """Whether the window coming back to the front should hand the
+        keyboard to the page. Not when what brought it back was a click on
+        the browser's own bars, or a panel is open: handing the page focus
+        makes the app lose it, and an open panel (All bookmarks, the
+        bookmark you just added) closes on that -- reported as All
+        bookmarks not opening, when it opened and closed in a blink."""
+        view = self.current_view()
+        if view is None or self._cur is None or self._cur.on_home:
+            return False
+        if QApplication.activePopupWidget() is not None:
+            return False
+        if self.chrome.isVisible() and self.chrome.rect().contains(self.chrome.mapFromGlobal(global_pos)):
+            return False
+        focus = QApplication.focusWidget()
+        return focus is None or focus is view

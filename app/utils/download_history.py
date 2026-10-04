@@ -71,6 +71,67 @@ def remove_entry(index):
         _save(entries)
 
 
+def remove_entries(indices):
+    """Removes several entries at once (History's multi-select). Indices
+    are positions in load()'s list. Files are not touched here."""
+    drop = set(int(i) for i in indices)
+    entries = [e for i, e in enumerate(load()) if i not in drop]
+    _save(entries)
+
+
+def first_completion(kind, title):
+    """When an entry for this download was first recorded, or None."""
+    times = [e.get("completed_at") for e in load()
+             if e.get("kind") == kind and e.get("title") == title and e.get("completed_at")]
+    return min(times) if times else None
+
+
+def collapse_duplicates(kind="torrent"):
+    """Keeps only the oldest entry per (title, file) of `kind`.
+
+    Until 2.5, a finished torrent was re-checked from scratch at every
+    launch, and reaching 100% again recorded it in History again -- one
+    entry per launch, each dated "today". Returns how many were dropped."""
+    entries = load()
+    oldest = {}
+    for i, e in enumerate(entries):
+        if e.get("kind") != kind:
+            continue
+        key = (e.get("title"), e.get("file_path"))
+        best = oldest.get(key)
+        if best is None or (e.get("completed_at") or 0) < (entries[best].get("completed_at") or 0):
+            oldest[key] = i
+    keep = set(oldest.values())
+    kept = [e for i, e in enumerate(entries) if e.get("kind") != kind or i in keep]
+    dropped = len(entries) - len(kept)
+    if dropped:
+        _save(kept)
+    return dropped
+
+
+def correct_torrent_times():
+    """Dates each torrent entry by its file, where the file is older than
+    the entry -- earlier builds recorded a torrent again whenever a launch's
+    re-check reached 100%, dated that launch. A file's modified time is when
+    its last piece was written; re-checking never changes it."""
+    entries = load()
+    changed = False
+    for e in entries:
+        if e.get("kind") != "torrent":
+            continue
+        path = e.get("file_path")
+        try:
+            written = os.path.getmtime(path) if path and os.path.exists(path) else None
+        except OSError:
+            written = None
+        if written and written < (e.get("completed_at") or 0) - 120:
+            e["completed_at"] = written
+            changed = True
+    if changed:
+        _save(entries)
+    return changed
+
+
 def clear_all():
     """Wipes every history entry -- same file-safety guarantee as
     remove_entry (metadata only, no files touched)."""

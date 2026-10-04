@@ -20,7 +20,14 @@ if not exist ".venv312\Scripts\python.exe" (
 
 echo Installing build tools and dependencies...
 ".venv312\Scripts\python.exe" -m pip install --upgrade pip -q
-".venv312\Scripts\python.exe" -m pip install -r requirements.txt pyinstaller -q
+REM The lock file pins every version the release is built with, so two
+REM builds of the same commit ship the same code. requirements.txt (loose
+REM ranges) is only the fallback for a checkout without one.
+if exist "requirements-lock.txt" (
+    ".venv312\Scripts\python.exe" -m pip install -r requirements-lock.txt -q
+) else (
+    ".venv312\Scripts\python.exe" -m pip install -r requirements.txt pyinstaller -q
+)
 
 REM Bundle ffmpeg into the installer so users never need to install it
 REM separately (a real support issue from an earlier round: a user's laptop
@@ -40,6 +47,19 @@ if not exist "vendor\ffmpeg.exe" (
     )
 )
 
+REM The Browser tab's two bundled pieces: AdGuard (the official release,
+REM unmodified, GPL-3.0 -- see NOTICE.md) and the WebView2 SDK files that
+REM load the engine Windows already has. Both cached in vendor\. Unlike
+REM ffmpeg there is no in-app fallback for these, so a failure stops the build.
+echo Preparing AdGuard and the WebView2 SDK...
+".venv312\Scripts\python.exe" build_vendor.py
+if errorlevel 1 (
+    echo.
+    echo Could not prepare vendor\adguard-dl or vendor\webview2 -- see above.
+    pause
+    exit /b 1
+)
+
 echo Generating version-info metadata...
 ".venv312\Scripts\python.exe" build_version_info.py
 
@@ -48,8 +68,35 @@ REM wordmark logo, loaded by path, not import), and ui_qt/browser_assets/
 REM (the ad-block domain list + overlay button logo the Browser tab reads
 REM at runtime) are all added as data explicitly for the same reason:
 REM PyInstaller's import scanner has no way to see a plain file path.
-echo Building Awesome Downloader.exe ...
-".venv312\Scripts\python.exe" -m PyInstaller --onefile --windowed --name "Awesome Downloader" --icon "app_icon.ico" --add-data "app_icon.ico;." --add-data "app_icon.png;." --add-data "ui_qt\fonts;ui_qt\fonts" --add-data "ui_qt\browser_assets;ui_qt\browser_assets" --version-file "version_info.txt" --collect-all libtorrent --collect-all PIL --collect-all PySide6 --collect-all qframelesswindow --collect-all curl_cffi main_qt.py
+REM A folder build (--onedir), not --onefile. A onefile .exe unpacks its
+REM whole bundle -- Qt and Chromium included, several hundred MB -- into a
+REM temp folder on *every* launch before the first window can appear:
+REM measured 8.4 s cold start for 2.4.0. The installer puts the folder in
+REM Program Files once, and the app then starts straight from it.
+REM
+REM No --collect-all PySide6 either. That pulled in every Qt module that
+REM exists (Qt3D, Charts, Multimedia, ...), which the app never imports;
+REM PyInstaller's own PySide6 hooks collect exactly the modules it does.
+REM
+REM Since 2.5 the Browser tab runs on Microsoft Edge WebView2 (part of
+REM Windows) instead of Qt WebEngine, so none of Qt's Chromium ships any
+REM more: the WebEngine modules are excluded outright, along with QtQml and
+REM QtQuick (whose hook copies every QML plugin in Qt) and pywebview (only
+REM the source of the SDK files, which go in as data: "webview2").
+echo Building Awesome Downloader ...
+if exist "dist\Awesome Downloader.exe" del /q "dist\Awesome Downloader.exe"
+".venv312\Scripts\python.exe" -m PyInstaller --noconfirm --onedir --windowed --name "Awesome Downloader" --icon "app_icon.ico" --add-data "app_icon.ico;." --add-data "app_icon.png;." --add-data "ui_qt\fonts;ui_qt\fonts" --add-data "ui_qt\browser_assets;ui_qt\browser_assets" --add-data "vendor\adguard-dl\unpacked;adguard" --add-data "vendor\webview2;webview2" --version-file "version_info.txt" --collect-all libtorrent --collect-all PIL --collect-all qframelesswindow --collect-all curl_cffi --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.QtQuickWidgets --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets --exclude-module PySide6.QtWebEngineQuick --exclude-module PySide6.QtWebChannel --exclude-module webview main_qt.py
+if errorlevel 1 (
+    echo.
+    echo PyInstaller failed -- see the output above.
+    pause
+    exit /b 1
+)
+
+REM Belt and braces: should anything ever pull Qt WebEngine back in, its
+REM debug-build resource copies (~77 MB) still don't ship.
+del /q "dist\Awesome Downloader\_internal\PySide6\resources\*.debug.pak" 2>nul
+del /q "dist\Awesome Downloader\_internal\PySide6\resources\*.debug.bin" 2>nul
 
 REM Optional, no-op unless you actually have a code-signing certificate --
 REM SmartScreen's "unrecognized publisher" warning needs real code signing
@@ -62,9 +109,9 @@ REM leave them unset and this step does nothing, same as always.
 if defined CODESIGN_CERT_PATH (
     echo Signing Awesome Downloader.exe with %CODESIGN_CERT_PATH% ...
     if defined CODESIGN_CERT_PASSWORD (
-        signtool sign /f "%CODESIGN_CERT_PATH%" /p "%CODESIGN_CERT_PASSWORD%" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "dist\Awesome Downloader.exe"
+        signtool sign /f "%CODESIGN_CERT_PATH%" /p "%CODESIGN_CERT_PASSWORD%" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "dist\Awesome Downloader\Awesome Downloader.exe"
     ) else (
-        signtool sign /f "%CODESIGN_CERT_PATH%" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "dist\Awesome Downloader.exe"
+        signtool sign /f "%CODESIGN_CERT_PATH%" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "dist\Awesome Downloader\Awesome Downloader.exe"
     )
     if errorlevel 1 (
         echo WARNING: Signing failed -- continuing with an unsigned .exe.
@@ -72,5 +119,6 @@ if defined CODESIGN_CERT_PATH (
 )
 
 echo.
-echo Done. Find your app at: dist\Awesome Downloader.exe
+echo Done. Find your app at: dist\Awesome Downloader\Awesome Downloader.exe
+echo (the whole "dist\Awesome Downloader" folder is the app -- installer.iss packs it)
 pause

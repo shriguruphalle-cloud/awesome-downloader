@@ -8,27 +8,58 @@ glue changed.
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QPointF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QImage, QLinearGradient, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QRadioButton, QScrollArea,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QRadioButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from app import config
-from app.core import downloader, ffmpeg_utils, size_estimate
+from app.core import downloader, errors, ffmpeg_utils, size_estimate
 from app.logging_setup import get_logger
 from app.utils import (
     download_history, download_queue_state, formatting,
     settings as settings_store, video_queue_state,
 )
 
-from . import theme
-from .widgets import Chip, make_card
+from . import cinema, theme
+from . import motion
+from .widgets import Chip, RoundedImage, centered_column, make_card, section_label
+from .widgets.button import Button
 
 logger = get_logger("video_tab")
+
+# The page is a centred column no wider than this -- see centered_column().
+# It was 1080, which kept a maximized window's pages a narrow strip down the
+# middle of the screen ("maximized, the UI stays small"); 1760 fills a
+# 1920 px screen and still stops lines running across an ultrawide.
+MAX_CONTENT_W = 1760
+
+
+def _link_icon(color, size=16):
+    """Two interlocked rounded links -- the leading glyph in the URL field."""
+    scale = 2
+    pixmap = QPixmap(size * scale, size * scale)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.scale(scale, scale)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.5)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    for dx in (-2.4, 2.4):
+        p.save()
+        p.translate(size / 2.0 + dx, size / 2.0 - dx)
+        p.rotate(-45)
+        p.drawRoundedRect(QRectF(-4.6, -2.4, 9.2, 4.8), 2.4, 2.4)
+        p.restore()
+    p.end()
+    pixmap.setDevicePixelRatio(scale)
+    return QIcon(pixmap)
 
 
 def _pil_to_pixmap(img):
@@ -86,34 +117,34 @@ class _QueueCard(QFrame):
     remove_requested = Signal(object)
     selected = Signal(object)
 
-    HEIGHT = 58
-    THUMB_W = 76
-    THUMB_H = 43
+    HEIGHT = 62
+    THUMB_W = 80
+    THUMB_H = 45
 
-    def __init__(self, payload, parent=None):
+    def __init__(self, payload, preferred=None, parent=None):
         super().__init__(parent)
         self.payload = payload
+        # Settings > Preferred quality, as a height, or None for "best".
+        self._preferred = preferred
         self._pending = False
+        self._selected = False
         self._heights = []
         self._full_title = ""
         self._full_meta = ""
         self.setFixedHeight(self.HEIGHT)
         self.setObjectName("queueCard")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 7, 8, 7)
-        lay.setSpacing(10)
+        lay.setContentsMargins(9, 8, 10, 8)
+        lay.setSpacing(12)
 
-        self.thumb_label = QLabel()
-        self.thumb_label.setFixedSize(self.THUMB_W, self.THUMB_H)
-        self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumb_label.setStyleSheet(
-            "background: rgba(255,255,255,14); border-radius: 6px;")
+        self.thumb_label = RoundedImage(self.THUMB_W, self.THUMB_H, radius=7.0)
         lay.addWidget(self.thumb_label, 0)
 
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(2)
+        text_col.setSpacing(3)
         self.title_label = QLabel()
         self.title_label.setStyleSheet("font-weight: 500;")
         # A long title must not push the controls off the right edge, so the
@@ -138,9 +169,10 @@ class _QueueCard(QFrame):
         self.res_combo.setVisible(False)
         lay.addWidget(self.res_combo, 0)
 
-        self.start_btn = QPushButton("Download")
+        self.start_btn = Button("Download")
         self.start_btn.setObjectName("accent")
-        self.start_btn.setFixedHeight(26)
+        self.start_btn.setFixedHeight(28)
+        self.start_btn.setStyleSheet("padding: 0px 14px;")
         self.start_btn.setCursor(Qt.PointingHandCursor)
         self.start_btn.clicked.connect(lambda: self.download_requested.emit(self))
         lay.addWidget(self.start_btn, 0)
@@ -148,11 +180,11 @@ class _QueueCard(QFrame):
         # Drawn glyph, and padding reset to 0: the shared #quiet style carries
         # 4px/12px padding for normal text buttons, which on a 22px square
         # squeezes a label clean out of view (it rendered as an empty circle).
-        self.remove_btn = QPushButton()
+        self.remove_btn = Button()
         self.remove_btn.setObjectName("quiet")
-        self.remove_btn.setIcon(_close_glyph("#9c9c9d"))
+        self.remove_btn.setIcon(_close_glyph("#a9b4c9"))
         self.remove_btn.setIconSize(QSize(10, 10))
-        self.remove_btn.setStyleSheet("padding: 0px;")
+        self.remove_btn.setStyleSheet("padding: 0px; border-radius: 11px;")
         self.remove_btn.setFixedSize(22, 22)
         self.remove_btn.setCursor(Qt.PointingHandCursor)
         self.remove_btn.setToolTip("Remove from queue")
@@ -173,12 +205,49 @@ class _QueueCard(QFrame):
         super().mousePressEvent(event)
 
     def set_selected(self, on):
-        # A dynamic property rather than an inline stylesheet: an inline one
-        # would override the #queueCard rules wholesale, including the hover
-        # state, and would have to re-declare them all to put them back.
+        self._selected = bool(on)
         self.setProperty("selected", "true" if on else "false")
-        self.style().unpolish(self)
-        self.style().polish(self)
+        self.update()
+
+    def paintEvent(self, event):
+        """A raised pane on the queue's glass. Painted, not QSS: a QSS
+        radius isn't antialiased, and this row has no border to hide the
+        stair-stepped corners behind. The row that is loaded in the form
+        above carries a thin line of the brand blue -- the same mark the nav
+        uses for "this is the one you're looking at"."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        dark = cinema.is_dark(self)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        hovered = self.underMouse()
+        if dark:
+            fill = QColor(255, 255, 255, 20 if (hovered or self._selected) else 11)
+            top, bottom = QColor(255, 255, 255, 34 if hovered else 20), QColor(255, 255, 255, 6)
+        else:
+            fill = QColor(255, 255, 255, 215 if (hovered or self._selected) else 150)
+            top, bottom = QColor(255, 255, 255, 255), QColor(15, 23, 42, 26 if hovered else 16)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, 12, 12)
+        edge = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        edge.setColorAt(0.0, top)
+        edge.setColorAt(1.0, bottom)
+        painter.setPen(QPen(edge, 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect, 12, 12)
+        if self._selected:
+            brand = theme.qcolor(theme.tokens(dark)["brand"])
+            painter.setPen(QPen(brand, 1.2))
+            painter.drawRoundedRect(rect.adjusted(0.4, 0.4, -0.4, -0.4), 12, 12)
+        painter.end()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self.update()
 
     # ---- text ----
 
@@ -232,7 +301,7 @@ class _QueueCard(QFrame):
         to rather than at a resolution this link actually offers."""
         self._pending = True
         self._set_title(self.payload["url"])
-        self.title_label.setStyleSheet("font-weight: 500; color: #9c9c9d;")
+        self.title_label.setStyleSheet("font-weight: 500; color: #a9b4c9;")
         self._refresh_meta()
         self.start_btn.setEnabled(False)
 
@@ -255,13 +324,35 @@ class _QueueCard(QFrame):
         self._refresh_meta()
         self.start_btn.setEnabled(True)
 
+    def resolve_from_listing(self, entry):
+        """A video that arrived as one entry of a playlist.
+
+        A playlist is listed without extracting each video's formats -- that
+        is what keeps a 200-video playlist from taking minutes -- so the real
+        resolution ladder isn't known here. The card offers "Best" plus the
+        standard ladder instead, and the downloader picks the nearest height
+        the video really has, so nothing is lost by not knowing it yet.
+        """
+        self._pending = False
+        self.payload["title"] = entry.get("title") or self.payload["url"]
+        self.payload["meta"] = entry.get("uploader") or ""
+        self.payload["duration"] = entry.get("duration") or 0
+        self.payload["thumbnail_url"] = entry.get("thumbnail_url")
+        self.payload["ladder"] = True
+        self._set_title(self.payload["title"])
+        self.title_label.setStyleSheet("font-weight: 500;")
+        self.setToolTip(self.payload["title"])
+        self._heights = list(downloader.STANDARD_LADDER)
+        self._populate_res_combo()
+        self._refresh_meta()
+        self.start_btn.setEnabled(True)
+
     def set_thumbnail(self, pixmap):
         if pixmap is None or pixmap.isNull():
             return
-        self.thumb_label.setPixmap(pixmap.scaled(
-            self.THUMB_W, self.THUMB_H,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation))
+        # RoundedImage covers and crops itself; handing it the full pixmap
+        # lets it render sharply at the display's own scaling.
+        self.thumb_label.setPixmap(pixmap)
 
     def _populate_res_combo(self):
         """Only the heights this link actually has, highest first. An audio or
@@ -271,49 +362,57 @@ class _QueueCard(QFrame):
                 or not self._heights):
             self.res_combo.setVisible(False)
             return
+        ladder = bool(self.payload.get("ladder"))
         self.res_combo.blockSignals(True)
         self.res_combo.clear()
+        if ladder:
+            self.res_combo.addItem("Best", None)
         for h in self._heights:
             self.res_combo.addItem("%dp" % h, h)
-        self.res_combo.setCurrentIndex(0)
+        index = self._default_index(ladder)
+        self.res_combo.setCurrentIndex(index)
         self.res_combo.blockSignals(False)
-        self.payload["height"] = self._heights[0]
+        self.payload["height"] = self.res_combo.itemData(index)
         self.res_combo.setVisible(True)
 
+    def _default_index(self, ladder):
+        """The combo entry a fresh card starts on: the highest height at or
+        below Settings > Preferred quality, falling back to the smallest the
+        link has when it has nothing that low. "Best" (or the top height)
+        when no preference is set."""
+        offset = 1 if ladder else 0
+        if not self._preferred:
+            return 0
+        at_or_below = [i for i, h in enumerate(self._heights) if h <= self._preferred]
+        if at_or_below:
+            return at_or_below[0] + offset
+        return len(self._heights) - 1 + offset
+
     def _on_res_changed(self, _index):
-        data = self.res_combo.currentData()
-        if data is not None:
-            self.payload["height"] = data
+        # Unconditional: "Best" carries None, and skipping None here meant
+        # picking Best after 720p left the card downloading at 720p.
+        self.payload["height"] = self.res_combo.currentData()
 
     def mark_failed(self, err):
+        """The meta line says *why* in a few words -- it used to read just
+        "failed", which told nobody whether to retry, sign in or give up.
+        The full explanation is on the tooltip."""
         self._pending = False
-        self._full_meta = "failed"
-        self.meta_label.setText("failed")
-        self.meta_label.setToolTip(err)
-        self.setToolTip(err)
+        headline, advice = errors.friendly(err)
+        self._failed = True
+        self._full_meta = headline
+        self._elide(self.meta_label, headline)
+        self.meta_label.setProperty("state", "error")
+        self.meta_label.style().unpolish(self.meta_label)
+        self.meta_label.style().polish(self.meta_label)
+        tip = f"{headline}\n{advice}".strip()
+        self.meta_label.setToolTip(tip)
+        self.setToolTip(tip)
         self.res_combo.setVisible(False)
         self.start_btn.setEnabled(False)
 
-    def mark_started(self):
-        """Progress lives in the Download tab, so a started card stops
-        offering its own button rather than duplicating that state."""
-        self.start_btn.setEnabled(False)
-        self.start_btn.setText("Started")
-        self.res_combo.setEnabled(False)
-        self.remove_btn.setEnabled(False)
-
-    def mark_not_started(self):
-        """Puts a started card back to startable. Used when its download is
-        cancelled: the link was never actually fetched, so leaving the card
-        reading "Started" would strand it -- unable to be run again, and
-        dropped on the next restart as though it had been downloaded."""
-        self.start_btn.setEnabled(not self._pending)
-        self.start_btn.setText("Download")
-        self.res_combo.setEnabled(True)
-        self.remove_btn.setEnabled(True)
-
-    def is_started(self):
-        return self.start_btn.text() == "Started"
+    def is_failed(self):
+        return getattr(self, "_failed", False)
 
     def to_entry(self):
         return video_queue_state.to_entry(self.payload, self._heights)
@@ -322,8 +421,20 @@ class _QueueCard(QFrame):
         self._heights = sorted(heights or [], reverse=True)
         chosen = self.payload.get("height")
         self._populate_res_combo()
-        if chosen and self.res_combo.isVisibleTo(self) and chosen in self._heights:
-            self.res_combo.setCurrentIndex(self._heights.index(chosen))
+        if not self.res_combo.isVisibleTo(self):
+            return
+        if chosen is None:
+            # Saved as "Best" -- which only a playlist card offers as an item;
+            # a normal card's "best" is simply its top height, already chosen.
+            if self.payload.get("ladder"):
+                self.res_combo.setCurrentIndex(0)
+                self.payload["height"] = None
+            return
+        # By item data rather than by index: a playlist card has "Best" at
+        # the top, so the heights sit one row lower than their list position.
+        index = self.res_combo.findData(chosen)
+        if index >= 0:
+            self.res_combo.setCurrentIndex(index)
             self.payload["height"] = chosen
 
 
@@ -353,6 +464,28 @@ class VideoTab(QWidget):
     _strip_info_sig = Signal(object, object, str)
     # Restored queue cards only need their picture back, not a whole lookup.
     _strip_thumb_sig = Signal(object, object)
+    # Save Thumbnail's worker reports back through these. Both existed in
+    # 2.0.0 and were lost when this class was merged with the queue rewrite,
+    # which left the worker emitting on attributes that did not exist: the
+    # save dialog opened, the thread died on an AttributeError, and the
+    # button stayed disabled for the rest of the session.
+    _thumb_save_done_sig = Signal(str)
+    _thumb_save_error_sig = Signal(str)
+    # The downloader couldn't read the chosen browser's cookies and carried
+    # on without them (browser, reason) -- reported from a worker thread.
+    _cookie_notice_sig = Signal(str, str)
+    # A pasted link turned out to be a playlist or channel: the pending card
+    # it made is replaced by one card per video. (card, title, entries)
+    _playlist_sig = Signal(object, str, object)
+    # The same, arriving through the form's Fetch rather than a paste --
+    # there is no card to replace yet, so the handler makes one. (url, title,
+    # entries)
+    _form_playlist_sig = Signal(str, str, object)
+    # "Sign in inside this app" from the sign-in dialog -- main_qt switches
+    # to the Browser tab, same as it does for the Images tab.
+    # A link to sign in for: the Browser tab opens it, so the site's own
+    # login is one click away.
+    open_browser_requested = Signal(str)
 
     def __init__(self, settings, download_tab, parent=None):
         super().__init__(parent)
@@ -386,6 +519,21 @@ class VideoTab(QWidget):
         # so consuming a pasted batch cannot re-enter and stack it twice.
         self._suppress_url_change = False
 
+        # Download scheduling. At most Settings > Simultaneous downloads jobs
+        # are _running at once; the rest wait in _waiting, in the order they
+        # were started, and each one that finishes lets the next begin. A
+        # paused job gives its slot up (it is doing nothing with it) and takes
+        # it back when resumed, even if that briefly runs one over the limit
+        # -- resuming is an explicit request, and it should not queue.
+        self._running = set()
+        self._waiting = []          # [(job_id, fn, args)]
+        self._paused_jobs = set()
+
+        # Thumbnails for stacked cards are fetched through a small pool. A
+        # 300-video playlist used to mean 300 threads opening connections
+        # at the same moment.
+        self._thumb_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="awd-thumb")
+
         self._fetch_done_sig.connect(self._on_fetch_done)
         self._fetch_error_sig.connect(self._on_fetch_error)
         self._progress_sig.connect(self._update_progress)
@@ -394,6 +542,12 @@ class VideoTab(QWidget):
         self._playable_sig.connect(lambda jid: self.download_tab.set_playable(jid, True))
         self._strip_info_sig.connect(self._on_strip_info)
         self._strip_thumb_sig.connect(self._on_strip_thumb)
+        self._thumb_save_done_sig.connect(self._on_thumb_save_done)
+        self._thumb_save_error_sig.connect(self._on_thumb_save_error)
+        self._playlist_sig.connect(self._on_playlist)
+        self._form_playlist_sig.connect(self._on_form_playlist)
+        self._cookie_notice_sig.connect(self._on_cookie_fallback)
+        downloader.cookie_fallback_listeners.append(self._cookie_notice_sig.emit)
 
         self._build_ui()
         self._check_ffmpeg()
@@ -402,21 +556,16 @@ class VideoTab(QWidget):
 
     # ---------------------------------------------------------------- UI ---
     def _build_ui(self):
-        # Every other tab puts its content in a scroll area; this one did not,
-        # which is why a queue of seven links came out with the cards drawn on
-        # top of each other. A QVBoxLayout given less height than its children
-        # need does not overflow -- it squeezes, and fixed-height children then
-        # overlap. The content scrolls now, so the tab is usable on a short
-        # window and on a laptop screen, not only on a tall one.
+        # The content scrolls: a QVBoxLayout given less height than its
+        # children need squeezes, and fixed-height queue cards then overlap.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        # Scoped to these two widgets by id. A bare "background: transparent"
-        # is a widget-level stylesheet, and a widget stylesheet outranks the
-        # application one for every descendant -- so an unscoped rule here
+        # Scoped by id: an unscoped "background: transparent" is a widget
+        # stylesheet, which outranks the app's for every descendant and
         # repainted the accent buttons inside the tab transparent too.
         self._scroll.setObjectName("videoScroll")
         self._scroll.setStyleSheet("#videoScroll { background: transparent; }")
@@ -427,23 +576,34 @@ class VideoTab(QWidget):
         self._scroll.setWidget(body)
         outer.addWidget(self._scroll)
 
-        root = QVBoxLayout(body)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
+        column = centered_column(body, MAX_CONTENT_W)
+        root = QVBoxLayout(column)
+        root.setContentsMargins(0, 0, 0, 4)
+        root.setSpacing(12)
 
-        # ---- URL card ----
-        url_card, url_layout = make_card()
+        # ---- Hero: the link field ----
+        # The one thing every visit starts with, so it gets the most room on
+        # the page: a taller field, a larger face, and the only filled button
+        # above the fold until a link has been read.
+        url_card, url_layout = make_card("Paste a link")
         root.addWidget(url_card)
-        url_layout.addWidget(self._label("Video / Post URL", "muted"))
         url_row = QHBoxLayout()
+        url_row.setSpacing(10)
         self.url_entry = QLineEdit()
-        self.url_entry.setPlaceholderText("Paste a link here...")
+        self.url_entry.setObjectName("heroField")
+        self.url_entry.setPlaceholderText(
+            "A video, a playlist or a post — paste several at once to queue them all")
+        self.url_entry.setFixedHeight(46)
+        self._url_icon_action = self.url_entry.addAction(
+            _link_icon(theme.tokens(self._dark_mode())["text_faint"]),
+            QLineEdit.ActionPosition.LeadingPosition)
         self.url_entry.returnPressed.connect(self.on_fetch)
         self.url_entry.textChanged.connect(self._on_url_text_changed)
         url_row.addWidget(self.url_entry, 1)
-        self.fetch_btn = QPushButton("Fetch")
+        self.fetch_btn = Button("Fetch")
         self.fetch_btn.setObjectName("accent")
-        self.fetch_btn.setFixedWidth(100)
+        self.fetch_btn.setFixedSize(116, 46)
+        self.fetch_btn.setCursor(Qt.PointingHandCursor)
         self.fetch_btn.clicked.connect(self.on_fetch)
         url_row.addWidget(self.fetch_btn)
         url_layout.addLayout(url_row)
@@ -452,23 +612,16 @@ class VideoTab(QWidget):
         self.status_label.setWordWrap(True)
         url_layout.addWidget(self.status_label)
 
-        # ---- Info card (hidden until Fetch succeeds) ----
+        # ---- What was fetched (hidden until Fetch succeeds) ----
         self.info_card, info_layout = make_card()
         info_row = QHBoxLayout()
+        info_row.setSpacing(18)
         info_layout.addLayout(info_row)
-        thumb_col = QVBoxLayout()
-        self.thumb_label = QLabel("No preview")
-        self.thumb_label.setFixedSize(140, 79)
-        self.thumb_label.setAlignment(Qt.AlignCenter)
-        self.thumb_label.setObjectName("muted")
-        thumb_col.addWidget(self.thumb_label)
-        self.save_thumb_btn = QPushButton("Save Thumbnail")
-        self.save_thumb_btn.setEnabled(False)
-        self.save_thumb_btn.clicked.connect(self.on_save_thumbnail)
-        thumb_col.addWidget(self.save_thumb_btn)
-        info_row.addLayout(thumb_col)
+        self.thumb_label = RoundedImage(192, 108, radius=10.0, placeholder="No preview")
+        info_row.addWidget(self.thumb_label, 0, Qt.AlignmentFlag.AlignTop)
 
         text_col = QVBoxLayout()
+        text_col.setSpacing(6)
         self.info_title_label = QLabel("")
         self.info_title_label.setObjectName("heading")
         self.info_title_label.setWordWrap(True)
@@ -477,15 +630,27 @@ class VideoTab(QWidget):
         self.info_meta_label.setObjectName("muted")
         text_col.addWidget(self.info_meta_label)
         text_col.addStretch(1)
+        self.save_thumb_btn = Button("Save Thumbnail")
+        self.save_thumb_btn.setObjectName("quiet")
+        self.save_thumb_btn.setCursor(Qt.PointingHandCursor)
+        self.save_thumb_btn.setEnabled(False)
+        self.save_thumb_btn.clicked.connect(self.on_save_thumbnail)
+        thumb_btn_row = QHBoxLayout()
+        thumb_btn_row.setContentsMargins(0, 0, 0, 0)
+        thumb_btn_row.addWidget(self.save_thumb_btn)
+        thumb_btn_row.addStretch(1)
+        text_col.addLayout(thumb_btn_row)
         info_row.addLayout(text_col, 1)
         self.info_card.setVisible(False)
         root.addWidget(self.info_card)
 
-        # ---- Download options card ----
-        self.opts_card, opts_layout = make_card("DOWNLOAD OPTIONS")
+        # ---- Options ----
+        self.opts_card, opts_layout = make_card("Download options")
+        opts_layout.setSpacing(10)
         root.addWidget(self.opts_card)
 
         mode_row = QHBoxLayout()
+        mode_row.setSpacing(18)
         self.video_radio = QRadioButton("Video")
         self.audio_radio = QRadioButton("Audio only (MP3)")
         self.video_radio.setChecked(True)
@@ -498,79 +663,66 @@ class VideoTab(QWidget):
         self.video_row = QWidget()
         video_row_layout = QHBoxLayout(self.video_row)
         video_row_layout.setContentsMargins(0, 0, 0, 0)
-        video_row_layout.setSpacing(0)
+        video_row_layout.setSpacing(8)
 
-        # The resolution/format controls are grouped into their own widget so
-        # image mode can hide *them* while leaving the Download button (which
-        # image posts still need) sitting in the same place on the same row.
+        # Resolution and format are grouped so image mode can hide *them*
+        # while Download (which image posts still need) stays put.
         self.fmt_group = QWidget()
         fmt_layout = QHBoxLayout(self.fmt_group)
         fmt_layout.setContentsMargins(0, 0, 0, 0)
-        # Each label sits directly against its own dropdown, with a slightly
-        # wider gap separating the two pairs, so the row reads as two groups
-        # rather than four evenly-spaced controls.
-        fmt_layout.setSpacing(6)
-        video_row_layout = fmt_layout
-        video_row_layout.addWidget(self._label("Resolution", "muted"))
+        fmt_layout.setSpacing(8)
+        fmt_layout.addWidget(self._label("Resolution", "muted"))
         self.res_combo = QComboBox()
         self.res_combo.addItem("best available")
+        self.res_combo.setCursor(Qt.PointingHandCursor)
         self.res_combo.currentTextChanged.connect(lambda _t: self._update_selection_summary())
         # AdjustToContents alone: it already sizes to the widest item this
-        # ever holds ("2160p  •  ~250.4 MB"). The explicit
-        # setMinimumContentsLength that used to sit here was padding it out
-        # to 28 characters on top of that, which is where the dead space
-        # between the box's text and its arrow came from (reported directly,
-        # with the gap marked on a screenshot).
+        # ever holds; a minimum contents length on top only added dead space
+        # between the text and the arrow.
         self.res_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        video_row_layout.addWidget(self.res_combo)
-        video_row_layout.addSpacing(18)
-        video_row_layout.addWidget(self._label("Format", "muted"))
+        fmt_layout.addWidget(self.res_combo)
+        fmt_layout.addSpacing(14)
+        fmt_layout.addWidget(self._label("Format", "muted"))
         self.format_combo = QComboBox()
         self.format_combo.addItems(["mp4", "mkv", "mov"])
+        self.format_combo.setCursor(Qt.PointingHandCursor)
+        default_format = (self.settings or {}).get("default_format", "mp4")
+        if default_format in ("mp4", "mkv", "mov"):
+            self.format_combo.setCurrentText(default_format)
         self.format_combo.currentTextChanged.connect(lambda _t: self._refresh_choices())
-        # Same reasoning -- "mp4"/"mkv"/"mov" needs three characters, and the
-        # old 8-character minimum was pure empty space.
         self.format_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        video_row_layout.addWidget(self.format_combo)
-        # Packs both groups to the left instead of letting the combos absorb
-        # the leftover row width.
-        video_row_layout.addStretch(1)
+        fmt_layout.addWidget(self.format_combo)
+        fmt_layout.addStretch(1)
+        video_row_layout.addWidget(self.fmt_group, 1)
 
-        # Download sits at the far right of this same row (asked for
-        # directly, marked on a screenshot) rather than in the Save-to card
-        # below -- that card is now purely about *where* files land, and
-        # starting a download is an options-row action.
-        outer_row = self.video_row.layout()
-        outer_row.addWidget(self.fmt_group, 1)
-        # "Queue" sits beside Download rather than replacing it: the common
-        # case is still one link straight to Download, and queueing is the
-        # opt-in for lining several up. Quiet styling, because only one
-        # control on a view gets to be the accent one.
-        self.queue_btn = QPushButton("Queue")
-        self.queue_btn.setObjectName("quiet")
-        self.queue_btn.setFixedWidth(90)
+        # Queue beside Download rather than instead of it: one link straight
+        # to Download is still the common case; queueing is the opt-in.
+        self.queue_btn = Button("Queue")
+        self.queue_btn.setFixedWidth(96)
+        self.queue_btn.setCursor(Qt.PointingHandCursor)
         self.queue_btn.setEnabled(False)
-        self.queue_btn.setToolTip(
-            "Add this to the queue below instead of starting it now.")
+        self.queue_btn.setToolTip("Add this to the queue below instead of starting it now.")
         self.queue_btn.clicked.connect(self.on_queue)
-        outer_row.addWidget(self.queue_btn, 0, Qt.AlignRight)
+        video_row_layout.addWidget(self.queue_btn, 0, Qt.AlignRight)
 
-        self.download_btn = QPushButton("Download")
+        self.download_btn = Button("Download")
         self.download_btn.setObjectName("accent")
         self.download_btn.setFixedWidth(150)
+        self.download_btn.setCursor(Qt.PointingHandCursor)
         self.download_btn.setEnabled(False)
-        self.queue_btn.setEnabled(False)
         self.download_btn.clicked.connect(self.on_download)
-        outer_row.addWidget(self.download_btn, 0, Qt.AlignRight)
+        video_row_layout.addWidget(self.download_btn, 0, Qt.AlignRight)
         opts_layout.addWidget(self.video_row)
 
         self.bitrate_row = QWidget()
         bitrate_row_layout = QHBoxLayout(self.bitrate_row)
         bitrate_row_layout.setContentsMargins(0, 0, 0, 0)
+        bitrate_row_layout.setSpacing(8)
         bitrate_row_layout.addWidget(self._label("MP3 bitrate", "muted"))
         self.bitrate_combo = QComboBox()
         self.bitrate_combo.addItems(["128 kbps", "192 kbps", "256 kbps", "320 kbps"])
-        self.bitrate_combo.setCurrentText("192 kbps")
+        self.bitrate_combo.setCurrentText("320 kbps")
+        self.bitrate_combo.setCursor(Qt.PointingHandCursor)
         self.bitrate_combo.currentTextChanged.connect(lambda _t: self._update_selection_summary())
         bitrate_row_layout.addWidget(self.bitrate_combo, 1)
         opts_layout.addWidget(self.bitrate_row)
@@ -588,31 +740,31 @@ class VideoTab(QWidget):
 
         self.range_fields = QWidget()
         range_layout = QHBoxLayout(self.range_fields)
-        range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.setContentsMargins(24, 0, 0, 0)
+        range_layout.setSpacing(8)
         range_layout.addWidget(self._label("Start", "muted"))
         self.start_entry = QLineEdit("0:00")
-        self.start_entry.setFixedWidth(80)
+        self.start_entry.setObjectName("timecode")
+        self.start_entry.setFixedWidth(88)
         self.start_entry.textChanged.connect(self.on_range_change)
         range_layout.addWidget(self.start_entry)
+        range_layout.addSpacing(6)
         range_layout.addWidget(self._label("End", "muted"))
         self.end_entry = QLineEdit("0:00")
-        self.end_entry.setFixedWidth(80)
+        self.end_entry.setObjectName("timecode")
+        self.end_entry.setFixedWidth(88)
         self.end_entry.textChanged.connect(self.on_range_change)
         range_layout.addWidget(self.end_entry)
+        range_layout.addSpacing(6)
         self.range_info_label = QLabel("Format: HH:MM:SS or MM:SS")
         self.range_info_label.setObjectName("muted")
         range_layout.addWidget(self.range_info_label, 1)
         opts_layout.addWidget(self.range_fields)
         self.range_fields.setVisible(False)
 
-        # A centered accent-tinted badge instead of a big left-aligned
-        # heading floating in open space -- the previous version sat flush
-        # against the left edge with a wide empty gap on the right and
-        # nothing tying it visually to either card above or below it
-        # (marked directly on a screenshot). A pill styled like the theme
-        # toggle button reads as a proper summary chip, centered and
-        # snug between the two cards it sits between.
-        self.summary_chip = Chip()
+        # What Download will produce, stated once, centred between the form
+        # that decides it and the folder it lands in.
+        self.summary_chip = Chip(dot=theme.tokens(self._dark_mode())["accent"])
         self._restyle_summary_chip()
         self.summary_label = self.summary_chip.label
         summary_row = QHBoxLayout()
@@ -623,46 +775,55 @@ class VideoTab(QWidget):
         root.addLayout(summary_row)
         self.summary_chip.setVisible(False)
 
-        # ---- Save + progress + download card ----
-        out_card, out_layout = make_card()
+        # ---- Where it lands ----
+        out_card, out_layout = make_card("Save to")
         root.addWidget(out_card)
-        out_layout.addWidget(self._label("Save to", "muted"))
         dir_row = QHBoxLayout()
+        dir_row.setSpacing(8)
         self.dir_entry = QLineEdit(self.download_dir)
         dir_row.addWidget(self.dir_entry, 1)
-        browse_btn = QPushButton("Browse")
+        browse_btn = Button("Browse")
+        browse_btn.setCursor(Qt.PointingHandCursor)
         browse_btn.clicked.connect(self.browse_dir)
         dir_row.addWidget(browse_btn)
-        open_folder_btn = QPushButton("Open Folder")
+        open_folder_btn = Button("Open Folder")
+        open_folder_btn.setCursor(Qt.PointingHandCursor)
         open_folder_btn.clicked.connect(self.open_download_folder)
         dir_row.addWidget(open_folder_btn)
         out_layout.addLayout(dir_row)
 
-        # ---- Queue: pasted links, stacked at the foot of the page ----
-        # Deliberately the lightest thing on the tab. The form above is
-        # where a download gets configured; this only records what has been
-        # lined up, so each entry is a single 34px line -- a queue of six is
-        # still shorter than one options card. Hidden entirely until
-        # something is actually queued, so the tab looks exactly as it did
-        # before for anyone who never uses it. It sits immediately below
-        # the options card that owns Queue/Download rather than at the
-        # foot of the tab, so a link you just banked appears right where
-        # you were looking when you banked it.
-        self.queue_card, queue_layout = make_card("QUEUE")
-        self.queue_list_layout = QVBoxLayout()
-        self.queue_list_layout.setContentsMargins(0, 0, 0, 0)
-        self.queue_list_layout.setSpacing(1)
-        queue_layout.addLayout(self.queue_list_layout)
-
-        queue_actions = QHBoxLayout()
-        queue_actions.addStretch(1)
-        self.start_queue_btn = QPushButton("Start all")
-        self.start_queue_btn.setObjectName("quiet")
-        self.start_queue_btn.setFixedHeight(26)
+        # ---- Queue: links lined up but not started ----
+        # Hidden until something is queued, so the page looks the same as
+        # ever to anyone who never uses it; it sits right under the form that
+        # fills it, so a link you just banked appears where you were looking.
+        self.queue_card, queue_layout = make_card()
+        queue_layout.setSpacing(8)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(section_label("Queue"))
+        self.queue_count_label = QLabel("")
+        self.queue_count_label.setObjectName("mono")
+        head.addWidget(self.queue_count_label)
+        head.addStretch(1)
+        self.clear_queue_btn = Button("Clear queue")
+        self.clear_queue_btn.setObjectName("quiet")
+        self.clear_queue_btn.setFixedHeight(30)
+        self.clear_queue_btn.setToolTip("Remove every link waiting in the queue")
+        self.clear_queue_btn.clicked.connect(self.clear_queue)
+        head.addWidget(self.clear_queue_btn)
+        self.start_queue_btn = Button("Download all")
+        self.start_queue_btn.setObjectName("accent")
+        self.start_queue_btn.setFixedHeight(30)
+        self.start_queue_btn.setStyleSheet("padding: 0px 16px;")
         self.start_queue_btn.setCursor(Qt.PointingHandCursor)
         self.start_queue_btn.clicked.connect(self.start_queue)
-        queue_actions.addWidget(self.start_queue_btn)
-        queue_layout.addLayout(queue_actions)
+        head.addWidget(self.start_queue_btn)
+        queue_layout.addLayout(head)
+
+        self.queue_list_layout = QVBoxLayout()
+        self.queue_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.queue_list_layout.setSpacing(6)
+        queue_layout.addLayout(self.queue_list_layout)
 
         self.queue_card.setVisible(False)
         root.addWidget(self.queue_card)
@@ -670,7 +831,6 @@ class VideoTab(QWidget):
         self.ffmpeg_warn_label = QLabel("")
         self.ffmpeg_warn_label.setObjectName("dangerText")
         self.ffmpeg_warn_label.setWordWrap(True)
-        self.ffmpeg_warn_label.setStyleSheet("color: #ff6961;")
         root.addWidget(self.ffmpeg_warn_label)
         root.addStretch(1)
 
@@ -685,6 +845,10 @@ class VideoTab(QWidget):
         new theme from the stylesheet the way ordinary QSS-styled widgets
         do. The download cards themselves are download_tab's own -- it's a
         real tab now, so MainWindow re-themes it the same duck-typed way."""
+        self._restyle_summary_chip()
+        self._url_icon_action.setIcon(_link_icon(theme.tokens(self._dark_mode())["text_faint"]))
+        for card in self._queue_strips:
+            card.update()
 
     @staticmethod
     def _label(text, object_name=None):
@@ -743,6 +907,7 @@ class VideoTab(QWidget):
         self._last_fetch_url = url
         self.status_label.setText("Fetching info...")
         self.fetch_btn.setEnabled(False)
+        self.fetch_btn.set_busy(True)
         threading.Thread(target=self._fetch_thread, args=(url,), daemon=True).start()
 
     def _cookies_from_browser(self):
@@ -755,6 +920,12 @@ class VideoTab(QWidget):
         try:
             info, height_sizes = downloader.fetch_info_with_sizes(
                 url, cookies_from_browser=self._cookies_from_browser())
+            if downloader.is_playlist(info):
+                # The form describes one video; a playlist goes to the queue,
+                # one card per video.
+                entries = downloader.playlist_entries(info, self._cookies_from_browser())
+                self._form_playlist_sig.emit(url, info.get("title") or "", entries)
+                return
             title = info.get("title", "Unknown title")
             uploader = info.get("uploader") or info.get("channel") or ""
             duration = info.get("duration") or 0
@@ -773,7 +944,7 @@ class VideoTab(QWidget):
     def _on_fetch_done(self, title, uploader, duration, height_sizes, thumb_image, thumbnail_url, is_image):
         self.is_image_mode = is_image
         if is_image and not thumbnail_url:
-            self.status_label.setText(f"Loaded: {title} -- but no video or downloadable image was found for this post.")
+            self.status_label.setText(f"Loaded: {title} — but no video or downloadable image was found for this post.")
         elif is_image:
             self.status_label.setText(f"Loaded image post: {title}")
         else:
@@ -795,7 +966,7 @@ class VideoTab(QWidget):
         # from it -- the label below scales a copy down to the preview box.
         self._thumb_pixmap = pix
         if pix is not None:
-            self.thumb_label.setPixmap(pix.scaled(140, 79, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.thumb_label.setPixmap(pix)
             self.thumb_label.setText("")
         else:
             self.thumb_label.setPixmap(QPixmap())
@@ -810,17 +981,46 @@ class VideoTab(QWidget):
         self.end_entry.setText(formatting.format_eta(duration) if duration else "0:00")
         self.range_check.setChecked(False)
         self.on_range_toggle()
+        self._refresh_choices(fresh=True)
 
         self._apply_mode_visibility()
 
         self.fetch_btn.setEnabled(True)
+        self.fetch_btn.set_busy(False)
         self.download_btn.setEnabled(True)
         self.queue_btn.setEnabled(True)
     def _on_fetch_error(self, err):
         self.fetch_btn.setEnabled(True)
-        self.status_label.setText("Fetch failed.")
-        QMessageBox.critical(
-            self, config.APP_NAME, "Couldn't read that link:\n\n" + str(err))
+        self.fetch_btn.set_busy(False)
+        headline, advice = errors.friendly(err)
+        self.status_label.setText(headline)
+        # Same treatment the Images tab gives a login wall: offer the two
+        # ways to get a session instead of printing yt-dlp's advice about
+        # command-line flags.
+        if errors.needs_sign_in(err):
+            self._offer_sign_in()
+            return
+        QMessageBox.warning(self, config.APP_NAME, f"{headline}\n\n{advice}".strip())
+
+    def _on_cookie_fallback(self, browser, message):
+        from .dialogs import signin_dialog
+        self.status_label.setText(
+            signin_dialog.handle_cookie_fallback(self.settings, browser, message))
+
+    def _offer_sign_in(self):
+        from .dialogs import signin_dialog
+        choice = signin_dialog.show_sign_in_help(
+            self, url=self._last_fetch_url, dark_mode=self._dark_mode(),
+            current=self._cookies_from_browser())
+        if choice is None:
+            return
+        if choice == "browser_tab":
+            self.open_browser_requested.emit(self._last_fetch_url or "")
+            return
+        self.settings["cookies_from_browser"] = choice
+        settings_store.save_settings(self.settings)
+        self.status_label.setText("Using your %s sign-in — fetching again..." % choice)
+        self.on_fetch()
 
     def _image_download_thread(self, job_id, url, dest, save_dir):
         try:
@@ -839,19 +1039,18 @@ class VideoTab(QWidget):
 
     # ------------------------------------------------------- Clip range ---
     def _restyle_summary_chip(self):
-        # Solid (alpha=255) colors, not a translucent tint over the Acrylic
-        # backdrop. A translucent chip's *effective* colour depends on
-        # whatever's composited behind it, which is exactly what made the
-        # first version of this badge unreadable: the background tint and
-        # the accent-blue text measured only 3.45:1 apart against a light
-        # backdrop (WCAG AA needs 4.5) -- "same colour of button and text."
-        # A fixed, fully-opaque pair has a contrast ratio that's a plain
-        # fact rather than a guess about what's behind the window; both
-        # pairs below clear 6.5:1.
+        # Glass with near-white text. An earlier blue-on-blue version of this
+        # chip measured 3.45:1 against a light backdrop; the text here is the
+        # theme's own body colour on a pane over the page's own painted
+        # backdrop, so its contrast is the body text's (well past 7:1). The
+        # ember dot ties it to the Download button it describes.
+        t = theme.tokens(self._dark_mode())
         if self._dark_mode():
-            self.summary_chip.set_colors(QColor(28, 58, 92), QColor(45, 90, 140), "#96CDFF")
+            self.summary_chip.set_colors(QColor(255, 255, 255, 16), QColor(255, 255, 255, 46),
+                                         t["text"], dot=t["accent"])
         else:
-            self.summary_chip.set_colors(QColor(214, 234, 255), QColor(160, 205, 255), "#0A3278")
+            self.summary_chip.set_colors(QColor(255, 255, 255, 200), QColor(15, 23, 42, 36),
+                                         t["text"], dot=t["accent"])
 
     def on_mode_change(self):
         if self.audio_radio.isChecked():
@@ -926,14 +1125,17 @@ class VideoTab(QWidget):
         return (start, end)
 
     # ------------------------------------------------- Dynamic choice lists ---
-    def _refresh_choices(self):
+    def _refresh_choices(self, fresh=False):
         fraction, eff_duration, _, _ = self._current_fraction_and_duration()
-        self._rebuild_resolution_choices(fraction, eff_duration)
+        self._rebuild_resolution_choices(fraction, eff_duration, fresh=fresh)
         self._rebuild_bitrate_choices(eff_duration)
         self._update_selection_summary()
 
-    def _rebuild_resolution_choices(self, fraction=1.0, effective_duration=None):
-        prev_height = self.res_height_map.get(self.res_combo.currentText())
+    def _rebuild_resolution_choices(self, fraction=1.0, effective_duration=None, fresh=False):
+        """`fresh` is a newly fetched link: it starts on the highest resolution
+        it has (or the one Settings > Preferred quality asks for), not on
+        whatever the previous link was left at."""
+        prev_height = None if fresh else self.res_height_map.get(self.res_combo.currentText())
         heights = sorted(self.height_sizes.keys(), reverse=True) if self.height_sizes else []
         container = self.format_combo.currentText()
         eff_duration = self.duration if effective_duration is None else effective_duration
@@ -955,6 +1157,10 @@ class VideoTab(QWidget):
         self.res_combo.clear()
         self.res_combo.addItems(res_list)
         match = next((lbl for lbl, h in res_map.items() if h == prev_height), None)
+        if match is None and fresh:
+            preferred = self._preferred_height()
+            if preferred:
+                match = next((lbl for lbl, h in res_map.items() if h and h <= preferred), None)
         self.res_combo.setCurrentText(match or res_list[0])
         self.res_combo.blockSignals(False)
 
@@ -974,7 +1180,8 @@ class VideoTab(QWidget):
         self.bitrate_combo.clear()
         self.bitrate_combo.addItems(bitrate_list)
         match = next((lbl for lbl, k in bitrate_map.items() if k == prev_kbps), None)
-        self.bitrate_combo.setCurrentText(match or bitrate_list[min(1, len(bitrate_list) - 1)])
+        # 320 kbps -- the best MP3 there is -- unless something else was picked.
+        self.bitrate_combo.setCurrentText(match or bitrate_list[-1])
         self.bitrate_combo.blockSignals(False)
 
     def _update_selection_summary(self):
@@ -986,7 +1193,7 @@ class VideoTab(QWidget):
         # (centered, right above the Save-to card) already say "this is
         # what you're about to download," so the label can just state it.
         if self.audio_radio.isChecked():
-            kbps = self.bitrate_value_map.get(self.bitrate_combo.currentText(), 192)
+            kbps = self.bitrate_value_map.get(self.bitrate_combo.currentText(), 320)
             size = size_estimate.estimate_audio_size(eff_duration, kbps)
             text = f"MP3 · {kbps} kbps  ({formatting.humanize_size(size)})"
         else:
@@ -1069,26 +1276,37 @@ class VideoTab(QWidget):
         return out
 
     def _on_url_text_changed(self, text):
-        """Any link dropped in the field stacks straight away -- one at a
-        time or twenty at once. Stacking only batches of two or more was the
-        obvious-looking rule and the wrong one: pasting links one by one is
-        how a queue actually gets built, and under that rule none of them
-        stacked at all.
+        """Pasting works exactly like Fetch. One link opens in the form with
+        its download options, the same as clicking Fetch; several at once (a
+        list copied from notes or chat) stack in the queue, one card each.
 
-        The form is still reachable for a download that needs more than a
-        resolution (a clip range, a specific container): copy the link and
-        press Fetch with the field empty, which reads the clipboard directly
-        and fills the form without going through the queue."""
+        Only a paste counts, not typing: the field reacts when a whole link
+        arrives in one go, so a link being typed isn't fetched a letter at a
+        time. Typed links go with Enter or the Fetch button."""
+        previous = getattr(self, "_previous_url_text", "")
+        self._previous_url_text = text
         if self._suppress_url_change:
+            return
+        if len(text) - len(previous) < 8:
             return
         links = self._split_links(text)
         if not links:
+            return
+        if len(links) == 1:
+            self._suppress_url_change = True
+            try:
+                self.url_entry.setText(links[0])
+            finally:
+                self._suppress_url_change = False
+            self._previous_url_text = links[0]
+            self.on_fetch()
             return
         self._suppress_url_change = True
         try:
             self.url_entry.clear()
         finally:
             self._suppress_url_change = False
+        self._previous_url_text = ""
         self.queue_links(links)
 
     def queue_links(self, urls):
@@ -1117,7 +1335,7 @@ class VideoTab(QWidget):
             "mode": "audio" if self.audio_radio.isChecked() else "video",
             "height": None,
             "container": self.format_combo.currentText(),
-            "bitrate": "192",
+            "bitrate": "320",
             "time_range": None,
             "title": url,
             "meta": "",
@@ -1131,6 +1349,10 @@ class VideoTab(QWidget):
         try:
             info, height_sizes = downloader.fetch_info_with_sizes(
                 url, cookies_from_browser=self._cookies_from_browser())
+            if downloader.is_playlist(info):
+                entries = downloader.playlist_entries(info, self._cookies_from_browser())
+                self._playlist_sig.emit(strip, info.get("title") or "", entries)
+                return
             has_video = any(
                 f.get("vcodec") not in (None, "none") for f in (info.get("formats") or [])
             )
@@ -1149,6 +1371,7 @@ class VideoTab(QWidget):
                 "duration": info.get("duration") or 0,
                 "heights": sorted(height_sizes.keys()) if height_sizes else [],
                 "height": max(height_sizes) if height_sizes else None,
+                "height_sizes": dict(height_sizes or {}),
                 "is_image": not has_video,
                 "thumbnail_url": thumbnail_url,
                 "thumb_image": thumb_image,
@@ -1163,7 +1386,8 @@ class VideoTab(QWidget):
             return
         if info is None:
             strip.mark_failed(err)
-            self.status_label.setText("One queued link could not be read: %s" % err)
+            self.status_label.setText(
+                "One queued link couldn't be read: %s" % errors.friendly(err)[0])
             return
         # A partial extraction (age gate, region block, a dead link) comes back
         # looking like an image post with no image: no video formats and no
@@ -1177,8 +1401,75 @@ class VideoTab(QWidget):
                 "One queued link has nothing downloadable: %s" % strip.payload["url"])
             return
         strip.resolve(info, _pil_to_pixmap(info.get("thumb_image")))
+        # Kept so selecting the card later fills the form at once, without
+        # reading the link from the site a second time.
+        strip.fetched = {k: info.get(k) for k in ("title", "uploader", "duration", "height_sizes",
+                                                  "thumbnail_url", "is_image")}
         if not any(st._pending for st in self._queue_strips):
             self.status_label.setText("Queue ready.")
+
+    # ------------------------------------------------------- Playlists ---
+    def _on_playlist(self, strip, title, entries):
+        """Replaces the pending card a playlist link made with one card per
+        video, in the same place in the queue."""
+        if strip not in self._queue_strips:
+            return
+        if not entries:
+            strip.mark_failed("This playlist has no videos that can be downloaded.")
+            return
+        index = self.queue_list_layout.indexOf(strip)
+        self._on_strip_remove(strip)
+        added = self._stack_entries(entries, index)
+        self._report_playlist(title, added, len(entries))
+
+    def _on_form_playlist(self, url, title, entries):
+        """A playlist fetched through the form. The form can only describe one
+        video, so it clears and the videos are stacked instead."""
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.set_busy(False)
+        self._clear_form_for_next()
+        if not entries:
+            self.status_label.setText("That playlist has no videos that can be downloaded.")
+            return
+        added = self._stack_entries(entries, None)
+        self._report_playlist(title, added, len(entries))
+
+    def _stack_entries(self, entries, index):
+        """One ready-to-start card per playlist entry, skipping any link that
+        is already stacked. Returns how many were added."""
+        existing = {st.payload["url"] for st in self._queue_strips}
+        added = 0
+        for entry in entries:
+            if entry["url"] in existing:
+                continue
+            existing.add(entry["url"])
+            card = self._add_queue_strip(
+                self._blank_payload(entry["url"]),
+                index=None if index is None or index < 0 else index + added,
+                reveal=False)
+            card.resolve_from_listing(entry)
+            if entry.get("thumbnail_url"):
+                self._thumb_pool.submit(self._thumb_only_thread, card, entry["thumbnail_url"])
+            added += 1
+        return added
+
+    def _report_playlist(self, title, added, total):
+        name = f"“{title}”" if title else "the playlist"
+        if added == 0:
+            text = f"Every video from {name} is already in the queue."
+        else:
+            text = f"Stacked {added} video{'s' if added != 1 else ''} from {name}."
+            if total >= downloader.PLAYLIST_LIMIT:
+                text += f" Only the first {downloader.PLAYLIST_LIMIT} are listed."
+        self.status_label.setText(text)
+
+    def _preferred_height(self):
+        """Settings > Preferred quality as a height, or None for "best"."""
+        value = (self.settings or {}).get("preferred_quality", "best")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _current_form_payload(self):
         """Reads the form exactly the way on_download() does, so a queued
@@ -1200,7 +1491,7 @@ class VideoTab(QWidget):
         bitrate = self.bitrate_value_map.get(bitrate_display)
         if bitrate is None:
             m = re.match(r"(\d+)", bitrate_display)
-            bitrate = int(m.group(1)) if m else 192
+            bitrate = int(m.group(1)) if m else 320
 
         time_range = None
         if self.range_check.isChecked():
@@ -1232,30 +1523,57 @@ class VideoTab(QWidget):
             QMessageBox.warning(self, config.APP_NAME, err)
             return
         self._drop_cards_for_url(payload["url"])
-        self._add_queue_strip(payload)
+        strip = self._add_queue_strip(payload)
+        strip.fetched = {
+            "title": self.info_title_label.text(), "uploader": payload.get("meta", ""),
+            "duration": self.duration, "height_sizes": dict(self.height_sizes or {}),
+            "thumbnail_url": self.thumbnail_url, "is_image": self.is_image_mode,
+        }
         self.status_label.setText("Queued. Paste the next link.")
         self._clear_form_for_next()
 
-    def _add_queue_strip(self, payload):
-        strip = _QueueCard(payload)
+    def _add_queue_strip(self, payload, index=None, reveal=True):
+        strip = _QueueCard(payload, preferred=self._preferred_height())
         strip.download_requested.connect(self._on_strip_download)
         strip.remove_requested.connect(self._on_strip_remove)
         strip.selected.connect(self._on_card_selected)
-        self.queue_list_layout.addWidget(strip)
-        self._queue_strips.append(strip)
+        if index is None:
+            self.queue_list_layout.addWidget(strip)
+            self._queue_strips.append(strip)
+        else:
+            self.queue_list_layout.insertWidget(index, strip)
+            self._queue_strips.insert(min(index, len(self._queue_strips)), strip)
         self.queue_card.setVisible(True)
+        self._update_queue_header()
         # A link you just added should be somewhere you can see, not below the
-        # fold of a queue that has grown past the window.
-        QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(strip, 0, 8))
+        # fold of a queue that has grown past the window. Skipped while a
+        # playlist is being stacked: scrolling to each of 300 cards in turn
+        # is wasted work, and the first one is what the status line points at.
+        if reveal:
+            motion.grow_in(strip)
+            QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(strip, 0, 8))
         return strip
+
+    def _update_queue_header(self):
+        """Hook for the queue card's header count; set up in _build_ui."""
+        label = getattr(self, "queue_count_label", None)
+        if label is None:
+            return
+        n = len(self._queue_strips)
+        label.setText(f"{n} link{'s' if n != 1 else ''}" if n else "")
+        self.start_queue_btn.setText("Download all" if n != 1 else "Download")
 
     def _on_strip_remove(self, strip):
         if strip in self._queue_strips:
             self._queue_strips.remove(strip)
-        self.queue_list_layout.removeWidget(strip)
-        strip.deleteLater()
-        if not self._queue_strips:
-            self.queue_card.setVisible(False)
+        self._update_queue_header()
+
+        def drop():
+            self.queue_list_layout.removeWidget(strip)
+            strip.deleteLater()
+            if not self._queue_strips:
+                self.queue_card.setVisible(False)
+        motion.shrink_out(strip, drop)
 
     def _on_card_selected(self, card):
         """Puts the card's link back in the fetch bar and fills the form from
@@ -1272,7 +1590,31 @@ class VideoTab(QWidget):
             self.url_entry.setText(card.payload["url"])
         finally:
             self._suppress_url_change = False
-        self.on_fetch()
+        cached = getattr(card, "fetched", None)
+        if not cached or (not cached.get("height_sizes") and not cached.get("is_image")):
+            # A card restored from last session, or from a playlist listing,
+            # never had its formats read: read them now.
+            self.on_fetch()
+            return
+        # Everything the form needs was read when the card was stacked: fill
+        # it straight away instead of asking the site again.
+        self._last_fetch_url = card.payload["url"]
+        self._on_fetch_done(cached.get("title") or card.payload.get("title") or "", cached.get("uploader") or "",
+                            cached.get("duration") or 0, cached.get("height_sizes") or {}, None,
+                            cached.get("thumbnail_url"), bool(cached.get("is_image")))
+        pix = card.payload.get("thumb_pixmap")
+        if pix is not None:
+            self._thumb_pixmap = pix
+            self.thumb_label.setPixmap(pix)
+            self.thumb_label.setText("")
+        if card.payload.get("mode") == "audio":
+            self.audio_radio.setChecked(True)
+        height = card.payload.get("height")
+        if height:
+            label = next((lbl for lbl, h in self.res_height_map.items() if h == height), None)
+            if label:
+                self.res_combo.setCurrentText(label)
+        self.status_label.setText("Loaded from the queue: %s" % (cached.get("title") or card.payload["url"]))
 
     def _drop_cards_for_url(self, url):
         """A link that has been pulled into the form and started from there
@@ -1282,11 +1624,11 @@ class VideoTab(QWidget):
                 self._on_strip_remove(card)
 
     def _on_strip_download(self, strip):
-        job_id = self._start_payload(strip.payload)
-        if job_id is not None and job_id in self._jobs:
-            # Remembered so cancelling the download can hand the card back.
-            self._jobs[job_id]["card"] = strip
-        strip.mark_started()
+        """Starts a queued link and takes its card out of the queue -- the
+        download carries on as a card in the Download tab, so leaving it
+        here too would list one download in two places."""
+        self._start_payload(strip.payload)
+        self._on_strip_remove(strip)
 
     def _start_payload(self, payload):
         """Shared by the queue and by on_download() -- one place that turns a
@@ -1316,7 +1658,7 @@ class VideoTab(QWidget):
             "bitrate": payload["bitrate"], "time_range": payload["time_range"],
             "title": payload["title"], "meta": payload["meta"],
         }
-        threading.Thread(target=self._download_thread, args=dl_args, daemon=True).start()
+        self._launch(job_id, self._download_thread, dl_args)
         return job_id
 
     def start_queue(self):
@@ -1324,6 +1666,13 @@ class VideoTab(QWidget):
         for strip in list(self._queue_strips):
             if strip.start_btn.isEnabled() and not strip._pending:
                 self._on_strip_download(strip)
+
+    def clear_queue(self):
+        """Empties the queue. Downloads already running aren't in it any more
+        (a started link moves to the Download tab), so nothing is cancelled."""
+        for strip in list(self._queue_strips):
+            self._on_strip_remove(strip)
+        self.status_label.setText("Queue cleared.")
 
     def queue_url(self, url):
         """Entry point for the Browser tab's download button.
@@ -1371,6 +1720,7 @@ class VideoTab(QWidget):
         self.download_btn.setEnabled(False)
         self.queue_btn.setEnabled(False)
         self.fetch_btn.setEnabled(True)
+        self.fetch_btn.set_busy(False)
         self.status_label.setText("Paste the next link, then click Fetch.")
         self.height_sizes = {}
         self.is_image_mode = False
@@ -1438,13 +1788,10 @@ class VideoTab(QWidget):
         ]
         download_queue_state.save(entries)
 
-        # Links that were stacked but never run (or whose run was cancelled)
-        # have no bytes on disk and nothing to resume -- they simply have to
+        # Links still waiting in the queue (a started one has left it for the
+        # Download tab) have nothing on disk to resume -- they simply have to
         # still be in the queue next time, which is what this remembers.
-        video_queue_state.save([
-            card.to_entry() for card in self._queue_strips
-            if not card.is_started()
-        ])
+        video_queue_state.save([card.to_entry() for card in self._queue_strips])
 
     def _restore_queue(self):
         """Puts back the links that were still stacked when the app closed.
@@ -1470,9 +1817,8 @@ class VideoTab(QWidget):
                     continue
                 card.restore_heights(heights)
                 if payload.get("thumbnail_url"):
-                    threading.Thread(target=self._thumb_only_thread,
-                                     args=(card, payload["thumbnail_url"]),
-                                     daemon=True).start()
+                    self._thumb_pool.submit(self._thumb_only_thread, card,
+                                            payload["thumbnail_url"])
             except Exception:
                 logger.exception("Failed to restore a queued link: %s", entry)
 
@@ -1518,7 +1864,7 @@ class VideoTab(QWidget):
                 )
                 self._jobs[job_id]["relaunch"] = (self._download_thread, dl_args)
                 self._jobs[job_id]["resume_info"] = e
-                threading.Thread(target=self._download_thread, args=dl_args, daemon=True).start()
+                self._launch(job_id, self._download_thread, dl_args)
             except Exception:
                 logger.exception("Failed to resume a pending download: %s", e)
 
@@ -1526,12 +1872,15 @@ class VideoTab(QWidget):
         job = self._jobs.get(job_id)
         if job:
             job["cancel"] = True
-            # If this job was started from a queue card, that card goes back
-            # to being startable rather than sitting there reading "Started"
-            # for a download that is not happening.
-            card = job.get("card")
-            if card is not None and card in self._queue_strips:
-                card.mark_not_started()
+            # A job still waiting for a slot has no thread to notice the flag,
+            # so it is taken out of line and finished here.
+            waiting = next((w for w in self._waiting if w[0] == job_id), None)
+            if waiting is not None:
+                self._waiting.remove(waiting)
+                job["finished"] = True
+                self.download_tab.mark_cancelled(job_id)
+                self._refresh_waiting_positions()
+                return
             # Cancelling a paused job must actually wake the download thread
             # back up -- otherwise it sits forever inside pause_event.wait()
             # and never reaches the cancel check that would raise
@@ -1544,8 +1893,73 @@ class VideoTab(QWidget):
             return
         if paused:
             job["pause_event"].clear()
+            # A paused download is doing nothing with its slot; the next one
+            # in line can have it.
+            if job_id in self._running:
+                self._running.discard(job_id)
+                self._paused_jobs.add(job_id)
+                self._pump()
         else:
+            if job_id in self._paused_jobs:
+                self._paused_jobs.discard(job_id)
+                self._running.add(job_id)
             job["pause_event"].set()
+
+    # ---------------------------------------------------------- Scheduling ---
+    def _slot_limit(self):
+        return settings_store.max_concurrent(self.settings)
+
+    def _launch(self, job_id, fn, args):
+        """Starts a download now if a slot is free, otherwise puts it in line.
+        Every video/audio job goes through here -- fresh, retried and resumed
+        at startup alike -- so none of them can bypass the limit."""
+        if len(self._running) < self._slot_limit():
+            self._start_thread(job_id, fn, args)
+        else:
+            self._waiting.append((job_id, fn, args))
+            self._refresh_waiting_positions()
+
+    def _start_thread(self, job_id, fn, args):
+        self._running.add(job_id)
+        self.download_tab.set_started(job_id)
+        threading.Thread(target=fn, args=args, daemon=True).start()
+
+    def _release_slot(self, job_id):
+        """A job finished, failed or was cancelled: hand its slot on."""
+        self._running.discard(job_id)
+        self._paused_jobs.discard(job_id)
+        self._pump()
+
+    def _pump(self):
+        """Starts waiting jobs until the slots are full again. Also called
+        when Settings raises the limit, so a larger number takes effect for
+        jobs already in line rather than only for new ones."""
+        while self._waiting and len(self._running) < self._slot_limit():
+            job_id, fn, args = self._waiting.pop(0)
+            job = self._jobs.get(job_id)
+            if job is None or job.get("cancel"):
+                continue
+            self._start_thread(job_id, fn, args)
+        self._refresh_waiting_positions()
+
+    def _refresh_waiting_positions(self):
+        for position, (job_id, _fn, _args) in enumerate(self._waiting, start=1):
+            self.download_tab.set_waiting(job_id, position)
+
+    def settings_changed(self):
+        """Called by the Settings panel after any change: a new concurrency
+        limit may free slots at once, and the save folder and default format
+        chosen there should be what the form shows."""
+        self._pump()
+        folder = settings_store.get_save_dir(self.settings, "video", config.DEFAULT_DOWNLOAD_DIR)
+        if folder and folder != self.dir_entry.text():
+            self.dir_entry.setText(folder)
+        fmt = (self.settings or {}).get("default_format", "mp4")
+        if fmt in ("mp4", "mkv", "mov") and fmt != self.format_combo.currentText():
+            self.format_combo.setCurrentText(fmt)
+        preferred = self._preferred_height()
+        for card in self._queue_strips:
+            card._preferred = preferred
 
     def _play_job(self, job_id):
         job = self._jobs.get(job_id)
@@ -1569,7 +1983,11 @@ class VideoTab(QWidget):
         job["pause_event"].set()
         self.download_tab.reset_for_retry(job_id)
         fn, args = job["relaunch"]
-        threading.Thread(target=fn, args=args, daemon=True).start()
+        if fn == self._download_thread:
+            self._launch(job_id, fn, args)
+        else:
+            # Image saves take a moment and don't count against the limit.
+            threading.Thread(target=fn, args=args, daemon=True).start()
 
     def _forget_job(self, job_id):
         """Used to pop the job record outright once a download finished --
@@ -1640,7 +2058,7 @@ class VideoTab(QWidget):
         detail = f" (actual result: {actual_height}p)" if actual_height else ""
         return (
             f"This download hit a YouTube site restriction partway through and had "
-            f"to retry using an alternate connection method{detail} -- the quality "
+            f"to retry using an alternate connection method{detail} — the quality "
             f"you selected may not have been fully honored. Updating yt-dlp "
             f"(the Updates button) often avoids this."
         )
@@ -1648,16 +2066,22 @@ class VideoTab(QWidget):
     def _download_thread(self, job_id, url, save_dir, mode, height, container,
                           bitrate="192", time_range=None):
         hook = lambda d: self._progress_hook(job_id, d)
+        # Read at run time, not stored with the job: the download must go out
+        # with the same session the fetch used. It didn't -- the fetch honoured
+        # Settings > Sign-in while the download ignored it, so a link that only
+        # read successfully *because* of a chosen browser's cookies then failed
+        # to download without them.
+        cookies = self._cookies_from_browser()
         try:
             if mode == "audio":
                 _, final_path, used_fallback = downloader.download_audio(
-                    url, save_dir, bitrate, hook, time_range)
+                    url, save_dir, bitrate, hook, time_range, cookies_from_browser=cookies)
                 warning = self._fallback_client_warning(used_fallback) if used_fallback else ""
                 self._download_done_sig.emit(job_id, warning, "audio", final_path)
                 return
 
             info, merged_path, used_fallback = downloader.download_video(
-                url, save_dir, height, hook, time_range
+                url, save_dir, height, hook, time_range, cookies_from_browser=cookies
             )
 
             warning = ""
@@ -1685,6 +2109,7 @@ class VideoTab(QWidget):
         if job is None:
             return
         job["finished"] = True
+        self._release_slot(job_id)
         save_dir = job["save_dir"]
 
         if final_path and os.path.exists(final_path):
@@ -1731,6 +2156,7 @@ class VideoTab(QWidget):
         if job is None:
             return
         job["finished"] = True
+        self._release_slot(job_id)
         cancelled = job["cancel"]
         self._forget_job(job_id)
 
@@ -1738,6 +2164,5 @@ class VideoTab(QWidget):
             self.download_tab.mark_cancelled(job_id)
             return
 
-        self.download_tab.mark_failed(
-            job_id, f"Failed: {err.splitlines()[0][:120]}" if err else "Failed.")
+        self.download_tab.mark_failed(job_id, errors.one_line(err) if err else "Failed.")
         logger.error("Download job %s failed: %s", job_id, err)

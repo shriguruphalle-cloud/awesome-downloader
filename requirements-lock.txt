@@ -1,0 +1,42 @@
+# Exact versions the release build is made with (build_exe.bat installs
+# from this file when it exists). requirements.txt keeps the loose ranges
+# for development; this pins the build, so two builds of the same commit
+# ship the same code -- a floating yt-dlp or PySide6 had meant a rebuild
+# could quietly change behaviour nobody had tested.
+#
+# Refresh deliberately: bump a pin, run tests/run_all.py (and --network),
+# then rebuild.
+
+# runtime
+yt-dlp==2026.8.19
+curl_cffi==0.15.0
+cffi==2.1.1
+pycparser==3.0
+certifi==2026.7.22
+libtorrent==2.0.13
+pillow==12.3.0
+PySide6==6.11.1
+PySide6_Addons==6.11.1
+PySide6_Essentials==6.11.1
+shiboken6==6.11.1
+PySideSix-Frameless-Window==0.8.2
+pywin32==312
+typing_extensions==4.16.0
+# The Browser tab: WebView2 driven through .NET
+pythonnet==3.1.0
+clr_loader==0.3.1
+
+# build only
+# pywebview isn't used by the app -- it's where the build takes the WebView2
+# SDK from (Microsoft.Web.WebView2.Core.dll + WebView2Loader.dll).
+pywebview==6.2.1
+proxy_tools==0.1.0
+bottle==0.13.4
+
+pyinstaller==6.22.0
+pyinstaller-hooks-contrib==2026.6
+altgraph==0.17.5
+pefile==2024.8.26
+pywin32-ctypes==0.2.3
+packaging==26.3
+setuptools==84.0.0

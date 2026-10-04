@@ -13,3 +13,8 @@ Pillow>=10.0.0
 PySide6>=6.11.1
 PySideSix-Frameless-Window>=0.8.2 ; sys_platform == "win32"
 pywin32>=312 ; sys_platform == "win32"
+# The Browser tab runs on Microsoft Edge WebView2 (it plays H.264; Qt
+# WebEngine can't), driven from Python through .NET. pywebview is only where
+# the WebView2 SDK files come from -- the app doesn't use it.
+pythonnet>=3.0.3 ; sys_platform == "win32"
+pywebview>=5.0 ; sys_platform == "win32"

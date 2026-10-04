@@ -1,179 +1,265 @@
-"""Design tokens + QSS generator for the PySide6 UI.
+"""Design tokens + QSS for the PySide6 UI.
 
-Adapted for a frosted-glass window: the window itself is real translucent
-Acrylic (see mica.py), so "card" surfaces are semi-transparent overlays
-that let the blur show through, the way macOS vibrancy panels work.
+2.5 design language: the website's navy grid and blue glass (cinema.py),
+with the chrome kept quiet so the two saturated colours can mean something:
+
+  accent (ember #FF6A13)  ACTION ONLY -- the thing you are about to do:
+                          primary buttons, progress, focus rings.
+  brand  (sky #38BDF8)    IDENTITY ONLY -- the logo's own glow and the
+                          website's blue: the wordmark, section labels, the
+                          nav indicator's light strip, focus rings. Never on
+                          a control that does something.
+
+That split predates this redesign and survives it for the same reason it
+was made: at full saturation on a dark canvas the blue reads far more
+luminous than the orange, so when blue carried every button the whole UI
+shouted. Blue is the light the whole window is lit with; ember is what you
+press.
+
+Token names are unchanged from 2.4 (every tab reads them by name); new ones
+are additions.
 """
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QFontDatabase, QPainter, QPainterPath, QPen, QPixmap
 
 from app import config
 
-# Real SF Pro (Apple's system font) is proprietary and licensed only for use
-# on Apple's own platforms -- can't legally bundle it here. Inter (SIL Open
-# Font License, free to redistribute) is the standard, widely-used
-# substitute specifically because its metrics/x-height/weight read as
-# near-identical to SF Pro at UI sizes; bundling the actual font file (not
-# just naming it in a CSS stack and hoping it's installed) is what makes
-# this consistent across every Windows machine regardless of what fonts
-# they already have.
+from . import palettes
+
+# Real SF Pro is licensed only for Apple platforms. Inter (SIL OFL) is the
+# standard substitute -- its metrics read as near-identical at UI sizes --
+# and bundling the file is what makes the type consistent on every machine.
 _FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 _INTER_PATH = os.path.join(_FONTS_DIR, "InterVariable.ttf")
 FONT_STACK = '"Inter", "SF Pro Display", "Segoe UI Variable", "Segoe UI", sans-serif'
 
-# Technical voice: anything that is a quantity, a key, a code or a section
-# label is set in mono, so numbers align in columns and labels read as
-# instrument markings rather than prose. Cascadia Mono ships with Windows
-# 11 and Consolas with every Windows back to Vista, so this resolves to a
-# real face without bundling another font.
+# Quantities, codes and timecodes are set in mono so they align in columns.
+# Cascadia Mono ships with Windows 11 and Consolas with every Windows since
+# Vista, so this resolves to a real face without bundling another font.
 MONO_STACK = '"JetBrains Mono", "Cascadia Mono", "Consolas", "SF Mono", monospace'
 
 _fonts_loaded = False
 
 
+# The name's own face (widgets/wordmark.py): the website's Instrument Serif.
+_SERIF_PATHS = [os.path.join(_FONTS_DIR, f) for f in ("InstrumentSerif-Regular.ttf", "InstrumentSerif-Italic.ttf")]
+
+
 def load_custom_fonts():
-    """Registers the bundled Inter font with Qt so "Inter" resolves in QSS
-    font-family regardless of whether it's separately installed on this
-    machine. Safe to call more than once (idempotent past the first call);
-    every MainWindow.__init__ calls this rather than requiring a separate
-    app-startup step to remember."""
+    """Registers the bundled Inter and Instrument Serif with Qt. Idempotent."""
     global _fonts_loaded
     if _fonts_loaded:
         return
-    if os.path.exists(_INTER_PATH):
-        QFontDatabase.addApplicationFont(_INTER_PATH)
+    for path in [_INTER_PATH] + _SERIF_PATHS:
+        if os.path.exists(path):
+            QFontDatabase.addApplicationFont(path)
     _fonts_loaded = True
 
-# ── "Instrument" palette ────────────────────────────────────────────────
-# Raycast's chrome discipline (a near-black surface ladder carrying all
-# elevation, hairline borders instead of shadows) with Teenage
-# Engineering's colour discipline: exactly two saturated colours that
-# never trade places.
-#
-#   accent (#FF6600)  ACTION ONLY  -- the thing you are about to do:
-#                     primary buttons, progress, focus rings.
-#   brand  (#0A84FF)  IDENTITY ONLY -- the bolt, the wordmark, the active
-#                     nav pill. It never sits on a control that performs
-#                     an action.
-#
-# The split exists for a measured reason, not taste: at full saturation on
-# a near-black canvas the blue reads considerably more luminous than the
-# orange, so when blue carried every button the whole UI shouted. Confining
-# it to identity keeps it as the first thing you see without it competing
-# with everything else.
+
+# ── Night (dark) ──────────────────────────────────────────────────────────
+# The website's palette: navy glass, #EAF2FF text at 100/72/50% strength,
+# sky blue for identity. Only the action colour is the app's own.
 DARK = {
-    "window_bg": "transparent",          # Mica/Acrylic paints the real backdrop
-    # Surface ladder, kept translucent so the real Acrylic blur still reads
-    # through (the design system's flat #0d0d0e/#121213 steps are the
-    # opaque equivalents of these two).
-    "card_bg": "rgba(18, 18, 20, 150)",
-    "card_bg_solid": "rgba(16, 17, 18, 238)",
-    "card_border": "rgba(255, 255, 255, 20)",   # Raycast hairline, ~0.08
-    "divider": "rgba(255, 255, 255, 16)",
-    "text": "#f4f4f6",
-    "text_muted": "#9c9c9d",
-    "accent": "#ff6600",
-    "accent_hover": "#ff7a1f",
-    # Black on orange measures ~8:1; white on orange only ~2.6:1. Black is
-    # both the accessible choice and the Teenage Engineering one.
-    "accent_text": "#0a0a0a",
-    "brand": "#0a84ff",
-    "brand_hover": "#3da8ff",
-    "brand_text": "#ffffff",
-    "danger": "#ff3b30",
-    "success": "#2fd35a",
-    "progress": "#ff6600",              # progress is an action, so it wears the action colour
-    "warning": "#ffc533",
+    "window_bg": "transparent",
+    "ink": "#101c3e",
+    # Glass. Cards are painted (widgets/card.py + cinema.paint_glass); these
+    # strings are for the QSS-styled surfaces that sit on them.
+    "card_bg": "rgba(255, 255, 255, 13)",
+    # Near-opaque navy: popups, menus and tooltips are top-level windows of
+    # their own, with no backdrop behind them to frost.
+    "card_bg_solid": "rgba(18, 30, 64, 248)",
+    "card_border": "rgba(255, 255, 255, 28)",
+    "divider": "rgba(255, 255, 255, 18)",
+    "text": "#eaf2ff",
+    "text_muted": "#a9b4c9",      # the site's 72% text
+    "text_faint": "#7b86a0",      # the site's 50% text
+    "eyebrow": "#38bdf8",         # section labels, as the site's eyebrows
+    "accent": "#ff6a13",
+    "accent_hover": "#ff8038",
+    "accent_pressed": "#e25a0a",
+    "accent_top": "#ff8b47",      # the lit top of a primary button's gradient
+    # Near-black on ember measures ~8:1; white only ~2.8:1.
+    "accent_text": "#170b04",
+    "brand": "#38bdf8",
+    "brand_hover": "#7dd3fc",
+    "brand_text": "#04121f",
+    "danger": "#ff6b6b",
+    "success": "#34d399",
+    "progress": "#ff6a13",
+    "warning": "#fcd34d",
     "hover_overlay": "rgba(255, 255, 255, 18)",
     "pressed_overlay": "rgba(255, 255, 255, 30)",
+    # Inputs are recessed into the glass rather than raised off it.
+    "field_bg": "rgba(4, 10, 30, 110)",
+    "field_border": "rgba(255, 255, 255, 26)",
+    "field_hover": "rgba(255, 255, 255, 46)",
+    # Where you're typing is a state, not an action: sky, not ember.
+    "focus": "rgba(56, 189, 248, 210)",
+    "selection": "rgba(56, 189, 248, 110)",
+    "scroll_handle": "rgba(255, 255, 255, 34)",
+    "scroll_handle_hover": "rgba(255, 255, 255, 60)",
 }
 
+# ── Pearl (light) ─────────────────────────────────────────────────────────
 LIGHT = {
     "window_bg": "transparent",
-    "card_bg": "rgba(255, 255, 255, 160)",
-    "card_bg_solid": "rgba(255, 255, 255, 240)",
-    "card_border": "rgba(0, 0, 0, 18)",
-    "divider": "rgba(0, 0, 0, 14)",
-    "text": "#1c1c1e",
-    # #6b6b70 measured at 5.3:1 against the light card's near-white
-    # background -- passes WCAG AA by a hair, but read as washed-out light
-    # grey in practice (reported directly: "light grey text and white bg,
-    # contrast is very low"). #48484e clears 9:1 (AAA), well past the
-    # complaint with real margin rather than another borderline value.
-    "text_muted": "#48484e",
-    # Darkened from #FF6600 so the same orange still clears contrast on a
-    # near-white ground -- the dark theme's value is too light there.
-    "accent": "#e05500",
-    "accent_hover": "#c44a00",
+    "ink": "#b8c5e0",
+    "card_bg": "rgba(255, 255, 255, 118)",
+    # Menus and popups: pearl, a shade off white, so they don't glare.
+    "card_bg_solid": "rgba(226, 233, 246, 250)",
+    "card_border": "rgba(30, 50, 100, 30)",
+    "divider": "rgba(30, 50, 100, 20)",
+    "text": "#0b1530",
+    "text_muted": "#45506a",      # 7.9:1 on white
+    "text_faint": "#5d6883",
+    "eyebrow": "#0284c7",
+    # Deepened from the night ember so white text on it still clears 4.5:1.
+    "accent": "#d0460e",
+    "accent_hover": "#b93d0a",
+    "accent_pressed": "#a53508",
+    "accent_top": "#e2581a",
     "accent_text": "#ffffff",
-    "brand": "#007aff",
-    "brand_hover": "#0064d6",
+    "brand": "#0284c7",
+    "brand_hover": "#0369a1",
     "brand_text": "#ffffff",
-    "danger": "#e02d22",
-    "success": "#12a150",
-    "progress": "#e05500",
-    "warning": "#c77700",
-    "hover_overlay": "rgba(0, 0, 0, 12)",
-    "pressed_overlay": "rgba(0, 0, 0, 22)",
+    "danger": "#d92d20",
+    "success": "#0e9f6e",
+    "progress": "#d0460e",
+    "warning": "#b7791f",
+    "hover_overlay": "rgba(30, 50, 100, 14)",
+    "pressed_overlay": "rgba(30, 50, 100, 26)",
+    # Inputs are lighter than the glass they sit in, but not white.
+    "field_bg": "rgba(255, 255, 255, 120)",
+    "field_border": "rgba(30, 50, 100, 34)",
+    "field_hover": "rgba(30, 50, 100, 60)",
+    "focus": "rgba(2, 132, 199, 200)",
+    "selection": "rgba(2, 132, 199, 80)",
+    "scroll_handle": "rgba(15, 35, 90, 40)",
+    "scroll_handle_hover": "rgba(15, 35, 90, 70)",
 }
 
+# The Browser tab's optional warm grade (its home page has the toggle):
+# same glass, warmer whites. Same key set as DARK so it is a drop-in.
+WARM = dict(DARK, **{
+    "card_bg_solid": "rgba(26, 21, 18, 247)",
+    "card_border": "rgba(255, 236, 214, 28)",
+    "divider": "rgba(255, 236, 214, 18)",
+    "text": "#f4ede4",
+    "text_muted": "#b6a898",
+    "text_faint": "#8e8173",
+    "field_bg": "rgba(12, 8, 5, 120)",
+    "field_border": "rgba(255, 236, 214, 26)",
+})
 
-_CHECKMARK_PATH = os.path.join(config.APPDATA_DIR, "checkbox_checkmark.png")
+
+_resolved = {}
 
 
-def _ensure_checkmark_icon():
-    """Generates the checked-checkbox glyph once into APPDATA_DIR (never
-    next to the installed .exe -- Program Files isn't writable at runtime
-    for a standard install) so QCheckBox::indicator:checked can reference
-    it via QSS's image: url(...), which needs a real file path, not a
-    QPainter call at style-build time. A plain solid-filled box with no
-    checkmark at all was reported directly as unclear/wrong-looking."""
-    if os.path.exists(_CHECKMARK_PATH):
-        return _CHECKMARK_PATH
+def tokens(dark_mode=True):
+    """The tokens for a theme, in the current colour palette (palettes.py):
+    DARK or LIGHT with the palette's own colours laid over them."""
+    key = (palettes.current(), bool(dark_mode))
+    t = _resolved.get(key)
+    if t is None:
+        base = DARK if dark_mode else LIGHT
+        overrides = palettes.token_overrides(dark_mode)
+        t = dict(base, **overrides) if overrides else base
+        _resolved[key] = t
+    return t
+
+
+def browser_tokens(accent="classic", dark_mode=True):
+    """Same shape/keys as tokens(), with the Browser tab's optional warm
+    grade on top of the night Sapphire palette (the jewel palettes bring
+    their own warmth)."""
+    if accent == "warm" and dark_mode and palettes.current() == palettes.DEFAULT:
+        return WARM
+    return tokens(dark_mode=dark_mode)
+
+
+def qcolor(value):
+    """A token as a QColor. QColor() silently returns black for a CSS
+    "rgba(r, g, b, a)" string, which bit this app more than once."""
+    value = value.strip()
+    if value.startswith("rgba("):
+        r, g, b, a = (int(float(x)) for x in value[5:-1].split(","))
+        return QColor(r, g, b, a)
+    return QColor(value)
+
+
+# ── Generated glyph files ─────────────────────────────────────────────────
+# QSS can only reference an image by path, so the few glyphs the stylesheet
+# needs are drawn once into APPDATA (never next to the .exe -- Program Files
+# isn't writable for a standard install).
+def _glyph_path(name):
+    return os.path.join(config.APPDATA_DIR, "ui", name)
+
+
+def _save_glyph(name, draw, size=16, scale=2):
+    """Draws at 2x so the glyph stays crisp at 125-200% display scaling."""
+    path = _glyph_path(name)
+    if os.path.exists(path):
+        return path
     try:
-        os.makedirs(config.APPDATA_DIR, exist_ok=True)
-        size = 16
-        pixmap = QPixmap(size, size)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        pixmap = QPixmap(size * scale, size * scale)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#ffffff"))
-        pen.setWidthF(2.2)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        path = QPainterPath()
-        path.moveTo(size * 0.23, size * 0.52)
-        path.lineTo(size * 0.42, size * 0.72)
-        path.lineTo(size * 0.80, size * 0.28)
-        painter.drawPath(path)
+        painter.scale(scale, scale)
+        draw(painter, size)
         painter.end()
-        pixmap.save(_CHECKMARK_PATH, "PNG")
+        pixmap.save(path, "PNG")
     except Exception:
         return None
-    return _CHECKMARK_PATH
+    return path
 
 
-# A fixed, deliberately-styled accent for radio button/checkbox
-# indicators -- left entirely to Qt's native rendering before, which
-# meant a checked one showed whatever the user's own Windows accent
-# color happened to be (reported directly, an unrelated orange) rather
-# than a color this app actually controls.
-#
-# This started life as its own one-off #FF4D00, picked before the palette
-# had a real action colour. It is now folded into that action colour
-# instead: two oranges 20 hue-degrees apart, sitting in the same window,
-# read as a mistake rather than a system. Same value regardless of
-# dark/light mode -- a checked control means the same thing in both.
-RADIO_CHECK_ACCENT = DARK["accent"]
+def _checkmark(color):
+    def draw(p, s):
+        pen = QPen(QColor(color))
+        pen.setWidthF(2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        path = QPainterPath()
+        path.moveTo(s * 0.25, s * 0.53)
+        path.lineTo(s * 0.43, s * 0.70)
+        path.lineTo(s * 0.77, s * 0.32)
+        p.drawPath(path)
+    return draw
+
+
+def _chevron(color):
+    def draw(p, s):
+        pen = QPen(QColor(color))
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        path = QPainterPath()
+        path.moveTo(QPointF(s * 0.28, s * 0.40))
+        path.lineTo(QPointF(s * 0.50, s * 0.62))
+        path.lineTo(QPointF(s * 0.72, s * 0.40))
+        p.drawPath(path)
+    return draw
+
+
+def _qss_url(path):
+    return f"url({path.replace(os.sep, '/')})" if path else "none"
 
 
 def build_stylesheet(dark_mode=True):
-    t = DARK if dark_mode else LIGHT
-    checkmark_path = _ensure_checkmark_icon()
-    checkmark_css = f"image: url({checkmark_path.replace(os.sep, '/')});" if checkmark_path else ""
+    t = tokens(dark_mode)
+
+    def tag(color):
+        # Glyph files are named for their colour, so each palette gets its own.
+        return color.lstrip("#").lower()
+    check = _save_glyph(f"check-{tag(t['accent_text'])}.png", _checkmark(t["accent_text"]))
+    chevron = _save_glyph(f"chevron-{tag(t['text_muted'])}.png", _chevron(t["text_muted"]))
+    chevron_hover = _save_glyph(f"chevron-{tag(t['text'])}.png", _chevron(t["text"]))
     return f"""
 QMainWindow, QDialog, QWidget#centralSurface {{
     background: {t['window_bg']};
@@ -181,28 +267,67 @@ QMainWindow, QDialog, QWidget#centralSurface {{
     font-family: {FONT_STACK};
     font-size: 13px;
 }}
-
 QWidget {{
     color: {t['text']};
 }}
 
-QFrame#card {{
+/* ── Type ─────────────────────────────────────────────────────────── */
+QLabel {{
+    background: transparent;
+    color: {t['text']};
+}}
+QLabel#muted {{
+    color: {t['text_muted']};
+}}
+QLabel#faint {{
+    color: {t['text_faint']};
+}}
+/* Section labels: small caps, widely tracked -- a title card, not a heading. */
+QLabel#sectionLabel {{
+    color: {t['eyebrow']};
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 1.9px;
+}}
+QLabel#heading {{
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.1px;
+}}
+QLabel#display {{
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.2px;
+}}
+QLabel#mono {{
+    font-family: {MONO_STACK};
+    font-size: 11px;
+    color: {t['text_muted']};
+}}
+QLabel#dangerText, QLabel[state="error"], QLabel#mono[state="error"],
+QLabel#muted[state="error"] {{
+    color: {t['danger']};
+}}
+QLabel#mono[state="done"] {{
+    color: {t['success']};
+}}
+QFrame#divider {{
+    background: {t['divider']};
+    border: none;
+    max-height: 1px;
+    min-height: 1px;
+}}
+
+/* ── Legacy QSS cards (painted cards are the norm; see widgets/card.py) ── */
+QFrame#card, QFrame#cardSolid {{
     background: {t['card_bg']};
     border: 1px solid {t['card_border']};
-    border-radius: 20px;
+    border-radius: 16px;
 }}
 
-QFrame#cardSolid {{
-    background: {t['card_bg_solid']};
-    border: 1px solid {t['card_border']};
-    border-radius: 20px;
-}}
-
-/* One stacked link in the video tab's queue. Sits inside the QUEUE card, so
-   it is a step *up* the surface ladder from its parent rather than another
-   full card -- a hairline and a lift, not a second border box. The radius is
-   deliberately smaller than the 20px parent: nesting the same radius makes
-   the inner edge look like it is bulging out of the outer one. */
+/* One stacked link in the Video tab's queue: a raised row on the queue's
+   glass, not a second card. Smaller radius than the 16px panel it sits in --
+   the same radius nested reads as the inner edge bulging out. */
 QFrame#queueCard {{
     background: {t['hover_overlay']};
     border: 1px solid transparent;
@@ -218,12 +343,10 @@ QFrame#queueCard[selected="true"] {{
 QFrame#queueCard QLabel {{
     background: transparent;
 }}
-/* Compact per-link resolution picker: quieter than the form's combo above,
-   because it is a refinement of a choice already made, not the main event. */
 QComboBox#queueCombo {{
-    background: {t['card_bg_solid']};
-    border: 1px solid {t['card_border']};
-    border-radius: 7px;
+    background: {t['field_bg']};
+    border: 1px solid {t['field_border']};
+    border-radius: 8px;
     padding: 2px 8px;
     font-family: {MONO_STACK};
     font-size: 10px;
@@ -232,100 +355,87 @@ QComboBox#queueCombo {{
 }}
 QComboBox#queueCombo:hover {{
     color: {t['text']};
-    border: 1px solid {t['divider']};
+    border: 1px solid {t['field_hover']};
 }}
 QComboBox#queueCombo::drop-down {{
     border: none;
-    width: 14px;
+    width: 16px;
 }}
 
-QLabel {{
-    background: transparent;
-    color: {t['text']};
-}}
-
-QLabel#muted {{
-    color: {t['text_muted']};
-}}
-
-QLabel#heading {{
-    font-size: 18px;
-    font-weight: 600;
-}}
-
+/* ── Buttons ──────────────────────────────────────────────────────── */
+/* Every rounded fill carries a border. Qt clips a QSS background to its
+   radius without antialiasing, but it strokes the border with it -- so the
+   border is what keeps a corner smooth. */
 QPushButton {{
     background: {t['hover_overlay']};
     border: 1px solid {t['card_border']};
     border-radius: 10px;
     padding: 7px 16px;
     color: {t['text']};
+    font-weight: 500;
 }}
 QPushButton:hover {{
     background: {t['pressed_overlay']};
+    border-color: {t['field_hover']};
 }}
 QPushButton:pressed {{
-    background: {t['card_border']};
+    background: {t['hover_overlay']};
 }}
 QPushButton:disabled {{
-    color: {t['text_muted']};
+    color: {t['text_faint']};
+    background: transparent;
+    border-color: {t['divider']};
 }}
 
+/* The one action on a view. A lit gradient -- brighter along the top edge,
+   the way light falls on it in the backdrop. */
 QPushButton#accent {{
-    background: {t['accent']};
-    border: none;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {t['accent_top']}, stop:1 {t['accent']});
+    border: 1px solid {t['accent']};
+    border-top-color: {t['accent_top']};
     color: {t['accent_text']};
     font-weight: 600;
 }}
 QPushButton#accent:hover {{
-    background: {t['accent_hover']};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {t['accent_hover']}, stop:1 {t['accent_hover']});
+    border-color: {t['accent_hover']};
+}}
+QPushButton#accent:pressed {{
+    background: {t['accent_pressed']};
+    border-color: {t['accent_pressed']};
 }}
 QPushButton#accent:disabled {{
     background: {t['hover_overlay']};
+    border: 1px solid {t['divider']};
+    color: {t['text_faint']};
+}}
+
+/* Quiet secondary: no fill until hovered. Most row actions are this. */
+QPushButton#quiet {{
+    background: transparent;
+    border: 1px solid transparent;
     color: {t['text_muted']};
-}}
-
-QRadioButton::indicator, QCheckBox::indicator {{
-    width: 16px;
-    height: 16px;
-    border: 2px solid {t['text_muted']};
-    background: transparent;
-}}
-QRadioButton::indicator {{
+    font-weight: 500;
     border-radius: 8px;
+    padding: 4px 12px;
 }}
-QCheckBox::indicator {{
-    border-radius: 4px;
-}}
-QRadioButton::indicator:checked {{
-    border: 2px solid {RADIO_CHECK_ACCENT};
-    background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
-        stop:0 {RADIO_CHECK_ACCENT}, stop:0.45 {RADIO_CHECK_ACCENT},
-        stop:0.55 transparent, stop:1 transparent);
-}}
-QCheckBox::indicator:checked {{
-    border: 2px solid {RADIO_CHECK_ACCENT};
-    background: {RADIO_CHECK_ACCENT};
-    {checkmark_css}
-}}
-QRadioButton::indicator:disabled, QCheckBox::indicator:disabled {{
+QPushButton#quiet:hover {{
+    background: {t['hover_overlay']};
     border-color: {t['card_border']};
+    color: {t['text']};
 }}
-
-QPushButton#danger {{
+QPushButton#quiet:pressed {{
+    background: {t['pressed_overlay']};
+}}
+QPushButton#quiet:disabled {{
+    color: {t['text_faint']};
     background: transparent;
-    border: 1px solid {t['danger']};
-    color: {t['danger']};
-}}
-QPushButton#danger:hover {{
-    background: rgba(255, 59, 48, 30);
+    border-color: transparent;
 }}
 
-/* Outlined pill -- the same shape as #danger above but in the accent color,
-   for row actions that aren't destructive. Asked for directly: the torrent
-   row's Pause/Open Folder/Remove buttons were solid filled accent while
-   Delete Files was outlined, and three heavy blue blocks next to one thin
-   red outline read as four unrelated controls. Outlining all four makes
-   them one set, with red reserved for the only one that destroys data. */
+/* Outlined action -- the accent as a line rather than a fill. */
 QPushButton#pill {{
     background: transparent;
     border: 1px solid {t['accent']};
@@ -339,33 +449,15 @@ QPushButton#pill:pressed {{
     background: {t['pressed_overlay']};
 }}
 
-/* Quiet secondary: no border, no accent. This is what most row actions
-   should be. The outlined #pill above put the accent colour on every
-   action in a torrent row -- roughly 25 accent-coloured buttons on a full
-   screen -- which drained the colour of meaning and made "Delete Files"
-   indistinguishable from "Open Folder". A row now gets exactly one filled
-   accent control (the primary), quiet buttons beside it, and its
-   destructive actions behind an overflow menu. */
-QPushButton#quiet {{
+QPushButton#danger {{
+    background: transparent;
+    border: 1px solid {t['danger']};
+    color: {t['danger']};
+}}
+QPushButton#danger:hover {{
     background: {t['hover_overlay']};
-    border: 1px solid transparent;
-    color: {t['text']};
-    font-weight: 500;
-    border-radius: 8px;
-    padding: 4px 12px;
-}}
-QPushButton#quiet:hover {{
-    background: {t['pressed_overlay']};
-}}
-QPushButton#quiet:pressed {{
-    background: {t['card_border']};
-}}
-QPushButton#quiet:disabled {{
-    color: {t['text_muted']};
 }}
 
-/* Finished torrent: green outline + green bar, so "done" reads at a glance
-   without having to check the percentage. */
 QPushButton#success {{
     background: transparent;
     border: 1px solid {t['success']};
@@ -376,32 +468,30 @@ QPushButton#success:hover {{
     background: {t['hover_overlay']};
 }}
 
-/* Compact row buttons (History tab) -- the base QPushButton rule's
-   padding: 7px 16px needs ~13px text + 14px padding = ~27px minimum, but
-   these are pinned to a fixed 24px height to sit small next to a card's
-   title/meta text. Combining that fixed height with the full-size padding
-   left no room for the glyphs and cropped them at the bottom (reported
-   directly, from a real screenshot) -- these two rules carry their own
-   much tighter padding instead of relying on setFixedHeight() alone to
-   force a shrink that padding never actually allowed. Qt only honours one
-   objectName per widget, so "plain small button" and "green small button"
-   need their own complete rules rather than combining with #success. */
+/* Compact row buttons (History, the Download tab's cards). Their own tight
+   padding: they are pinned to small fixed heights, and the base rule's
+   7px/16px would crop the glyphs at the bottom. */
 QPushButton#historyPlain {{
     background: {t['hover_overlay']};
     border: 1px solid {t['card_border']};
     border-radius: 8px;
-    padding: 2px 10px;
+    padding: 3px 12px;
     font-size: 12px;
     color: {t['text']};
 }}
 QPushButton#historyPlain:hover {{
     background: {t['pressed_overlay']};
+    border-color: {t['field_hover']};
+}}
+QPushButton#historyPlain:disabled {{
+    color: {t['text_faint']};
+    background: transparent;
 }}
 QPushButton#historyGreen {{
     background: transparent;
     border: 1px solid {t['success']};
     border-radius: 8px;
-    padding: 2px 10px;
+    padding: 3px 12px;
     font-size: 12px;
     font-weight: 600;
     color: {t['success']};
@@ -409,175 +499,230 @@ QPushButton#historyGreen {{
 QPushButton#historyGreen:hover {{
     background: {t['hover_overlay']};
 }}
-QProgressBar#complete::chunk {{
-    background: {t['success']};
-    border-radius: 3px;
-}}
 
-QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {{
-    background: {t['card_bg_solid']};
-    border: 1px solid {t['card_border']};
-    border-radius: 10px;
-    padding: 6px 10px;
+/* Title-bar nav labels. Their shapes (the sliding indicator, hover) are
+   painted -- QSS radii are not antialiased -- so these rules carry only the
+   type. */
+QPushButton#tabPill {{
+    background: transparent;
+    border: none;
+    padding: 0px 11px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: {t['text_muted']};
+}}
+QPushButton#tabPill:hover:!checked {{
     color: {t['text']};
-    selection-background-color: {t['brand']};
 }}
-QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{
-    border: 1px solid {t['accent']};
+QPushButton#tabPill:checked {{
+    color: {t['text']};
+    font-weight: 600;
 }}
 
-/* Default Qt combo-box drop-down renders as an unstyled square button with
-   a native-theme arrow glyph -- against this app's dark rounded inputs
-   that reads as a visible seam/box clashing with the rest of the control
-   (reported directly: "visual issue... near the drop down arrow"). Giving
-   the drop-down subcontrol its own transparent background removes the
-   seam; a small explicit arrow size keeps the glyph legible instead of
-   whatever oversized default the current style would draw. */
+/* ── Checks and radios ────────────────────────────────────────────── */
+QRadioButton, QCheckBox {{
+    spacing: 8px;
+    background: transparent;
+}}
+QRadioButton::indicator, QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 1px solid {t['field_hover']};
+    background: {t['field_bg']};
+}}
+QRadioButton::indicator {{
+    border-radius: 9px;
+}}
+QCheckBox::indicator {{
+    border-radius: 5px;
+}}
+QRadioButton::indicator:hover, QCheckBox::indicator:hover {{
+    border-color: {t['text_muted']};
+}}
+QRadioButton::indicator:checked {{
+    border: 1px solid {t['accent']};
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+        stop:0 {t['accent']}, stop:0.42 {t['accent']},
+        stop:0.52 transparent, stop:1 transparent);
+}}
+QCheckBox::indicator:checked {{
+    border: 1px solid {t['accent']};
+    background: {t['accent']};
+    image: {_qss_url(check)};
+}}
+QRadioButton::indicator:disabled, QCheckBox::indicator:disabled {{
+    border-color: {t['divider']};
+    background: transparent;
+}}
+QRadioButton:disabled, QCheckBox:disabled {{
+    color: {t['text_faint']};
+}}
+
+/* ── Fields ───────────────────────────────────────────────────────── */
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {{
+    background: {t['field_bg']};
+    border: 1px solid {t['field_border']};
+    border-radius: 10px;
+    padding: 7px 12px;
+    color: {t['text']};
+    selection-background-color: {t['selection']};
+    selection-color: {t['text']};
+}}
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QTextEdit:hover, QPlainTextEdit:hover {{
+    border-color: {t['field_hover']};
+}}
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus {{
+    border: 1px solid {t['focus']};
+}}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
+    color: {t['text_faint']};
+    border-color: {t['divider']};
+}}
+/* The Video tab's link field: the page's hero, so a size up. */
+QLineEdit#heroField {{
+    font-size: 14px;
+    border-radius: 12px;
+    padding: 0px 14px 0px 6px;
+}}
+QLineEdit#timecode {{
+    font-family: {MONO_STACK};
+    font-size: 12px;
+}}
+QComboBox {{
+    padding-right: 28px;
+}}
 QComboBox::drop-down {{
     subcontrol-origin: padding;
-    subcontrol-position: top right;
+    subcontrol-position: center right;
     width: 26px;
     border: none;
     background: transparent;
 }}
 QComboBox::down-arrow {{
-    width: 10px;
-    height: 10px;
+    image: {_qss_url(chevron)};
+    width: 14px;
+    height: 14px;
+}}
+QComboBox::down-arrow:hover, QComboBox::down-arrow:on {{
+    image: {_qss_url(chevron_hover)};
 }}
 QComboBox QAbstractItemView {{
     background: {t['card_bg_solid']};
     border: 1px solid {t['card_border']};
     border-radius: 10px;
     outline: none;
-    selection-background-color: {t['brand']};
-    selection-color: {t['brand_text']};
     padding: 4px;
+    color: {t['text']};
+    selection-background-color: {t['pressed_overlay']};
+    selection-color: {t['text']};
 }}
 
+/* ── Containers ───────────────────────────────────────────────────── */
 QTabWidget::pane {{
     border: none;
     background: transparent;
-    /* No padding here any more. This used to carry the gap between the tab
-       island and the first content card, but the island now lives up in the
-       title bar and the gap belongs to the window's content layout instead
-       -- where it can be dropped for a tab that wants to run edge to edge
-       (the Browser), which a pane rule applying to every page cannot do. */
     padding: 0px;
 }}
-/* Centered floating "island" segmented control (dynamic-island style)
-   rather than a left-aligned underlined tab strip.
-
-   Both radii are half the rendered height, which is what makes a real
-   capsule: the island is 46px tall (34px pill + margins + border), the pills
-   34px. These are QPushButtons, not QTabBar tabs, because Qt's style
-   engine ignores border-radius on QTabBar::tab -- the QSS asked for 22px
-   and it still drew near-square boxes. A button's radius is honoured by
-   the ordinary QSS box model on every style. */
-QFrame#tabIsland {{
-    background: {t['card_bg_solid']};
-    border: 1px solid {t['card_border']};
-    border-radius: 24px;
-}}
-/* Instrument radii: 6px rows inside an 8px tray, rather than a full
-   stadium capsule. The tighter geometry is what makes a dense tool read
-   as machined instead of soft. */
-QPushButton#tabPill {{
+QScrollArea {{
     background: transparent;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    /* 12px, down from 15. Six pills carried 180px of pure padding in a row
-       that also has to hold a wordmark and three action buttons; trimming
-       3px a side gives 36px back to the labels themselves. */
-    padding: 0px 12px;
-    font-size: 12.5px;
-    color: {t['text_muted']};
-    font-weight: 500;
-}}
-/* Backgrounds are painted by _TabPill, not by QSS: Qt does not antialias a
-   QSS border-radius, and the stair-stepped corners were visible against the
-   antialiased island behind them. These rules keep only the text treatment. */
-QPushButton#tabPill:hover:!checked {{
-    background: transparent;
-    color: {t['text']};
-}}
-/* The active pill rises one step on the surface ladder and states itself
-   in brand blue *text* -- not a saturated blue fill. A filled pill was
-   tried and became the loudest object in the window, sitting right beside
-   an already-blue wordmark and breaking the rule the whole language rests
-   on: chrome stays monochrome, saturation is reserved for meaning. The
-   raised surface carries the selection; the colour only names it. */
-QPushButton#tabPill:checked {{
-    background: transparent;
-    /* A hairline on the raised pill. Without it the selected surface and the
-       island behind it are two dark greys a step apart, which reads as a
-       smudge rather than a raised control; the border is what actually gives
-       it an edge. Same 1px white-alpha hairline every other raised surface in
-       the app uses, so the selection is built from the existing vocabulary
-       rather than a new treatment. */
-    border: 1px solid transparent;
-    color: {t['brand']};
-    font-weight: 600;
+    border: none;
 }}
 
 QProgressBar {{
     background: {t['hover_overlay']};
     border: none;
     border-radius: 3px;
-    height: 7px;
+    height: 6px;
     text-align: center;
     color: {t['text']};
 }}
 QProgressBar::chunk {{
     background: {t['progress']};
-    border-radius: 5px;
+    border-radius: 3px;
+}}
+QProgressBar#complete::chunk {{
+    background: {t['success']};
+    border-radius: 3px;
 }}
 
+/* Scrollbars: a hairline that thickens under the cursor. */
 QScrollBar:vertical {{
     background: transparent;
     width: 10px;
-    margin: 0;
+    margin: 2px 1px 2px 1px;
 }}
 QScrollBar::handle:vertical {{
-    background: {t['card_border']};
-    border-radius: 5px;
-    min-height: 30px;
+    background: {t['scroll_handle']};
+    border-radius: 4px;
+    min-height: 36px;
+    margin: 0px 1px 0px 1px;
 }}
 QScrollBar::handle:vertical:hover {{
-    background: {t['hover_overlay']};
+    background: {t['scroll_handle_hover']};
+    margin: 0px;
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-    height: 0;
+    height: 0px;
+}}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: transparent;
+}}
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 10px;
+    margin: 1px 2px 1px 2px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {t['scroll_handle']};
+    border-radius: 4px;
+    min-width: 36px;
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0px;
+}}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: transparent;
 }}
 
-QTableView {{
+QTableView, QTreeView, QListView {{
     background: transparent;
     border: none;
     gridline-color: {t['divider']};
-    selection-background-color: {t['brand']};
-    selection-color: {t['brand_text']};
+    selection-background-color: {t['pressed_overlay']};
+    selection-color: {t['text']};
+    outline: none;
 }}
 QHeaderView::section {{
     background: transparent;
-    color: {t['text_muted']};
+    color: {t['text_faint']};
     border: none;
     border-bottom: 1px solid {t['divider']};
     padding: 6px;
+    font-size: 11px;
     font-weight: 600;
 }}
 
 QMenu {{
     background: {t['card_bg_solid']};
     border: 1px solid {t['card_border']};
-    border-radius: 12px;
-    padding: 4px;
+    border-radius: 10px;
+    padding: 5px;
 }}
 QMenu::item {{
-    padding: 6px 24px;
-    border-radius: 8px;
+    padding: 7px 22px 7px 12px;
+    border-radius: 6px;
+    color: {t['text']};
 }}
 QMenu::item:selected {{
-    background: {t['accent']};
-    color: {t['accent_text']};
+    background: {t['pressed_overlay']};
+}}
+QMenu::item:disabled {{
+    color: {t['text_faint']};
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {t['divider']};
+    margin: 5px 8px;
 }}
 
 QToolTip {{
@@ -585,49 +730,6 @@ QToolTip {{
     color: {t['text']};
     border: 1px solid {t['card_border']};
     border-radius: 8px;
-    padding: 4px 8px;
+    padding: 5px 9px;
 }}
 """
-
-
-def tokens(dark_mode=True):
-    return DARK if dark_mode else LIGHT
-
-
-# The Browser tab's own accent choice -- warm off-black instead of pure
-# black, a terracotta accent instead of blue -- independent of the
-# app-wide Dark/Light toggle every other tab uses. Same key set as
-# DARK/LIGHT so it's a drop-in wherever the Browser tab already calls
-# theme.tokens(...).
-WARM = {
-    "window_bg": "transparent",
-    "card_bg": "rgba(51, 45, 39, 150)",
-    "card_bg_solid": "rgba(51, 45, 39, 235)",
-    "card_border": "rgba(255, 255, 255, 24)",
-    "divider": "rgba(255, 255, 255, 16)",
-    "text": "#F1EAE0",
-    "text_muted": "#B3A797",
-    # Same action/identity split as DARK -- see its comment. The warm
-    # surface is the only thing that differs here.
-    "accent": "#ff6600",
-    "accent_hover": "#ff7a1f",
-    "accent_text": "#0a0a0a",
-    "brand": "#0a84ff",
-    "brand_hover": "#3da8ff",
-    "brand_text": "#ffffff",
-    "danger": "#ff3b30",
-    "success": "#2fd35a",
-    "progress": "#ff6600",
-    "warning": "#ffc533",
-    "hover_overlay": "rgba(255, 255, 255, 18)",
-    "pressed_overlay": "rgba(255, 255, 255, 30)",
-}
-
-
-def browser_tokens(accent="warm", dark_mode=True):
-    """Same shape/keys as tokens() -- a drop-in for every spot in the
-    Browser tab that already calls theme.tokens(dark_mode=...) -- but with
-    an extra "warm" choice on top of the normal dark/light pair."""
-    if accent == "warm":
-        return WARM
-    return tokens(dark_mode=dark_mode)

@@ -4,15 +4,15 @@ scrollable list, polled on a 1s QTimer (same cadence as the CTk version's
 .after(1000, ...) loop).
 """
 import os
+import time
 import subprocess
 import sys
 import threading
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QApplication, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QApplication, QMenu,
+    QMessageBox, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
@@ -25,11 +25,48 @@ from app.utils import (
 )
 from app.utils.formatting import format_eta, humanize_rate, humanize_size
 
-from . import theme
+from . import motion, theme
+from .widgets.speed_graph import GraphCard
+from .widgets.stats_strip import StatsStrip
 from .dialogs.add_torrent_dialog import AddTorrentDialog
-from .widgets import AnimatedProgressBar, _PaintedCard, make_card
+from .widgets import AnimatedProgressBar, EmptyState, centered_column, make_card
+from .widgets.button import Button
+
+# The page is a centred column no wider than this.
+MAX_CONTENT_W = 1760
 
 logger = get_logger("torrent_tab")
+
+
+def _duration(seconds):
+    """14m 03s, 2h 05m, 3d 4h -- the two units that matter."""
+    seconds = int(max(0, seconds or 0))
+    if seconds < 60:
+        return f"{seconds}s"
+    m, sec = divmod(seconds, 60)
+    if m < 60:
+        return f"{m}m {sec:02d}s"
+    h, m = divmod(m, 60)
+    if h < 24:
+        return f"{h}h {m:02d}m"
+    d, h = divmod(h, 24)
+    return f"{d}d {h}h"
+
+
+def _when(timestamp):
+    """Today 14:32 / Yesterday 09:10 / 12 Sep 14:32."""
+    import datetime
+    if not timestamp:
+        return "--"
+    then = datetime.datetime.fromtimestamp(timestamp)
+    today = datetime.date.today()
+    if then.date() == today:
+        day = "Today"
+    elif then.date() == today - datetime.timedelta(days=1):
+        day = "Yesterday"
+    else:
+        day = then.strftime("%d %b").lstrip("0")
+    return f"{day} {then:%H:%M}"
 
 
 def _dots_icon(color, width=14, height=4, dot=3):
@@ -87,18 +124,35 @@ class TorrentTab(QWidget):
         self.rows = {}
         self._row_counter = 0
         self.magnet_forwarded.connect(self._on_magnet_forwarded)
+        self._manager = None
 
         if not LIBTORRENT_AVAILABLE:
             self._build_missing_engine_ui()
             return
 
-        self.manager = TorrentManager()
+        # The torrent engine starts with the first torrent -- one to restore,
+        # or one added -- not with the app: with none, libtorrent would still
+        # bootstrap the DHT, map ports and listen for peers in the background.
+        # Earlier builds recorded a finished torrent in History again at every
+        # launch (see torrent_manager.py); one entry each is enough, dated by
+        # its file rather than by the launch that re-recorded it.
+        download_history.collapse_duplicates("torrent")
+        download_history.correct_torrent_times()
         self._build_ui()
+        self._offer_magnet_handler()
         self._restore_saved_torrents()
 
+        self._polls = 0
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll)
         self._poll_timer.start(1000)
+        QTimer.singleShot(0, self._reschedule_poll)
+
+    @property
+    def manager(self):
+        if self._manager is None:
+            self._manager = TorrentManager()
+        return self._manager
 
     # ------------------------------------------------------- fallback UI ---
     def _build_missing_engine_ui(self):
@@ -131,7 +185,7 @@ class TorrentTab(QWidget):
         detail_label.setWordWrap(True)
         layout.addWidget(detail_label)
 
-        self.install_btn = QPushButton("Install libtorrent")
+        self.install_btn = Button("Install libtorrent")
         self.install_btn.setObjectName("accent")
         self.install_btn.setEnabled(compatible)
         self.install_btn.clicked.connect(self._install_libtorrent)
@@ -187,90 +241,109 @@ class TorrentTab(QWidget):
 
     # ---------------------------------------------------------------- UI ---
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        column = centered_column(self, MAX_CONTENT_W)
+        root = QVBoxLayout(column)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
+        root.setSpacing(12)
 
-        add_card, add_layout = make_card("ADD TORRENT")
+        add_card, add_layout = make_card("Add a torrent")
+        add_layout.setSpacing(10)
         root.addWidget(add_card)
 
-        add_layout.addWidget(self._label("Magnet link", "muted"))
         magnet_row = QHBoxLayout()
+        magnet_row.setSpacing(10)
         self.magnet_entry = QLineEdit()
-        self.magnet_entry.setPlaceholderText("magnet:?xt=urn:btih:...")
+        self.magnet_entry.setObjectName("heroField")
+        self.magnet_entry.setFixedHeight(44)
+        self.magnet_entry.setPlaceholderText("Paste a magnet link  —  magnet:?xt=urn:btih:...")
+        self.magnet_entry.returnPressed.connect(self.on_add_magnet)
         magnet_row.addWidget(self.magnet_entry, 1)
-        add_magnet_btn = QPushButton("Add Magnet")
+        add_magnet_btn = Button("Add Magnet")
         add_magnet_btn.setObjectName("accent")
+        add_magnet_btn.setFixedHeight(44)
+        add_magnet_btn.setMinimumWidth(128)
+        add_magnet_btn.setCursor(Qt.PointingHandCursor)
         add_magnet_btn.clicked.connect(self.on_add_magnet)
         magnet_row.addWidget(add_magnet_btn)
         add_layout.addLayout(magnet_row)
 
-        open_file_btn = QPushButton("Open .torrent file...")
-        open_file_btn.clicked.connect(self.on_add_torrent_file)
-        open_file_row = QHBoxLayout()
-        open_file_row.addWidget(open_file_btn)
-        open_file_row.addStretch(1)
-        add_layout.addLayout(open_file_row)
-
         dir_row = QHBoxLayout()
-        dir_row.addWidget(self._label("Save to:", "muted"))
+        dir_row.setSpacing(8)
+        open_file_btn = Button("Open .torrent file...")
+        open_file_btn.setCursor(Qt.PointingHandCursor)
+        open_file_btn.clicked.connect(self.on_add_torrent_file)
+        dir_row.addWidget(open_file_btn)
+        dir_row.addSpacing(10)
+        dir_row.addWidget(self._label("Save to", "muted"))
         self.dir_entry = QLineEdit(self.download_dir)
         dir_row.addWidget(self.dir_entry, 1)
-        browse_btn = QPushButton("Browse")
+        browse_btn = Button("Browse")
+        browse_btn.setCursor(Qt.PointingHandCursor)
         browse_btn.clicked.connect(self.browse_dir)
         dir_row.addWidget(browse_btn)
         add_layout.addLayout(dir_row)
 
-        self.startup_check = QCheckBox("Launch at Windows startup (so background downloads can resume)")
+        divider = QFrame()
+        divider.setObjectName("divider")
+        divider.setFixedHeight(1)
+        add_layout.addWidget(divider)
+
+        checks = QHBoxLayout()
+        checks.setSpacing(22)
+        self.startup_check = QCheckBox("Launch at Windows startup, so downloads resume")
         self.startup_check.setChecked(startup.is_enabled())
         self.startup_check.toggled.connect(self._on_startup_toggle)
-        add_layout.addWidget(self.startup_check)
+        checks.addWidget(self.startup_check)
 
-        self.magnet_handler_check = QCheckBox(
-            "Open magnet links with Awesome Downloader")
+        self.magnet_handler_check = QCheckBox("Open magnet links with this app")
         self.magnet_handler_check.setToolTip(
             "Clicking a magnet link in your browser opens it here instead of "
             "whatever torrent client is currently registered. Per-user only; "
             "unticking restores the previous handler.")
         self.magnet_handler_check.setChecked(protocol_handler.is_default())
         self.magnet_handler_check.toggled.connect(self._on_magnet_handler_toggle)
-        add_layout.addWidget(self.magnet_handler_check)
+        checks.addWidget(self.magnet_handler_check)
+        checks.addStretch(1)
+        add_layout.addLayout(checks)
 
-        list_card, list_layout = make_card()
-        root.addWidget(list_card, 1)
-
+        # The rows sit straight on the backdrop, each its own pane of glass,
+        # rather than inside one big panel: glass inside glass had to give up
+        # the frost to stay legible, and the list then read as a grey box.
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        # Scoped by id. An unscoped "background: transparent" is a
-        # widget-level stylesheet, and a widget stylesheet outranks the
-        # application one for every descendant -- so it also repainted the
-        # accent/quiet buttons on the rows inside transparent, which is why
-        # they rendered as bare text with no fill.
+        # Scoped by id -- an unscoped "background: transparent" outranks the
+        # app stylesheet for every descendant and strips the row buttons.
         scroll.setObjectName("torrentScroll")
         scroll.setStyleSheet("#torrentScroll { background: transparent; }")
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_body = QWidget()
         self.list_body.setObjectName("torrentScrollBody")
         self.list_body.setStyleSheet("#torrentScrollBody { background: transparent; }")
         self.list_body_layout = QVBoxLayout(self.list_body)
         self.list_body_layout.setContentsMargins(0, 0, 0, 0)
-        self.list_body_layout.setSpacing(6)
-        self.empty_label = QLabel("No torrents yet -- add a magnet link or .torrent file above.")
-        self.empty_label.setObjectName("muted")
-        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.list_body_layout.setSpacing(10)
+        self.empty_label = EmptyState(
+            "torrent", "No torrents yet",
+            "Paste a magnet link or open a .torrent file above. Downloads keep "
+            "going in the background and pick up where they left off.")
         self.list_body_layout.addWidget(self.empty_label)
         self.list_body_layout.addStretch(1)
         scroll.setWidget(self.list_body)
-        list_layout.addWidget(scroll)
+        root.addWidget(scroll, 1)
 
         footer = QHBoxLayout()
+        footer.setSpacing(16)
         self.total_down_label = QLabel("↓ 0 B/s")
-        self.total_down_label.setObjectName("muted")
+        self.total_down_label.setObjectName("mono")
         footer.addWidget(self.total_down_label)
         self.total_up_label = QLabel("↑ 0 B/s")
-        self.total_up_label.setObjectName("muted")
+        self.total_up_label.setObjectName("mono")
         footer.addWidget(self.total_up_label)
         footer.addStretch(1)
+        self.totals_label = QLabel("")
+        self.totals_label.setObjectName("muted")
+        footer.addWidget(self.totals_label)
         root.addLayout(footer)
 
     def _dark_mode(self):
@@ -284,7 +357,7 @@ class TorrentTab(QWidget):
         so doesn't pick up new colours from the stylesheet the way ordinary
         QSS-styled widgets do."""
         t = theme.tokens(dark_mode=self._dark_mode())
-        track = QColor(255, 255, 255, 26) if self._dark_mode() else QColor(0, 0, 0, 26)
+        track = QColor(255, 255, 255, 20) if self._dark_mode() else QColor(15, 23, 42, 20)
         for info in self.rows.values():
             info["progress_bar"].set_colors(track, t["progress"], t["success"])
 
@@ -305,6 +378,25 @@ class TorrentTab(QWidget):
                 self, config.APP_NAME,
                 "Couldn't update the Windows startup setting. Check the log for details.",
             )
+
+    def _offer_magnet_handler(self):
+        """Magnet links open in this app by default: registered once, on the
+        first run that has a Torrent tab. Unticking the box later is the
+        person's choice and sticks -- this never registers again after that."""
+        if (self.settings or {}).get("magnet_handler_offered"):
+            return
+        if self.settings is not None:
+            self.settings["magnet_handler_offered"] = True
+            settings_store.save_settings(self.settings)
+        if protocol_handler.is_default():
+            return
+        try:
+            if protocol_handler.set_enabled(True) and protocol_handler.is_default():
+                self.magnet_handler_check.blockSignals(True)
+                self.magnet_handler_check.setChecked(True)
+                self.magnet_handler_check.blockSignals(False)
+        except Exception:   # noqa: BLE001 -- Windows may have it locked to another app
+            logger.exception("Couldn't register as the magnet link handler")
 
     def _on_magnet_handler_toggle(self, checked):
         ok = protocol_handler.set_enabled(checked)
@@ -329,7 +421,7 @@ class TorrentTab(QWidget):
                 "Windows has magnet links locked to another app"
                 + (f" ({owner})" if owner else "") + ".\n\n"
                 "Open Settings > Apps > Default apps, search for \"magnet\", "
-                "and pick Awesome Downloader there -- Windows only allows that "
+                "and pick Awesome Downloader there — Windows only allows that "
                 "change from its own settings screen.")
 
     def browse_dir(self):
@@ -365,7 +457,14 @@ class TorrentTab(QWidget):
 
     def on_add_torrent_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open .torrent file", "", "Torrent files (*.torrent)")
-        if not path:
+        if path:
+            self.add_torrent_path(path)
+
+    def add_torrent_path(self, path):
+        """Adds a .torrent file already on disk -- the file picker's pick, or
+        one the Browser tab just downloaded."""
+        if not hasattr(self, "manager") or not path:
+            logger.warning("Can't add %s: the Torrent tab's engine isn't available", path)
             return
         save_dir = self.dir_entry.text().strip() or self.download_dir
         os.makedirs(save_dir, exist_ok=True)
@@ -415,7 +514,12 @@ class TorrentTab(QWidget):
                 os.makedirs(save_dir, exist_ok=True)
                 kind = entry.get("kind")
                 uri_or_path = entry.get("uri_or_path")
-                if kind == "magnet":
+                # Its fast-resume data first: back exactly as it was, with no
+                # re-check of the files and no hunt for the magnet's metadata.
+                handle = self.manager.add_from_resume(entry.get("info_hash"), save_dir)
+                if handle is not None:
+                    pass
+                elif kind == "magnet":
                     handle = self.manager.add_magnet(uri_or_path, save_dir)
                 elif kind == "file" and os.path.exists(uri_or_path):
                     handle = self.manager.add_torrent_file(uri_or_path, save_dir)
@@ -424,13 +528,13 @@ class TorrentTab(QWidget):
                     continue
                 self._add_row(entry.get("name") or "Resuming...", kind, uri_or_path, save_dir,
                               handle, entry.get("selected"), pending_priorities=entry.get("selected"),
-                              initial_progress=float(entry.get("progress") or 0.0))
+                              initial_progress=float(entry.get("progress") or 0.0), saved=entry)
             except Exception:
                 logger.exception("Failed to resume torrent entry %s", entry)
 
     # -------------------------------------------------------- Row cards ---
     def _add_row(self, name, kind, uri_or_path, save_path, handle, selected,
-                  pending_priorities="__unset__", initial_progress=0.0):
+                  pending_priorities="__unset__", initial_progress=0.0, saved=None):
         self.empty_label.setVisible(False)
 
         row_id = f"row{self._row_counter}"
@@ -439,10 +543,12 @@ class TorrentTab(QWidget):
         # Painted directly, not QFrame#card QSS -- this card is nested
         # inside a QScrollArea's viewport (list_body), where a QSS-driven
         # background confirmed painted nothing at all (see widgets/card.py).
-        card = _PaintedCard()
+        # Its speed over the last minute is drawn in the card itself, behind
+        # everything on it (widgets/speed_graph.py).
+        card = GraphCard()
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(14, 10, 14, 10)
-        card_layout.setSpacing(3)
+        card_layout.setContentsMargins(16, 12, 16, 12)
+        card_layout.setSpacing(6)
 
         top_row = QHBoxLayout()
         name_label = QLabel(name)
@@ -456,18 +562,19 @@ class TorrentTab(QWidget):
         progress_row = QHBoxLayout()
         t = theme.tokens(dark_mode=self._dark_mode())
         progress_bar = AnimatedProgressBar(
-            QColor(255, 255, 255, 26) if self._dark_mode() else QColor(0, 0, 0, 26),
+            QColor(255, 255, 255, 20) if self._dark_mode() else QColor(15, 23, 42, 20),
             t["progress"], t["success"])
         progress_row.addWidget(progress_bar, 1)
         pct_label = QLabel("0%")
-        pct_label.setFixedWidth(40)
+        pct_label.setObjectName("mono")
+        pct_label.setFixedWidth(44)
         pct_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         progress_row.addWidget(pct_label)
         card_layout.addLayout(progress_row)
 
-        detail_label = QLabel("")
-        detail_label.setObjectName("muted")
-        card_layout.addWidget(detail_label)
+        # The numbers: speeds over a live speed graph, how much is done,
+        # time left, time spent, peers, ratio (widgets/stats_strip.py).
+        stats = StatsStrip()
 
         # These were ⏸ / 📂 / 🗑 emoji glyphs and rendered as three empty
         # boxes (reported directly, with a screenshot) -- the bundled Inter
@@ -488,7 +595,7 @@ class TorrentTab(QWidget):
         ctrl_row = QHBoxLayout()
         ctrl_row.setContentsMargins(0, 2, 0, 0)
         ctrl_row.setSpacing(6)
-        pause_btn = QPushButton("Pause")
+        pause_btn = Button("Pause")
         pause_btn.setObjectName("accent")
         pause_btn.setCursor(Qt.PointingHandCursor)
         pause_btn.setFixedHeight(30)
@@ -496,7 +603,7 @@ class TorrentTab(QWidget):
         pause_btn.clicked.connect(lambda: self._toggle_pause(row_id))
         ctrl_row.addWidget(pause_btn)
 
-        folder_btn = QPushButton("Open Folder")
+        folder_btn = Button("Open Folder")
         folder_btn.setObjectName("quiet")
         folder_btn.setCursor(Qt.PointingHandCursor)
         folder_btn.setFixedHeight(30)
@@ -513,7 +620,7 @@ class TorrentTab(QWidget):
         # size read the same at any font, and the padding reset stops the
         # shared #quiet rule (4px/12px, sized for word buttons) from
         # squeezing them out of a 32px square.
-        more_btn = QPushButton()
+        more_btn = Button()
         more_btn.setObjectName("quiet")
         more_btn.setIcon(_dots_icon(theme.tokens(self._dark_mode())["text_muted"]))
         more_btn.setIconSize(QSize(14, 4))
@@ -531,7 +638,7 @@ class TorrentTab(QWidget):
         # Far right of the row, sitting under the percentage -- hidden until
         # the download actually finishes, so a completed torrent offers the
         # obvious next action (watch it) right where the progress was.
-        play_btn = QPushButton("▶  Play")
+        play_btn = Button("▶  Play")
         play_btn.setObjectName("success")
         play_btn.setCursor(Qt.PointingHandCursor)
         play_btn.setFixedHeight(30)
@@ -542,14 +649,48 @@ class TorrentTab(QWidget):
         ctrl_row.addWidget(play_btn)
 
         card_layout.addLayout(ctrl_row)
+        card_layout.addWidget(stats)
 
         # Insert before the trailing stretch so new rows always land above it.
         self.list_body_layout.insertWidget(self.list_body_layout.count() - 1, card)
+        if saved is None:
+            motion.grow_in(card)
+        saved = dict(saved or {})
+        if saved.get("stats_v") == 3 and saved.get("took_s") is None:
+            # Not watched finishing, so its date came from History -- which
+            # the re-check bug had re-dated to that launch. Its files say.
+            saved.pop("finished_at", None)
+        elif saved.get("stats_v") not in (3, 4):
+            # Written by the 2.5 test builds, which stamped a torrent that was
+            # already complete on disk -- re-checked, or its metadata fetched
+            # again, at launch -- as "finished now, took seconds". Those two
+            # values are dropped; the finish time is read from History.
+            saved.pop("took_s", None)
+            saved.pop("finished_at", None)
 
+        QTimer.singleShot(0, self._reschedule_poll)
         self.rows[row_id] = {
             "handle": handle, "save_path": save_path, "kind": kind, "uri_or_path": uri_or_path,
             "selected": selected, "card": card, "name_label": name_label, "status_label": status_label,
-            "progress_bar": progress_bar, "pct_label": pct_label, "detail_label": detail_label,
+            "progress_bar": progress_bar, "pct_label": pct_label, "stats": stats, "graph": card,
+            # Time is kept by the app, not libtorrent: a torrent is re-added
+            # on every launch, so libtorrent's own clocks restart each time.
+            "added_at": float(saved.get("added_at") or time.time()),
+            "active_s": float(saved.get("active_s") or 0.0),
+            "took_s": saved.get("took_s"),
+            # A torrent that was already complete when it was added back (at
+            # launch) wasn't watched finishing: its finish time comes from
+            # History, which recorded it at the time, and how long it took is
+            # unknown -- never "now" and "3 seconds".
+            "finished_at": saved.get("finished_at") or (
+                self._files_finish_time(handle, save_path) or self._history_finish_time(name)
+                if initial_progress >= 1.0 else None),
+            "uploaded_base": int(saved.get("uploaded") or 0),
+            # Payload this app actually downloaded for it, across launches.
+            "downloaded_base": int(saved.get("downloaded") or 0),
+            "downloaded": int(saved.get("downloaded") or 0),
+            "uploaded": int(saved.get("uploaded") or 0),
+            "last_poll": time.monotonic(),
             "pause_btn": pause_btn, "play_btn": play_btn,
             # A row restored from torrents.json at 100% was already recorded
             # in history back when it first completed, in whatever session
@@ -706,10 +847,16 @@ class TorrentTab(QWidget):
             if not confirmed:
                 return
         self.rows.pop(row_id, None)
+        self._reschedule_poll()
         self.manager.remove(info["handle"], delete_files=delete_files)
-        info["card"].deleteLater()
-        if not self.rows:
-            self.empty_label.setVisible(True)
+        card = info["card"]
+
+        def drop():
+            card.deleteLater()
+            if not self.rows:
+                self.empty_label.setVisible(True)
+        # Folds away; the rows below slide up into its place.
+        motion.shrink_out(card, drop)
         self.save_state()
 
     # ------------------------------------------------------------- Polling ---
@@ -735,7 +882,36 @@ class TorrentTab(QWidget):
             return "Seeding"
         return str(status.state).replace("_", " ").title()
 
+    def _reschedule_poll(self):
+        """Once a second while the tab is in view, every five behind other
+        tabs (downloads still finish and get recorded), and not at all with
+        no torrents -- an empty tab costs nothing."""
+        timer = getattr(self, "_poll_timer", None)
+        if timer is None:
+            return
+        if not self.rows:
+            timer.stop()
+            return
+        interval = 1000 if self.isVisible() else 5000
+        if timer.interval() != interval or not timer.isActive():
+            timer.start(interval)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reschedule_poll()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._reschedule_poll()
+
     def _poll(self):
+        self.manager.process_alerts()
+        self._polls += 1
+        if self._polls % 30 == 0:
+            # Resume data for whatever has changed, every half minute: a
+            # crash or a power cut loses at most that much re-checking.
+            for info in self.rows.values():
+                self.manager.request_resume(info["handle"])
         total_down = total_up = 0
         for row_id, info in list(self.rows.items()):
             handle = info["handle"]
@@ -776,7 +952,10 @@ class TorrentTab(QWidget):
             info["pct_label"].setText(f"{shown * 100:.0f}%")
             state_str = self._state_label(status)
             info["status_label"].setText(state_str)
-            info["pause_btn"].setText("Resume" if status.paused else "Pause")
+            if shown >= 1.0:
+                info["pause_btn"].setText("Seed" if status.paused else "Stop seeding")
+            else:
+                info["pause_btn"].setText("Resume" if status.paused else "Pause")
 
             # Green bar + Play button once finished. Only touched when the
             # state actually flips, so the stylesheet isn't rebuilt every
@@ -791,17 +970,119 @@ class TorrentTab(QWidget):
                 info["history_recorded"] = True
                 self._record_completion(info)
 
-            size_str = humanize_size(status.total_wanted) if status.total_wanted else "—"
-            down_str = humanize_rate(status.download_rate)
-            up_str = humanize_rate(status.upload_rate)
-            eta_str = self._estimate_eta(status)
-            info["detail_label"].setText(
-                f"{size_str}  •  ↓{down_str}  •  ↑{up_str}  •  {status.num_peers} peers  •  ETA {eta_str}"
-            )
+            self._update_stats(info, status, shown, complete, checking)
 
         self.total_down_label.setText(f"↓ {humanize_rate(total_down)}")
         self.total_up_label.setText(f"↑ {humanize_rate(total_up)}")
+        self._update_totals()
         self._autosave_state()
+
+    @staticmethod
+    def _files_finish_time(handle, save_path):
+        """When the torrent's files were last written -- when its last piece
+        landed, i.e. when it finished. Re-checking only reads them, so this
+        survives every relaunch, where a "finished now" stamp did not."""
+        try:
+            if handle is None or not save_path or not handle.status().has_metadata:
+                return None
+            files = handle.torrent_file().files()
+            stamps = []
+            for i in range(files.num_files()):
+                path = os.path.join(save_path, files.file_path(i))
+                if os.path.exists(path):
+                    stamps.append(os.path.getmtime(path))
+            return max(stamps) if stamps else None
+        except Exception:   # noqa: BLE001
+            return None
+
+    def _history_finish_time(self, name):
+        """When History first recorded this torrent finishing, or None. The
+        first record, not the latest: earlier builds added one at every
+        launch, each dated that day."""
+        try:
+            return download_history.first_completion("torrent", name)
+        except Exception:   # noqa: BLE001
+            logger.exception("Couldn't read History for %s", name)
+        return None
+
+    def _update_stats(self, info, status, shown, complete, checking):
+        now = time.monotonic()
+        dt = min(5.0, max(0.0, now - info.get("last_poll", now)))
+        info["last_poll"] = now
+        downloading = not status.paused and not complete and not checking
+        if downloading and status.has_metadata:
+            info["active_s"] = info.get("active_s", 0.0) + dt
+        info["downloaded"] = info.get("downloaded_base", 0) + int(status.total_payload_download or 0)
+        wanted_bytes = int(status.total_wanted or 0)
+        # Finished *here*: most of it came over the network through this app.
+        # A torrent whose files were already on disk also turns complete a
+        # few seconds after launch (metadata fetched again, files checked),
+        # and that must not read as "finished today, took 4 s".
+        really_downloaded = wanted_bytes > 0 and info["downloaded"] >= 0.5 * wanted_bytes
+        if complete and info.get("took_s") is None and really_downloaded and info.get("active_s", 0) > 0:
+            info["took_s"] = round(info["active_s"])
+            info["finished_at"] = time.time()
+        info["uploaded"] = info.get("uploaded_base", 0) + int(status.total_upload or 0)
+        done = int(status.total_wanted_done or 0)
+        wanted = int(status.total_wanted or 0)
+        ratio = info["uploaded"] / done if done else 0.0
+        seeds = int(getattr(status, "num_seeds", 0) or 0)
+        peers = f"{status.num_peers}" + (f" · {seeds} seeds" if seeds else "")
+        stats = info["stats"]
+        graph = info.get("graph")
+        if graph is not None:
+            paused = bool(status.paused)
+            graph.push(0 if paused else status.download_rate, 0 if paused else status.upload_rate)
+        if complete and not info.get("finished_at") and info.get("took_s") is None:
+            info["finished_at"] = self._files_finish_time(info.get("handle"), info.get("save_path"))
+        if complete:
+            took = info.get("took_s")
+            avg = (wanted / took) if took else 0
+            items = [
+                ("Took", _duration(took) if took else "--", "done"),
+                ("Avg speed", humanize_rate(avg) if avg else "--", None),
+                ("Size", humanize_size(wanted) if wanted else "--", None),
+                ("↑ Up", humanize_rate(status.upload_rate) if not status.paused else "--", "up"),
+                ("Uploaded", humanize_size(info["uploaded"]) if info["uploaded"] else "0 B", None),
+                ("Ratio", f"{ratio:.2f}", None),
+                ("Finished", _when(info.get("finished_at")), "faint"),
+            ]
+        else:
+            waiting = not status.has_metadata
+            items = [
+                ("↓ Down", "--" if status.paused else humanize_rate(status.download_rate), "down"),
+                ("↑ Up", "--" if status.paused else humanize_rate(status.upload_rate), "up"),
+                ("Done", "--" if waiting else f"{humanize_size(done) or '0 B'} / {humanize_size(wanted) or '--'}", None),
+                ("Left", "--" if status.paused else self._estimate_eta(status), None),
+                ("Active", _duration(info.get("active_s", 0)), None),
+                ("Peers", peers, "warn" if not status.paused and status.num_peers == 0 else None),
+                ("Ratio", f"{ratio:.2f}", None),
+            ]
+        stats.set_items(items)
+
+    def _update_totals(self):
+        downloading = seeding = paused = 0
+        for info in self.rows.values():
+            try:
+                st = info["handle"].status()
+            except Exception:   # noqa: BLE001
+                continue
+            if st.progress >= 1.0:
+                seeding += 1
+            elif st.paused:
+                paused += 1
+            else:
+                downloading += 1
+        parts = []
+        if downloading:
+            parts.append(f"{downloading} downloading")
+        if seeding:
+            parts.append(f"{seeding} complete")
+        if paused:
+            parts.append(f"{paused} paused")
+        label = getattr(self, "totals_label", None)
+        if label is not None:
+            label.setText("  ·  ".join(parts))
 
     # ------------------------------------------------------------- History ---
     def _torrent_main_file(self, info):
@@ -835,6 +1116,13 @@ class TorrentTab(QWidget):
         return self._find_largest_file(info["save_path"])
 
     def _record_completion(self, info):
+        name = info["name_label"].text()
+        if download_history.first_completion("torrent", name):
+            # Already in History: it finished in an earlier session and only
+            # came back complete now (re-checked, or re-added).
+            if not info.get("finished_at"):
+                info["finished_at"] = download_history.first_completion("torrent", name)
+            return
         try:
             save_path = info["save_path"]
             status = info["handle"].status()
@@ -872,7 +1160,25 @@ class TorrentTab(QWidget):
             # Persisted so a restart can show the bar where it actually left
             # off instead of snapping to 0% -- see _add_row's saved_progress.
             "progress": info.get("last_progress", 0.0),
+            # The stats' clocks and totals, which libtorrent forgets.
+            "added_at": round(info.get("added_at") or 0, 1),
+            "active_s": round(info.get("active_s") or 0.0),
+            "took_s": info.get("took_s"),
+            "finished_at": info.get("finished_at"),
+            "uploaded": info.get("uploaded", 0),
+            "downloaded": info.get("downloaded", 0),
+            "info_hash": TorrentManager.key(info["handle"]),
+            "stats_v": 4,
         } for info in self.rows.values()]
+
+    def shutdown(self):
+        """On quit: fresh fast-resume data for every torrent, then the list."""
+        try:
+            if self._manager is not None:
+                self._manager.save_all_resume([info["handle"] for info in self.rows.values()])
+        except Exception:   # noqa: BLE001
+            logger.exception("Couldn't save fast-resume data on exit")
+        self.save_state()
 
     def save_state(self):
         entries = self._state_entries()

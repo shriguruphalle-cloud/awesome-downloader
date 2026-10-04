@@ -1,0 +1,197 @@
+"""Shared setup for the test scripts in this folder.
+
+Import this FIRST in every test, before anything from app/ or ui_qt/:
+
+    import _support
+    from _support import qapp, build_window
+
+It isolates every file the app persists. app/config.py derives APPDATA_DIR
+from LOCALAPPDATA and the default download folders from the user profile, so
+pointing both at a throwaway directory *before config is imported* means no
+test can read the real user's settings, queue, history or browser profile,
+and none can write into them. Earlier versions of these tests redirected one
+state file at a time and missed one: a test left fake URLs in the real
+pending-downloads file, and the app then tried to resume them on launch.
+
+Each test is its own process (see run_all.py), so the isolation is fresh for
+every file.
+"""
+import atexit
+import os
+import shutil
+import sys
+import tempfile
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+
+STATE_DIR = tempfile.mkdtemp(prefix="awd-test-state-")
+os.environ["LOCALAPPDATA"] = STATE_DIR
+os.environ["USERPROFILE"] = STATE_DIR
+atexit.register(shutil.rmtree, STATE_DIR, True)
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except AttributeError:
+    pass
+
+if "app.config" in sys.modules:  # pragma: no cover -- a misordered import
+    raise RuntimeError("tests/_support.py must be imported before app.config")
+
+from app import config  # noqa: E402
+
+assert config.APPDATA_DIR.startswith(STATE_DIR), config.APPDATA_DIR
+
+_app = None
+
+
+class _Clipboard:
+    """Stands in for the system clipboard in every test. A test once put a
+    fake link ("https://a.com/form") on the real Windows clipboard, and the
+    user then pasted it into the real app. Nothing here may read or write
+    the machine's clipboard."""
+
+    def __init__(self):
+        self._text = ""
+
+    def text(self, *args):
+        return self._text
+
+    def setText(self, text, *args):  # noqa: N802 -- Qt's name
+        self._text = str(text)
+
+    def clear(self, *args):
+        self._text = ""
+
+
+_CLIPBOARD = _Clipboard()
+
+
+def _isolate_clipboard():
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtWidgets import QApplication
+    QGuiApplication.clipboard = staticmethod(lambda: _CLIPBOARD)
+    QApplication.clipboard = staticmethod(lambda: _CLIPBOARD)
+
+
+_isolate_clipboard()
+
+
+def qapp():
+    """The one QApplication for this process, with the app's stylesheet."""
+    global _app
+    from PySide6.QtWidgets import QApplication
+    _app = QApplication.instance() or QApplication(sys.argv)
+    return _app
+
+
+def pump(times=2):
+    """Lets queued signals and layout passes run."""
+    app = qapp()
+    for _ in range(times):
+        app.processEvents()
+
+
+def settle(ms=450):
+    """Lets animations (list rows opening, page cross-fades) run to their
+    end in real time before a test measures anything."""
+    import time
+    app = qapp()
+    end = time.time() + ms / 1000.0
+    while time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+
+
+def settings(**overrides):
+    from app.utils import settings as settings_store
+    s = settings_store.load_settings()
+    # A test never asks GitHub for releases unless it sets this itself.
+    s["check_app_updates"] = False
+    # Nor registers this app as the machine's magnet-link handler: that is
+    # the real registry (HKCU), which no test may touch.
+    s["magnet_handler_offered"] = True
+    s.update(overrides)
+    return s
+
+
+def stub_network(video_tab):
+    """Replaces every VideoTab method that would touch the network or start a
+    real download with a recorder. Returns the recorder dict."""
+    calls = {"lookups": [], "downloads": [], "images": [], "thumbs": [], "fetches": []}
+    video_tab._strip_info_thread = lambda strip, url: calls["lookups"].append((strip, url))
+    video_tab._download_thread = lambda *a, **k: calls["downloads"].append(a)
+    video_tab._image_download_thread = lambda *a, **k: calls["images"].append(a)
+    video_tab._thumb_only_thread = lambda card, url: calls["thumbs"].append((card, url))
+    video_tab._fetch_thread = lambda url: calls["fetches"].append(url)
+    return calls
+
+
+def build_window(tabs=("video", "torrent", "images", "browser", "download", "history"),
+                 size=(1006, 706), dark=True, **setting_overrides):
+    """A MainWindow assembled the way app/main_qt.py assembles it, with only
+    the requested tabs. Returns (window, {name: tab})."""
+    qapp()
+    from ui_qt.main_window import MainWindow
+    from ui_qt.download_tab import DownloadTab
+
+    st = settings(theme="dark" if dark else "light", **setting_overrides)
+    win = MainWindow(dark_mode=dark, settings=st)
+    made = {}
+    dl = DownloadTab(settings=st)
+    made["download_obj"] = dl
+    for name in tabs:
+        if name == "video":
+            from ui_qt.video_tab import VideoTab
+            made[name] = VideoTab(settings=st, download_tab=dl)
+            win.add_tab(made[name], "Video")
+        elif name == "torrent":
+            from ui_qt.torrent_tab import TorrentTab
+            made[name] = TorrentTab(settings=st)
+            win.add_tab(made[name], "Torrent")
+        elif name == "images":
+            from ui_qt.images_tab import ImagesTab
+            made[name] = ImagesTab(settings=st)
+            win.add_tab(made[name], "Images")
+        elif name == "browser":
+            from ui_qt.browser_tab import BrowserTab
+            made[name] = BrowserTab(settings=st, download_tab=dl)
+            win.add_tab(made[name], "Browser")
+            win.set_full_bleed(made[name])
+        elif name == "download":
+            made[name] = dl
+            win.add_tab(dl, "Download")
+        elif name == "history":
+            from ui_qt.history_tab import HistoryTab
+            made[name] = HistoryTab(settings=st)
+            win.add_tab(made[name], "History")
+    win.resize(*size)
+    win.show()
+    pump(3)
+    return win, made
+
+
+def no_modal_dialogs():
+    """Makes QMessageBox's static helpers record instead of blocking. A real
+    modal in a test waits for a click that never comes and hangs the run."""
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+
+    def record(kind):
+        def _show(*args, **kwargs):
+            shown.append((kind, args[2] if len(args) > 2 else ""))
+            return QMessageBox.StandardButton.Ok
+        return staticmethod(_show)
+
+    for kind in ("information", "warning", "critical", "question"):
+        setattr(QMessageBox, kind, record(kind))
+    return shown
+
+
+def check(condition, message):
+    """assert that also survives python -O."""
+    if not condition:
+        raise AssertionError(message)

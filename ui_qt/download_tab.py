@@ -13,10 +13,15 @@ HTTP, or file I/O -- the tab that actually runs a download (video_tab.py,
 browser_tab.py) keeps that logic and its own small per-job "cancel" flag,
 and just calls into this tab to reflect progress.
 """
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtCore import QTimer, Signal
+from PySide6.QtWidgets import QFrame, QScrollArea, QVBoxLayout, QWidget
 
-from .widgets import DownloadCard
+from .widgets import DownloadCard, EmptyState, centered_column
+from . import motion
+
+# Past this width a list of cards stops reading as a list and starts reading
+# as a spreadsheet; the column centres in whatever is left over instead.
+MAX_CONTENT_W = 1760
 
 
 class DownloadTab(QWidget):
@@ -45,11 +50,12 @@ class DownloadTab(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
 
-        self.empty_label = QLabel("No downloads yet -- fetch a video or click a link's download button.")
-        self.empty_label.setObjectName("muted")
-        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_label.setWordWrap(True)
-        root.addWidget(self.empty_label)
+        # Kept as empty_label: it is what shows/hides as cards come and go.
+        self.empty_label = EmptyState(
+            "download", "Nothing downloading",
+            "Fetch a video in the Video tab, or use the download button in the "
+            "Browser. Every download shows up here, wherever it started.")
+        root.addWidget(self.empty_label, 1)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -64,11 +70,14 @@ class DownloadTab(QWidget):
         body = QWidget()
         body.setObjectName("downloadScrollBody")
         body.setStyleSheet("#downloadScrollBody { background: transparent; }")
-        self._list_layout = QVBoxLayout(body)
+        column = centered_column(body, MAX_CONTENT_W)
+        self._list_layout = QVBoxLayout(column)
         self._list_layout.setContentsMargins(0, 0, 0, 0)
-        self._list_layout.setSpacing(8)
+        self._list_layout.setSpacing(10)
         self._list_layout.addStretch(1)
         scroll.setWidget(body)
+        self._scroll = scroll
+        scroll.setVisible(False)
         root.addWidget(scroll, 1)
 
     def _dark_mode(self):
@@ -100,8 +109,10 @@ class DownloadTab(QWidget):
         # the top, ahead of the trailing stretch that keeps a short list
         # packed upward instead of spread down the tab.
         self._list_layout.insertWidget(0, card)
+        motion.grow_in(card)
         self._cards[job_id] = card
         self.empty_label.setVisible(False)
+        self._scroll.setVisible(True)
         self.job_started.emit()
         return job_id
 
@@ -109,6 +120,16 @@ class DownloadTab(QWidget):
         card = self._cards.get(job_id)
         if card:
             card.set_progress(pct, detail)
+
+    def set_waiting(self, job_id, position):
+        card = self._cards.get(job_id)
+        if card:
+            card.set_waiting(position)
+
+    def set_started(self, job_id):
+        card = self._cards.get(job_id)
+        if card:
+            card.set_started()
 
     def set_playable(self, job_id, playable=True):
         card = self._cards.get(job_id)
@@ -157,6 +178,13 @@ class DownloadTab(QWidget):
         QTimer.singleShot(delay_ms, lambda: self.remove_job(job_id))
 
     def _remove_card(self, card):
+        # Folds away first; the cards below slide up into its place.
+        try:
+            motion.shrink_out(card, lambda: self._drop_card(card))
+        except RuntimeError:
+            self._drop_card(card)
+
+    def _drop_card(self, card):
         try:
             self._list_layout.removeWidget(card)
             card.deleteLater()
@@ -164,6 +192,7 @@ class DownloadTab(QWidget):
             pass  # already torn down (tab closed / theme rebuild)
         if not self._cards:
             self.empty_label.setVisible(True)
+            self._scroll.setVisible(False)
 
     def apply_theme(self):
         """Duck-typed by MainWindow._retheme_tabs() after a live theme

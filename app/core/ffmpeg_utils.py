@@ -132,14 +132,6 @@ def download_ffmpeg(progress_callback=None):
     report("Done.")
 
 
-def install_ffmpeg(progress_callback=None):
-    """Kept as a thin alias -- update_panel.py and any external callers
-    written against the old name keep working; download_ffmpeg() is the
-    real implementation now (see its docstring for why it replaced the
-    winget-based approach)."""
-    download_ffmpeg(progress_callback=progress_callback)
-
-
 def ffmpeg_run(args):
     if args and args[0] == "ffmpeg":
         args = [ffmpeg_path(), *args[1:]]

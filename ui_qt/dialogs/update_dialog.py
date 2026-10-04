@@ -8,17 +8,17 @@ status for completeness. The network check runs on a background thread so
 it can't freeze the window; results come back via a signal, the same
 pattern TorrentTab's libtorrent installer already uses.
 """
-from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import (
-    QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QVBoxLayout,
-)
+from PySide6.QtCore import QThread, QUrl, Qt, Signal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMessageBox, QVBoxLayout
 
 from app import config
 from app.core import update_checker
 from app.logging_setup import get_logger
 
-from .. import theme
+from ..widgets import make_card
+from .base import CinematicDialog, button_row, header
+from ..widgets.button import Button
 
 logger = get_logger("update_dialog")
 
@@ -28,6 +28,14 @@ class _CheckWorker(QThread):
 
     def run(self):
         result = {}
+        # The app itself first: a newer release on GitHub. latest_release()
+        # is silent on every failure, so None here means "couldn't tell".
+        try:
+            from app.utils import app_update
+            result["app_release"] = app_update.latest_release()
+        except Exception:
+            logger.exception("App release check failed")
+            result["app_release"] = None
         try:
             result["yt_dlp_installed"] = update_checker.installed_yt_dlp_version()
         except Exception:
@@ -106,8 +114,17 @@ def _run_detached(worker, on_done):
         # shutdown flaky: it queues a deletion that needs a running event
         # loop, and at quit time there may not be one left to run it, which
         # leaves a half-deleted QThread for the interpreter to trip over.
-        # The thread has finished by the time this runs, so letting Python
-        # own it and collect it normally is both simpler and safe.
+        #
+        # But not before the thread has really ended. finished() is emitted
+        # from the worker thread just *before* it exits, so this can run
+        # while it is still on its last few instructions -- and dropping the
+        # last reference then destroys a running QThread, which is Qt's
+        # abort() ("Aborted", then an access violation; an intermittent
+        # crash in tests/test_dialog_close.py). The wait is microseconds.
+        try:
+            worker.wait(3000)
+        except RuntimeError:
+            pass
         _LIVE_WORKERS.discard(worker)
 
     worker.finished.connect(_cleanup)
@@ -115,86 +132,102 @@ def _run_detached(worker, on_done):
     return worker
 
 
-class UpdateDialog(QDialog):
+class UpdateDialog(CinematicDialog):
     def __init__(self, parent=None, dark_mode=True):
-        super().__init__(parent)
-        self.setWindowTitle("Check for Updates")
-        self.setFixedSize(420, 340)
-        t = theme.tokens(dark_mode=dark_mode)
-        # Same non-translucent-dialog styling as about_dialog.py -- this
-        # window has no WA_TranslucentBackground, so QSS's "background:
-        # transparent" would just leave Qt's plain grey default showing.
-        self.setStyleSheet(
-            theme.build_stylesheet(dark_mode=dark_mode) + f"QDialog {{ background: {t['card_bg_solid']}; }}"
-        )
+        super().__init__(parent, "Check for Updates", dark_mode)
+        self.setFixedSize(500, 520)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setContentsMargins(26, 24, 26, 22)
+        layout.setSpacing(14)
+        layout.addLayout(header("Updates", "What's installed, and whether anything newer exists."))
 
-        title = QLabel("Check for Updates")
-        title.setObjectName("heading")
-        layout.addWidget(title)
-        layout.addSpacing(4)
+        # ---- the app itself ----
+        app_card, app_layout = make_card("Awesome Downloader")
+        app_row = QHBoxLayout()
+        app_row.setSpacing(10)
+        self.app_status = QLabel(f"Version {config.APP_VERSION}  ·  checking GitHub...")
+        self.app_status.setObjectName("muted")
+        self.app_status.setWordWrap(True)
+        app_row.addWidget(self.app_status, 1)
+        self.app_release_btn = Button("Open release page")
+        self.app_release_btn.setObjectName("accent")
+        self.app_release_btn.setCursor(Qt.PointingHandCursor)
+        self.app_release_btn.setVisible(False)
+        self.app_release_btn.clicked.connect(self._open_release_page)
+        app_row.addWidget(self.app_release_btn)
+        app_layout.addLayout(app_row)
+        layout.addWidget(app_card)
+        # Kept under its old name for anything that reads it.
+        self.app_version_label = self.app_status
 
-        self.app_version_label = QLabel(f"{config.APP_NAME}  ·  version {config.APP_VERSION}")
-        self.app_version_label.setObjectName("muted")
-        layout.addWidget(self.app_version_label)
-        layout.addSpacing(14)
-
-        divider = QFrame()
-        divider.setObjectName("divider")
-        divider.setFixedHeight(1)
-        layout.addWidget(divider)
-        layout.addSpacing(14)
-
-        self.yt_dlp_title = QLabel("yt-dlp")
-        self.yt_dlp_title.setStyleSheet("font-weight: 600;")
-        layout.addWidget(self.yt_dlp_title)
+        # ---- yt-dlp: the one that matters day to day ----
+        yt_card, yt_layout = make_card("yt-dlp  ·  the downloader engine")
+        self.yt_dlp_title = yt_card.title_label
         self.yt_dlp_status = QLabel("Checking...")
         self.yt_dlp_status.setObjectName("muted")
         self.yt_dlp_status.setWordWrap(True)
-        layout.addWidget(self.yt_dlp_status)
-        self.yt_dlp_update_btn = QPushButton("Update yt-dlp")
+        yt_layout.addWidget(self.yt_dlp_status)
+        self.yt_dlp_update_btn = Button("Update yt-dlp")
         self.yt_dlp_update_btn.setObjectName("accent")
+        self.yt_dlp_update_btn.setCursor(Qt.PointingHandCursor)
         self.yt_dlp_update_btn.setVisible(False)
         self.yt_dlp_update_btn.clicked.connect(self._on_upgrade_clicked)
-        layout.addWidget(self.yt_dlp_update_btn)
-        layout.addSpacing(14)
+        yt_layout.addLayout(button_row(self.yt_dlp_update_btn, None, stretch_first=False))
+        layout.addWidget(yt_card)
 
+        # ---- the rest, for completeness ----
+        tools_card, tools_layout = make_card("Components")
         self.ffmpeg_label = QLabel("ffmpeg: checking...")
-        self.ffmpeg_label.setObjectName("muted")
-        layout.addWidget(self.ffmpeg_label)
+        self.ffmpeg_label.setObjectName("mono")
+        tools_layout.addWidget(self.ffmpeg_label)
         self.libtorrent_label = QLabel("libtorrent: checking...")
-        self.libtorrent_label.setObjectName("muted")
-        layout.addWidget(self.libtorrent_label)
+        self.libtorrent_label.setObjectName("mono")
+        tools_layout.addWidget(self.libtorrent_label)
+        layout.addWidget(tools_card)
 
         layout.addStretch(1)
-
-        btn_row = QHBoxLayout()
-        self.recheck_btn = QPushButton("Check Again")
+        self.recheck_btn = Button("Check again")
         self.recheck_btn.clicked.connect(self._start_check)
-        btn_row.addWidget(self.recheck_btn)
-        btn_row.addStretch(1)
-        close_btn = QPushButton("Close")
-        close_btn.setObjectName("accent")
+        close_btn = Button("Close")
+        close_btn.setMinimumWidth(110)
         close_btn.clicked.connect(self.close)
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
+        layout.addLayout(button_row(self.recheck_btn, None, close_btn, stretch_first=False))
 
+        self._release = None
         self._check_worker = None
         self._upgrade_worker = None
         self._start_check()
 
     def _start_check(self):
         self.recheck_btn.setEnabled(False)
+        self.app_status.setText(f"Version {config.APP_VERSION}  ·  checking GitHub...")
+        self.app_release_btn.setVisible(False)
         self.yt_dlp_status.setText("Checking...")
         self.yt_dlp_update_btn.setVisible(False)
         self.ffmpeg_label.setText("ffmpeg: checking...")
         self.libtorrent_label.setText("libtorrent: checking...")
         self._check_worker = _run_detached(_CheckWorker(), self._on_check_done)
 
+    def _open_release_page(self):
+        page = (self._release or {}).get("page") or config.RELEASES_PAGE
+        QDesktopServices.openUrl(QUrl(page))
+
     def _on_check_done(self, result):
         self.recheck_btn.setEnabled(True)
+
+        release = result.get("app_release")
+        if release is None:
+            self.app_status.setText(
+                f"Version {config.APP_VERSION}  ·  couldn't reach GitHub to compare.")
+        elif update_checker.is_outdated(config.APP_VERSION, release["version"]):
+            self._release = release
+            self.app_status.setText(
+                f"Version {config.APP_VERSION}  ·  {release['version']} is available.")
+            self.app_release_btn.setVisible(True)
+        else:
+            self.app_status.setText(f"Version {config.APP_VERSION}  ·  you're up to date.")
+
         installed = result["yt_dlp_installed"]
         latest = result["yt_dlp_latest"]
 
@@ -208,7 +241,7 @@ class UpdateDialog(QDialog):
             )
         elif update_checker.is_outdated(installed, latest):
             self.yt_dlp_status.setText(
-                f"Installed: {installed}\nLatest: {latest}  --  an update is available."
+                f"Installed: {installed}\nLatest: {latest}  ·  an update is available."
             )
             self.yt_dlp_update_btn.setVisible(True)
         else:

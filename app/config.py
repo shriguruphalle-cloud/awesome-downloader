@@ -3,8 +3,15 @@ import subprocess
 import sys
 
 APP_NAME = "AWESOME DOWNLOADER"
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.5.0"
 APP_PUBLISHER = "Shriguru Phalle"  # kept in sync with installer.iss's MyAppPublisher by hand
+
+# Where releases are published -- the app asks GitHub's API for the latest
+# one at startup (app/utils/app_update.py) so people learn a new version
+# exists without having to go and look.
+GITHUB_REPO = "shriguruphalle-cloud/awesome-downloader"
+RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+WEBSITE = "https://awesome-downloader.pages.dev"
 
 IS_FROZEN = getattr(sys, "frozen", False)  # True when running as a PyInstaller .exe
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # hides console flashes on Windows

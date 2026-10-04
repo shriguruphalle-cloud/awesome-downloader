@@ -25,7 +25,46 @@ DEFAULTS = {
         "torrent": None,
         "images": None,
     },
+    # How many video/audio downloads run at once; the rest wait their turn.
+    # "Start all" on thirty links used to launch thirty downloads together,
+    # each fetching eight fragments in parallel -- a few hundred connections,
+    # slower overall than a short queue, and the fastest way to get
+    # rate-limited by YouTube.
+    "max_concurrent": 3,
+    # Height newly stacked links default to, or "best". Applied to the
+    # nearest height a link actually offers at or below it.
+    "preferred_quality": "best",
+    # Container the Video tab's format picker starts on.
+    "default_format": "mp4",
+    # "cinematic" paints the app's own backdrop behind the glass panels;
+    # "desktop" lets the real Windows acrylic blur of the desktop show
+    # through instead, which is what every version before 2.5 did.
+    "backdrop": "cinematic",
+    # The backdrop's colour: sapphire, ruby, gold, emerald, obsidian,
+    # amethyst or rose (ui_qt/palettes.py).
+    "palette": "sapphire",
+    # Set once the Torrent tab has made this app the magnet-link handler on
+    # its first run, so unticking that box afterwards is never undone.
+    "magnet_handler_offered": False,
+    # Turns off the few animations the interface has (the sliding tab
+    # indicator, hover fades) for anyone who finds motion distracting.
+    "reduce_motion": False,
+    # Asks GitHub once at startup whether a newer release exists.
+    "check_app_updates": True,
 }
+
+MAX_CONCURRENT_RANGE = (1, 6)
+
+
+def max_concurrent(settings):
+    """The concurrency setting, clamped to a sane range whatever the file
+    says -- a hand-edited 0 would otherwise stop every download starting."""
+    lo, hi = MAX_CONCURRENT_RANGE
+    try:
+        value = int((settings or {}).get("max_concurrent", DEFAULTS["max_concurrent"]))
+    except (TypeError, ValueError):
+        value = DEFAULTS["max_concurrent"]
+    return max(lo, min(hi, value))
 
 
 def get_save_dir(settings, tab, default):
@@ -56,14 +95,24 @@ def load_settings():
     try:
         with open(config.SETTINGS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        merged = dict(DEFAULTS)
+        merged = _fresh_defaults()
         merged.update({k: v for k, v in data.items() if k in DEFAULTS})
         return merged
     except FileNotFoundError:
-        return dict(DEFAULTS)
+        return _fresh_defaults()
     except Exception:
         logger.exception("Failed to load settings from %s, using defaults", config.SETTINGS_PATH)
-        return dict(DEFAULTS)
+        return _fresh_defaults()
+
+
+def _fresh_defaults():
+    """A deep-enough copy of DEFAULTS. dict(DEFAULTS) shared the nested
+    save_dirs dict with the module constant, so set_save_dir() on one
+    settings object quietly edited the defaults every later load starts
+    from."""
+    merged = dict(DEFAULTS)
+    merged["save_dirs"] = dict(DEFAULTS["save_dirs"])
+    return merged
 
 
 def save_settings(settings):

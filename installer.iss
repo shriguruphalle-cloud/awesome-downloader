@@ -10,7 +10,7 @@
 ; HOW TO USE (see the "Building a Windows installer" section in README.md
 ; for the fully detailed walkthrough):
 ;   1. Build the app first by running build_exe.bat
-;      -> this creates:  dist\Awesome Downloader.exe
+;      -> this creates the folder:  dist\Awesome Downloader\
 ;   2. Install Inno Setup (free): https://jrsoftware.org/isdl.php
 ;   3. Double-click this file (installer.iss) to open it in Inno Setup
 ;   4. Press Ctrl+F9 (or Build > Compile)
@@ -18,7 +18,7 @@
 ; ============================================================================
 
 #define MyAppName "AWESOME DOWNLOADER"
-#define MyAppVersion "2.4.0"
+#define MyAppVersion "2.5.0"
 #define MyAppPublisher "Shriguru Phalle"
 #define MyAppExeName "Awesome Downloader.exe"
 
@@ -81,8 +81,16 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; [Code]) so a slow/unavailable network can never fail the install itself.
 Name: "updateffmpeg"; Description: "Download the latest version of ffmpeg during setup (recommended, needs internet)"; GroupDescription: "Additional options:"; Flags: unchecked
 
+[InstallDelete]
+; 2.5 ships as a folder (the .exe plus its _internal libraries) instead of a
+; single self-extracting .exe. Clearing the old library folder before
+; copying means an upgrade never leaves a stale DLL from the previous
+; version beside the new ones.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; The whole PyInstaller output folder: the .exe and its _internal libraries.
+Source: "dist\Awesome Downloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "app_icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 ; Optional: bundle ffmpeg so users don't need to install it separately.

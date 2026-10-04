@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New Tab</title>
+<link rel="stylesheet" href="home.css">
+</head>
+<body>
+<div id="wall" aria-hidden="true"></div>
+<div id="veil" aria-hidden="true"></div>
+
+<main id="stage">
+  <div class="kicker glass-pill rise" style="--i:0"><span class="kdot"></span><span id="kicker">&nbsp;</span></div>
+  <h1 class="wordmark rise" style="--i:1"><span class="w1">Awesome</span> <em class="w2">Downloader</em></h1>
+
+  <form id="search" class="search rise" style="--i:2" autocomplete="off">
+    <svg class="lens" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
+    <input id="q" type="text" spellcheck="false" aria-label="Search or type a web address">
+    <button id="engine" class="engine" type="button" title="Search engine" aria-haspopup="listbox">
+      <span id="engine-logo" class="logo" hidden></span>
+      <span id="engine-name"></span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m7 10 5 5 5-5"/></svg>
+    </button>
+    <div id="engines" class="engines panel" role="listbox" hidden></div>
+    <button id="go" class="go" type="submit" aria-label="Search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+    </button>
+    <div id="suggest" class="suggest panel" role="listbox" hidden></div>
+  </form>
+
+  <section id="tiles" class="tiles rise" style="--i:3" aria-label="Shortcuts"></section>
+  <p id="private-note" class="private-note rise" style="--i:3" hidden>
+    Pages you open in a private tab aren't kept in history, and their cookies and
+    sign-ins are forgotten when the tab closes. Downloads you make are kept.
+  </p>
+</main>
+
+<footer id="dock">
+  <section id="recent" class="recent glass rise" style="--i:4" hidden>
+    <div class="label">Continue browsing</div>
+    <div id="recent-list" class="recent-list"></div>
+  </section>
+</footer>
+
+<div id="links" class="links">
+  <a id="site" class="site glass-pill" href="#" title="The Awesome Downloader website">
+    <span class="site-name">Awesome <em>Downloader</em></span>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>
+  </a>
+  <a id="oss" class="oss glass-pill" href="#" title="Awesome Downloader is free and open source: read the code on GitHub">
+    <span class="kdot"></span><span>Free &amp; open source</span><span class="oss-sep">GitHub</span>
+  </a>
+</div>
+
+<button id="customize" class="customize glass-pill" type="button" title="Wallpaper, motion and what this page shows">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2.2" fill="currentColor"/><circle cx="15.5" cy="12" r="2.2" fill="currentColor"/><circle cx="7" cy="17" r="2.2" fill="currentColor"/></svg>
+  <span>Customize</span>
+</button>
+
+<div id="sheet" class="sheet panel" hidden>
+  <div class="sheet-head">
+    <h2>Customize</h2>
+    <button class="icon-btn" id="sheet-close" type="button" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+    </button>
+  </div>
+  <div class="label">Wallpaper</div>
+  <div id="walls" class="walls"></div>
+  <div class="label">Your pictures</div>
+  <div id="pics" class="walls pics"></div>
+  <div class="label">This page</div>
+  <label class="switch-row"><span>Animated wallpaper</span><input type="checkbox" id="opt-animate"><i></i></label>
+  <label class="switch-row"><span>Parallax motion</span><input type="checkbox" id="opt-parallax"><i></i></label>
+  <label class="switch-row"><span>Suggested sites</span><input type="checkbox" id="opt-suggestions"><i></i></label>
+  <label class="switch-row"><span>Continue browsing</span><input type="checkbox" id="opt-recent"><i></i></label>
+</div>
+
+<div id="menu" class="menu panel" role="menu" hidden></div>
+
+<div id="dialog-wrap" hidden>
+  <form id="dialog" class="dialog panel">
+    <h2>Add a shortcut</h2>
+    <label>Name<input id="d-name" type="text" spellcheck="false" placeholder="Optional"></label>
+    <label>Address<input id="d-url" type="text" spellcheck="false" placeholder="example.com"></label>
+    <div class="dialog-row">
+      <button type="button" class="btn quiet" id="d-cancel">Cancel</button>
+      <button type="submit" class="btn primary">Add</button>
+    </div>
+  </form>
+</div>
+
+<script src="home.js"></script>
+</body>
+</html>

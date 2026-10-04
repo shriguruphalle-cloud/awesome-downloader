@@ -10,26 +10,30 @@ click-region-detection dance isn't needed here.
 """
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QDialog, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout,
+    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from app import config
 from app.logging_setup import get_logger
 from app.utils.formatting import humanize_size
 
+from ..widgets import make_card
+from .base import CinematicDialog, button_row
+from ..widgets.button import Button
+
 logger = get_logger("add_torrent_dialog")
 
 
-class AddTorrentDialog(QDialog):
+class AddTorrentDialog(CinematicDialog):
     def __init__(self, manager, handle, settings, save_path, name_hint=None, parent=None):
         """result is set on close: None if cancelled (handle already removed
         from the session), otherwise {"selected": set(idx)|None, "auto_start": bool}.
         selected is None when the dialog closed before metadata ever arrived,
         meaning "everything, don't wait."
         """
-        super().__init__(parent)
+        super().__init__(parent, "Adding Torrent",
+                         dark_mode=(settings or {}).get("theme", "dark") != "light")
         self.manager = manager
         self.handle = handle
         self.result = None
@@ -37,54 +41,67 @@ class AddTorrentDialog(QDialog):
         self.checked = {}
         self._elapsed_ticks = 0
 
-        self.setWindowTitle("Adding Torrent")
-        self.resize(620, 540)
-        self.setMinimumSize(520, 440)
+        self.resize(640, 560)
+        self.setMinimumSize(540, 460)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(6)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
 
+        head = QVBoxLayout()
+        head.setSpacing(3)
         self.name_label = QLabel(name_hint or "New Torrent")
-        self.name_label.setObjectName("heading")
+        self.name_label.setObjectName("display")
         self.name_label.setWordWrap(True)
-        layout.addWidget(self.name_label)
-
+        head.addWidget(self.name_label)
         self.status_label = QLabel("Retrieving file details...")
         self.status_label.setObjectName("muted")
-        layout.addWidget(self.status_label)
+        head.addWidget(self.status_label)
+        layout.addLayout(head)
 
-        btn_row = QHBoxLayout()
-        self.select_all_btn = QPushButton("Select All")
+        files_card, files_layout = make_card()
+        top_row = QHBoxLayout()
+        top_row.setSpacing(6)
+        files_title = QLabel("FILES")
+        files_title.setObjectName("sectionLabel")
+        top_row.addWidget(files_title)
+        top_row.addStretch(1)
+        self.select_all_btn = Button("Select all")
+        self.select_all_btn.setObjectName("quiet")
         self.select_all_btn.setEnabled(False)
         self.select_all_btn.clicked.connect(self._select_all)
-        btn_row.addWidget(self.select_all_btn)
-        self.select_none_btn = QPushButton("Select None")
+        top_row.addWidget(self.select_all_btn)
+        self.select_none_btn = Button("Select none")
+        self.select_none_btn.setObjectName("quiet")
         self.select_none_btn.setEnabled(False)
         self.select_none_btn.clicked.connect(self._select_none)
-        btn_row.addWidget(self.select_none_btn)
-        btn_row.addStretch(1)
-        layout.addLayout(btn_row)
+        top_row.addWidget(self.select_none_btn)
+        files_layout.addLayout(top_row)
 
         self.placeholder_label = QLabel("Retrieving file details from peers/trackers...")
         self.placeholder_label.setObjectName("muted")
         self.placeholder_label.setWordWrap(True)
         self.placeholder_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.placeholder_label, 1)
+        files_layout.addWidget(self.placeholder_label, 1)
 
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["File", "Size"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.setVisible(False)
-        layout.addWidget(self.table, 1)
+        files_layout.addWidget(self.table, 1)
+        layout.addWidget(files_card, 1)
 
         save_row = QHBoxLayout()
-        save_row.addWidget(QLabel("Save to:"))
+        save_row.setSpacing(10)
+        save_label = QLabel("Save to")
+        save_label.setObjectName("muted")
+        save_row.addWidget(save_label)
         save_entry = QLineEdit(save_path)
         save_entry.setReadOnly(True)
         save_row.addWidget(save_entry, 1)
@@ -92,17 +109,15 @@ class AddTorrentDialog(QDialog):
 
         self.autostart_check = QCheckBox("Start downloading when added")
         self.autostart_check.setChecked(True)
-        layout.addWidget(self.autostart_check)
 
-        footer = QHBoxLayout()
-        footer.addStretch(1)
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = Button("Cancel")
         cancel_btn.clicked.connect(self._cancel)
-        footer.addWidget(cancel_btn)
-        self.add_btn = QPushButton("Add")
+        self.add_btn = Button("Add")
         self.add_btn.setObjectName("accent")
+        self.add_btn.setMinimumWidth(110)
         self.add_btn.clicked.connect(self._confirm)
-        footer.addWidget(self.add_btn)
+        footer = button_row(cancel_btn, self.add_btn)
+        footer.insertWidget(0, self.autostart_check)
         layout.addLayout(footer)
 
         self._poll_timer = QTimer(self)
