@@ -39,6 +39,7 @@ def main():
     if single_instance.forward_to_existing(magnet_arg):
         logger.info("Another instance is already running -- forwarded and exiting.")
         return
+    single_instance.hold_running_mutex()
 
     settings = settings_store.load_settings()
 

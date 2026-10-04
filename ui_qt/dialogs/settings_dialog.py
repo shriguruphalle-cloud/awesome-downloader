@@ -11,12 +11,13 @@ import threading
 from PySide6.QtCore import QObject, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QScrollArea,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
 from app import config
 from app.utils import settings as settings_store
+from app.utils import uninstall
 
 from .. import cinema, palettes
 from ..widgets import make_card
@@ -190,7 +191,14 @@ class SettingsDialog(CinematicDialog):
         data_btn = Button("Open data folder")
         data_btn.setCursor(Qt.PointingHandCursor)
         data_btn.clicked.connect(self._open_data_folder)
-        lay.addLayout(button_row(data_btn, None, stretch_first=False))
+        # Only in an installed copy: the installer's uninstaller beside the app.
+        self.uninstall_btn = None
+        if uninstall.uninstaller_path():
+            self.uninstall_btn = Button("Uninstall %s\u2026" % config.APP_NAME.title())
+            self.uninstall_btn.setObjectName("danger")
+            self.uninstall_btn.setToolTip("Remove the app from this PC. You'll be asked whether to keep your data.")
+            self.uninstall_btn.clicked.connect(self._uninstall)
+        lay.addLayout(button_row(data_btn, None, self.uninstall_btn, stretch_first=False))
         col.addWidget(card)
 
         col.addStretch(1)
@@ -292,6 +300,27 @@ class SettingsDialog(CinematicDialog):
     def _open_data_folder(self):
         os.makedirs(config.APPDATA_DIR, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(config.APPDATA_DIR))
+
+    def _uninstall(self):
+        """Starts the uninstaller and quits, so the app has nothing open
+        when the uninstaller removes it. The uninstaller asks whether to
+        keep your data."""
+        name = config.APP_NAME.title()
+        confirmed = QMessageBox.question(
+            self, "Uninstall %s" % name,
+            "Remove %s from this PC?\n\nThe app closes and Windows' uninstaller takes over. "
+            "It asks whether to keep your settings, history and bookmarks, in case you "
+            "reinstall later." % name,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+        if not confirmed:
+            return
+        if not uninstall.launch_uninstaller():
+            QMessageBox.warning(self, "Uninstall %s" % name,
+                                "Couldn't start the uninstaller. You can remove the app from "
+                                "Windows Settings > Apps > Installed apps.")
+            return
+        self.accept()
+        QApplication.instance().quit()
 
     # ---- update check ----
     def _check_now(self):

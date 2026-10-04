@@ -5,7 +5,7 @@ one window, no ads and no sign-up.
 
 ## Download
 
-**[AwesomeVideoDownloaderSetup.exe](../../releases/download/v2.5.0/AwesomeVideoDownloaderSetup.exe)** — SIZE_TBD
+**[AwesomeVideoDownloaderSetup.exe](../../releases/download/v2.5.0/AwesomeVideoDownloaderSetup.exe)** — 113 MB
 
 Everything is bundled. FFmpeg, the torrent engine and the AdGuard ad blocker
 are included, so there is nothing else to install.
@@ -22,7 +22,7 @@ certutil -hashfile AwesomeVideoDownloaderSetup.exe SHA256
 ```
 
 ```
-SHA256_TBD
+A90E30C8703789CE99E6BD838DF2F72FC20B501CC0272AD401856C46C68D97A3
 ```
 
 If the value differs, the download was cut short or altered — delete it and
@@ -314,6 +314,16 @@ an empty Torrent tab uses no time at all.
 - Your settings, queue, history and bookmarks carry over from 2.4.0.
   Browser sign-ins don't (see above).
 - Installing over 2.4.0 replaces the old single .exe with the new program
-  folder; nothing needs uninstalling first.
+  folder; nothing needs uninstalling first. If the app is open, Setup asks
+  you to close it before it replaces anything.
+- **Uninstalling:** from Windows Settings > Apps, from *Uninstall Awesome
+  Downloader* in the Start menu, or from the app itself — Settings > Your
+  data > Uninstall. The uninstaller waits for the app to close, removes its
+  magnet-link and start-with-Windows entries (only if they still point at
+  this app — another torrent client keeps its own), and asks whether to keep
+  your settings, history and bookmarks for a later reinstall (No is the
+  default, and a silent uninstall never deletes them).
+- The app started from Setup's last page now runs as you, not as the
+  administrator account Setup itself ran as.
 - Dependencies are pinned for the release build (`requirements-lock.txt`), and
   the test suite now lives in the repository (`tests/run_all.py`).

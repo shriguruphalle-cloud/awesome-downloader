@@ -3,7 +3,7 @@ strip a working drag handle (which is what Windows watches for snapping),
 nothing cropped or run under the caption dots at any width, and the dots on
 the row's centre line."""
 import _support
-from _support import build_window, check, pump, qapp
+from _support import build_window, check, keep_on_top, pump, qapp
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
@@ -16,6 +16,7 @@ moves = []
 mw.startSystemMove = lambda window, pos: moves.append(pos)
 
 win, tabs = build_window()
+keep_on_top(win)
 tb = win.titleBar
 row = win.topbar
 LABELS = [win.tabs.tabText(i) for i in range(win.tabs.count())]
@@ -27,7 +28,11 @@ check(tb.hBoxLayout.itemAt(0).widget() is row, "the nav row isn't hosted in the 
 controls = list(win._tab_buttons) + [b for b in win.action_buttons() if b.isVisible()]
 for btn in controls:
     g = btn.mapToGlobal(QPoint(btn.width() // 2, btn.height() // 2))
-    hit = QApplication.widgetAt(g)
+    # Hit-tested within our own window: what this guards against is a piece
+    # of our UI lying over a button. QApplication.widgetAt asks the screen,
+    # and another program's window in front (a full-screen one, say) made
+    # every button "unreachable".
+    hit = win.childAt(win.mapFromGlobal(g))
     reaches = hit is btn or (hit is not None and btn.isAncestorOf(hit))
     check(reaches, "a real click would miss %r (lands on %s)" % (
         btn.text() or btn.accessibleName(), type(hit).__name__ if hit else None))

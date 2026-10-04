@@ -12,7 +12,7 @@ import ctypes
 from ctypes import wintypes
 
 import _support  # noqa: F401
-from _support import build_window, check, qapp
+from _support import build_window, check, keep_on_top, qapp
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QPainter
@@ -61,6 +61,7 @@ def arrange():
     backing.show()
     win.raise_()
     win.activateWindow()
+    keep_on_top(backing, win)
 
 
 def shoot():
@@ -70,6 +71,12 @@ def shoot():
     inset = int(round(8 * scale))       # the centre of an 8 px arc: always painted
     result["floating"] = not win.isMaximized()
     result["radius"] = win._central.corner_radius()
+    hwnd = int(win.winId())
+    probes = {"top-left": (r.left + inset, r.top + inset), "top-right": (r.right - 1 - inset, r.top + inset),
+              "bottom-left": (r.left + inset, r.bottom - 1 - inset),
+              "bottom-right": (r.right - 1 - inset, r.bottom - 1 - inset)}
+    result["covered"] = {k: user32.GetAncestor(user32.WindowFromPoint(wintypes.POINT(*v)), 2) != hwnd
+                         for k, v in probes.items()}
     result["corners"] = {
         "top-left": (pixel(r.left, r.top), pixel(r.left + inset, r.top + inset)),
         "top-right": (pixel(r.right - 1, r.top), pixel(r.right - 1 - inset, r.top + inset)),
@@ -86,7 +93,13 @@ backing.close()
 
 check(result.get("floating"), "the window wasn't floating")
 check(result["radius"] == mw.BackdropSurface.CORNER_RADIUS, "no corner radius while floating")
+read = 0
 for name, (corner, inside) in result["corners"].items():
+    if result["covered"][name]:
+        # Another program's window in front: the screen there isn't ours to read.
+        print("  %-13s covered by another program's window -- not read" % name)
+        continue
+    read += 1
     print("  %-13s corner rgb%s  inside rgb%s" % (name, corner, inside))
     check(not magenta(corner), "the %s corner is square" % name)
     check(magenta(inside), "the %s corner is cut too deep" % name)

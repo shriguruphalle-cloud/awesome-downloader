@@ -174,6 +174,28 @@ def build_window(tabs=("video", "torrent", "images", "browser", "download", "his
     return win, made
 
 
+def keep_on_top(*windows):
+    """Puts test windows above every other window, in the order given (the
+    last ends up in front). Tests that hit-test or read what's on screen
+    share it with whatever else is open: a window left over that spot made a
+    real click "miss" a button and a corner read as cut too deep."""
+    import ctypes
+    from ctypes import wintypes
+    # Typed, and HWND_TOPMOST as a real HWND(-1): passed as a plain int it
+    # reached Windows as 0xFFFFFFFF -- not a window, not "topmost" -- and the
+    # call quietly did nothing.
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    set_pos = user32.SetWindowPos
+    set_pos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                        wintypes.UINT]
+    set_pos.restype = wintypes.BOOL
+    for w in windows:
+        if not set_pos(wintypes.HWND(int(w.winId())), wintypes.HWND(-1), 0, 0, 0, 0,
+                       0x0001 | 0x0002 | 0x0010):   # no move, no size, no activate
+            raise OSError(ctypes.get_last_error(), "couldn't keep a test window on top")
+    pump(3)
+
+
 def no_modal_dialogs():
     """Makes QMessageBox's static helpers record instead of blocking. A real
     modal in a test waits for a click that never comes and hangs the run."""

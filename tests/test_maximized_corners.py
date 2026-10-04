@@ -12,7 +12,7 @@ import ctypes
 from ctypes import wintypes
 
 import _support
-from _support import build_window, check, qapp
+from _support import build_window, check, keep_on_top, qapp
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QPainter
@@ -71,7 +71,7 @@ def on_top():
     # Above every other window while the corners are read: this test is about
     # the corners' shape, and the screen is shared with whatever else is open
     # (a window left in front read as "the desktop through a corner").
-    user32.SetWindowPos(int(win.winId()), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)   # HWND_TOPMOST
+    keep_on_top(win)
 
 
 QTimer.singleShot(1200, on_top)

@@ -21,7 +21,29 @@ from ..logging_setup import get_logger
 logger = get_logger("single_instance")
 
 _PORT = 47653  # arbitrary, fixed so repeat launches agree on where to look
+# installer.iss names this as its AppMutex: Setup and the uninstaller both
+# see the app is running and ask for it to be closed, instead of replacing or
+# deleting files it has open (which left half an install, or half an app).
+RUNNING_MUTEX = "AwesomeDownloaderRunning"
+_mutexes = []
 _FOCUS_MESSAGE = "__focus__"
+
+
+def hold_running_mutex():
+    """Says "the app is running" to the installer and uninstaller until the
+    process ends: a named mutex, in this session and machine-wide (Inno
+    Setup checks both, so it also sees the app in another user's session)."""
+    import sys
+    if sys.platform != "win32" or _mutexes:
+        return bool(_mutexes)
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    for name in (RUNNING_MUTEX, "Global\\" + RUNNING_MUTEX):
+        handle = kernel32.CreateMutexW(None, False, name)
+        if handle:
+            _mutexes.append(handle)
+    return bool(_mutexes)
 
 
 def forward_to_existing(magnet_uri=None, timeout=0.5):

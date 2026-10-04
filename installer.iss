@@ -18,15 +18,37 @@
 ; ============================================================================
 
 #define MyAppName "AWESOME DOWNLOADER"
+; How the app is named where people read it: the Start menu, Settings > Apps,
+; the wizard. MyAppName stays for the install folder and Start menu group, so
+; an upgrade lands in the same place as every earlier version.
+#define MyAppDisplayName "Awesome Downloader"
 #define MyAppVersion "2.5.0"
 #define MyAppPublisher "Shriguru Phalle"
 #define MyAppExeName "Awesome Downloader.exe"
+#define MyAppURL "https://awesome-downloader.pages.dev"
+#define MyAppRepo "https://github.com/shriguruphalle-cloud/awesome-downloader"
+; The app holds this mutex while it runs (app/utils/single_instance.py).
+#define MyAppMutex "AwesomeDownloaderRunning"
 
 [Setup]
 AppId={{B6E1B6C0-6D2F-4F1A-9C0A-1F1B2A9F1A11}}
-AppName={#MyAppName}
+AppName={#MyAppDisplayName}
 AppVersion={#MyAppVersion}
+AppVerName={#MyAppDisplayName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppRepo}/issues
+AppUpdatesURL={#MyAppRepo}/releases/latest
+; Settings > Apps lists it by this name, with its icon, version, publisher
+; and size, and its Uninstall button runs the uninstaller below.
+UninstallDisplayName={#MyAppDisplayName}
+; Setup and the uninstaller both check whether the app is running and ask
+; for it to be closed first: replacing or deleting files it has open left
+; half an upgrade, or half an app behind. Both names: this session's, and
+; machine-wide for a copy running in another user's session.
+AppMutex={#MyAppMutex},Global\{#MyAppMutex}
+; Windows is told the magnet: association changed, at install and uninstall.
+ChangesAssociations=yes
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
@@ -49,9 +71,9 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 ; before deciding to run an unsigned installer.
 VersionInfoVersion={#MyAppVersion}
 VersionInfoProductVersion={#MyAppVersion}
-VersionInfoProductName={#MyAppName}
+VersionInfoProductName={#MyAppDisplayName}
 VersionInfoCompany={#MyAppPublisher}
-VersionInfoDescription={#MyAppName} Setup
+VersionInfoDescription={#MyAppDisplayName} Setup
 VersionInfoCopyright=Copyright (C) {#MyAppPublisher}
 ArchitecturesInstallIn64BitMode=x64compatible
 ; The bundled app is a 64-bit build (PyInstaller + 64-bit Python, verified
@@ -90,7 +112,8 @@ Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 ; The whole PyInstaller output folder: the .exe and its _internal libraries.
-Source: "dist\Awesome Downloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; A ffmpeg.exe beside a test build's exe is skipped: ffmpeg comes from vendor\ below, once.
+Source: "dist\Awesome Downloader\*"; DestDir: "{app}"; Excludes: "\ffmpeg.exe"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "app_icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 ; Optional: bundle ffmpeg so users don't need to install it separately.
@@ -100,9 +123,9 @@ Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "vendor\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"
-Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; Tasks: desktopicon
+Name: "{group}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"
+Name: "{group}\Uninstall {#MyAppDisplayName}"; Filename: "{uninstallexe}"; IconFilename: "{app}\app_icon.ico"
+Name: "{autodesktop}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; Tasks: desktopicon
 
 [Registry]
 ; No PATH entry. This used to append {app} to the user's Path so the bundled
@@ -128,8 +151,11 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilen
 ; clicked once this is registered. The app receives the link as a command-
 ; line argument (see app/main_qt.py) and routes it straight into the Torrent
 ; tab's existing add-magnet flow.
+; Not uninsdeletekey: by the time of an uninstall another torrent client may
+; have taken magnet: over, and deleting the whole key would break it. The
+; uninstaller removes the key only if it still points here ([Code] below).
 Root: HKA; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: ""; \
-    ValueData: "URL:Magnet Link"; Flags: uninsdeletekey
+    ValueData: "URL:Magnet Link"
 Root: HKA; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: "URL Protocol"; \
     ValueData: ""
 Root: HKA; Subkey: "Software\Classes\magnet\DefaultIcon"; ValueType: string; ValueName: ""; \
@@ -139,7 +165,18 @@ Root: HKA; Subkey: "Software\Classes\magnet\shell\open\command"; ValueType: stri
 
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; runasoriginaluser: Setup runs as administrator, and without this the app it
+; launched ran as administrator too -- its browser, its downloads and its
+; files then belonged to the elevated account, not to whoever installed it.
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppDisplayName}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+
+[UninstallDelete]
+; What the app or the ffmpeg refresh may have added beside the installed
+; files. Never the whole {app}: it is whatever folder was chosen at install,
+; which could hold other things.
+Type: filesandordirs; Name: "{app}\_internal"
+Type: files; Name: "{app}\ffmpeg.exe"
+Type: dirifempty; Name: "{app}"
 
 [Code]
 // Best-effort only: downloads a fresh ffmpeg.exe over whatever build-day
@@ -204,10 +241,48 @@ end;
 //
 // But it left no way to remove it either, which is its own problem for
 // anyone actually leaving. So: asked once, at uninstall, defaulting to No.
+// What the app itself registered for the person using it, outside anything
+// Setup installed: magnet: links (Torrent tab, "Open magnet links with this
+// app") and Launch at Windows startup (Settings). Each is removed only if it
+// still points into this install -- if another torrent client has since
+// taken magnet: over, it keeps it.
+function PointsHere(Value: string): Boolean;
+begin
+  Result := Pos(Lowercase(AddBackslash(ExpandConstant('{app}'))), Lowercase(Value)) > 0;
+end;
+
+procedure RemoveMagnetHandler(RootKey: Integer);
+var
+  Command: string;
+begin
+  if RegQueryStringValue(RootKey, 'Software\Classes\magnet\shell\open\command', '', Command) and
+     PointsHere(Command) then
+    RegDeleteKeyIncludingSubkeys(RootKey, 'Software\Classes\magnet');
+  if RegQueryStringValue(RootKey, 'Software\Classes\AwesomeDownloader.Magnet\shell\open\command', '', Command) and
+     PointsHere(Command) then
+    RegDeleteKeyIncludingSubkeys(RootKey, 'Software\Classes\AwesomeDownloader.Magnet');
+end;
+
+procedure RemoveStartupEntry;
+var
+  Command: string;
+begin
+  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'AwesomeDownloader', Command) and
+     PointsHere(Command) then
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'AwesomeDownloader');
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: string;
 begin
+  if CurUninstallStep = usUninstall then
+  begin
+    RemoveMagnetHandler(HKCU);
+    RemoveMagnetHandler(HKLM);
+    RemoveStartupEntry;
+    exit;
+  end;
   if CurUninstallStep <> usPostUninstall then
     exit;
 
@@ -215,12 +290,14 @@ begin
   if not DirExists(DataDir) then
     exit;
 
-  if MsgBox('Also remove your Awesome Downloader data?' + #13#10 + #13#10 +
+  // Suppressible, answered No: a silent uninstall (/SILENT, /VERYSILENT)
+  // never stops to ask, and never deletes anyone's data.
+  if SuppressibleMsgBox('Also remove your Awesome Downloader data?' + #13#10 + #13#10 +
             'This deletes your settings, download history, browsing history, ' +
             'bookmarks, queued links, and any sites you signed in to inside ' +
             'the app''s browser.' + #13#10 + #13#10 +
             'Choose No to keep it all for a future reinstall.',
-            mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+            mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
   begin
     DelTree(DataDir, True, True, True);
   end;
