@@ -29,6 +29,11 @@
 #define MyAppRepo "https://github.com/shriguruphalle-cloud/awesome-downloader"
 ; The app holds this mutex while it runs (app/utils/single_instance.py).
 #define MyAppMutex "AwesomeDownloaderRunning"
+; The built app to pack. build_exe.bat builds into dist\; a build made
+; elsewhere is packed with  ISCC /DAppSource="that\folder" installer.iss
+#ifndef AppSource
+  #define AppSource "dist\Awesome Downloader"
+#endif
 
 [Setup]
 AppId={{B6E1B6C0-6D2F-4F1A-9C0A-1F1B2A9F1A11}}
@@ -113,7 +118,7 @@ Type: filesandordirs; Name: "{app}\_internal"
 [Files]
 ; The whole PyInstaller output folder: the .exe and its _internal libraries.
 ; A ffmpeg.exe beside a test build's exe is skipped: ffmpeg comes from vendor\ below, once.
-Source: "dist\Awesome Downloader\*"; DestDir: "{app}"; Excludes: "\ffmpeg.exe"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#AppSource}\*"; DestDir: "{app}"; Excludes: "\ffmpeg.exe"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "app_icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 ; Optional: bundle ffmpeg so users don't need to install it separately.

@@ -55,14 +55,6 @@ def nice_top(value, floor=FLOOR):
     return top * base
 
 
-def rate_label(value):
-    """A scale label: '512 KB/s', '2 MB/s', '2.5 MB/s'."""
-    for base, unit in ((GB, "GB"), (MB, "MB"), (KB, "KB")):
-        if value >= base:
-            return "%s %s/s" % (("%.2f" % (value / base)).rstrip("0").rstrip("."), unit)
-    return "%d B/s" % value
-
-
 def smooth_path(points):
     """A curve through `points` that never overshoots between them -- a
     monotone cubic (Fritsch-Carlson). A plain spline bulges past its points,

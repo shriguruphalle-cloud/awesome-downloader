@@ -11,13 +11,11 @@ bookmarks and home page -- everything that doesn't need a live web page.
   * the bookmarks panel lists every bookmark and opens one in a new tab;
   * the home page suggests the sites you visit, hides one you dismiss, and
     its wallpaper layers shift with the pointer only when parallax is on."""
-import time
-
 import _support
-from _support import build_window, check, pump, qapp, settle
+from _support import build_window, check, pump, qapp
 
 app = qapp()
-from PySide6.QtCore import QPoint, QPointF  # noqa: E402
+from PySide6.QtCore import QPoint  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
 
 from app.utils import browser_data  # noqa: E402
@@ -281,7 +279,7 @@ check(st["wallpaper"] == browser_home.DEFAULT_WALLPAPER, "removing the picture s
 check(not os.path.exists(os.path.join(browser_home.WALL_DIR, pid)), "a removed picture's file is still there")
 # A picture from before there could be several joins the list.
 from app.utils import browser_data as bd  # noqa: E402
-bd.set_home_background_image(pic)
+bd.set_pref("home_background_image", pic)   # how 2.4 kept its one picture
 bd.set_pref("home_wallpaper", "custom")
 st = home.state()
 check(len(st["pictures"]) == 2 and st["wallpaper"].startswith("pic:"), "the old single picture wasn't carried over")

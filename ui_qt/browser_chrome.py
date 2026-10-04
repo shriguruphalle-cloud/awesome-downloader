@@ -1221,11 +1221,10 @@ class AddressBar(QWidget):
     """The address and search field. Its left edge says how the page was
     reached (a lock for HTTPS, a warning for plain HTTP, a magnifier while
     typing); its right edge holds the page zoom -- only when it isn't 100%
-    -- and the bookmark star."""
+    -- and nothing else: the bookmark button is the toolbar's."""
 
     submitted = Signal(str)
     escaped = Signal()
-    star_clicked = Signal()
     site_clicked = Signal()
     zoom_reset = Signal()
 
@@ -1259,14 +1258,10 @@ class AddressBar(QWidget):
         self.zoom_chip.clicked.connect(self.zoom_reset)
         self.zoom_chip.hide()
         lay.addWidget(self.zoom_chip)
-        self.star_btn = ChromeButton("star", "Bookmark this page (Ctrl+D)", size=26, icon_size=16, parent=self)
-        self.star_btn.clicked.connect(self.star_clicked)
-        lay.addWidget(self.star_btn)
 
     def apply_theme(self, t, dark):
         self._t, self._dark = t, dark
-        for b in (self.site_btn, self.star_btn):
-            b.apply_theme(t)
+        self.site_btn.apply_theme(t)
         self.edit.setStyleSheet(
             f"QLineEdit {{ background: transparent; border: none; color: {t['text']};"
             f" selection-background-color: {t['selection']}; font-size: 13px; padding: 0 2px; }}")
@@ -1287,15 +1282,6 @@ class AddressBar(QWidget):
 
     def url(self):
         return self._url
-
-    def set_bookmarked(self, on):
-        self.star_btn.set_kind("star_filled" if on else "star")
-        self.star_btn.tint = self._t["accent"] if on else None
-        self.star_btn.set_tip("Edit bookmark (Ctrl+D)" if on else "Bookmark this page (Ctrl+D)")
-        self.star_btn.update()
-
-    def set_star_visible(self, visible):
-        self.star_btn.setVisible(visible)
 
     def set_zoom(self, factor):
         pct = round(factor * 100)
@@ -1574,26 +1560,6 @@ class GlassPopup(QWidget):
         self.show()
         motion.tween(self, 0.0, 1.0, motion.MEDIUM, lambda v: (
             self.setWindowOpacity(v), self.move(x, round(y - 6 * (1 - v)))))
-
-    def open_above(self, anchor, align="right"):
-        """As open_under, for an anchor near the bottom of the screen."""
-        self.adjustSize()
-        m = self.MARGIN
-        top_left = anchor.mapToGlobal(QPoint(0, 0))
-        if align == "right":
-            x = top_left.x() + anchor.width() - self.width() + m
-        else:
-            x = top_left.x() - m
-        y = top_left.y() - self.height() - 6 + m
-        screen = anchor.screen().availableGeometry() if anchor.screen() else None
-        if screen is not None:
-            x = max(screen.left() - m, min(x, screen.right() - self.width() + m))
-            y = max(screen.top() - m, y)
-        self.move(x, y + 6)
-        self.setWindowOpacity(0.0)
-        self.show()
-        motion.tween(self, 0.0, 1.0, motion.MEDIUM, lambda v: (
-            self.setWindowOpacity(v), self.move(x, round(y + 6 * (1 - v)))))
 
     def hideEvent(self, event):
         super().hideEvent(event)

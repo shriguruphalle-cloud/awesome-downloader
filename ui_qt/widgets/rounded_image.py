@@ -44,9 +44,6 @@ class RoundedImage(QWidget):
     def setAlignment(self, *_args):  # noqa: N802 -- always centred
         pass
 
-    def setScaledContents(self, *_args):  # noqa: N802 -- always covers
-        pass
-
     # ---- painting ----
     def _masked(self):
         dpr = self.devicePixelRatioF()

@@ -98,12 +98,6 @@ class _Glyph(QWidget):
         p.drawEllipse(QPointF(c.x() + r * 0.55, c.y() - r * 0.4), r * 0.18, r * 0.18)
 
     @staticmethod
-    def _draw_queue(p, c, r):
-        for i, w in enumerate((1.25, 1.05, 0.85)):
-            y = c.y() - r * 0.75 + i * r * 0.75
-            p.drawLine(QPointF(c.x() - r * w, y), QPointF(c.x() + r * w, y))
-
-    @staticmethod
     def _draw_link(p, c, r):
         for sign in (-1, 1):
             p.save()

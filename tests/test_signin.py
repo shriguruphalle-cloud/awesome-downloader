@@ -2,7 +2,7 @@
 source is chosen actually reaches yt-dlp -- for the fetch *and* the
 download."""
 import _support
-from _support import check, no_modal_dialogs, pump, qapp, settings
+from _support import check, no_modal_dialogs, qapp, settings
 
 qapp()
 from app.core import downloader

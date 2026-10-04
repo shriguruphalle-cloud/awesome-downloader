@@ -6,7 +6,7 @@ import os
 import re
 import threading
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,

@@ -93,10 +93,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Belt and braces: should anything ever pull Qt WebEngine back in, its
-REM debug-build resource copies (~77 MB) still don't ship.
-del /q "dist\Awesome Downloader\_internal\PySide6\resources\*.debug.pak" 2>nul
-del /q "dist\Awesome Downloader\_internal\PySide6\resources\*.debug.bin" 2>nul
+REM Leaves out the parts of Qt the app never loads (~46 MB: software OpenGL,
+REM Qt's translations, the PDF image plugin, the on-screen keyboard with its
+REM Qt Quick/QML) -- after checking that nothing left in the build links to
+REM any of it; if something does, it removes nothing and the build stops.
+".venv312\Scripts\python.exe" build_trim.py "dist\Awesome Downloader"
+if errorlevel 1 (
+    echo.
+    echo Trimming unused Qt parts failed -- see above.
+    pause
+    exit /b 1
+)
 
 REM Optional, no-op unless you actually have a code-signing certificate --
 REM SmartScreen's "unrecognized publisher" warning needs real code signing

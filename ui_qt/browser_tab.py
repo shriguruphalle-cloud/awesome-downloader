@@ -428,7 +428,7 @@ class BrowserTab(QWidget):
         self._panel = None
         self._watched_window = None
         self._dark = self._dark_mode()
-        self._t = theme.browser_tokens(accent=browser_data.get_browser_accent(), dark_mode=self._dark)
+        self._t = theme.tokens(dark_mode=self._dark)
         self.services = browser_engine.services()
         self.services.failed.connect(self._on_engine_failed)
         self.services.adguard_ready.connect(lambda ok: self._sync_shield())
@@ -551,7 +551,6 @@ class BrowserTab(QWidget):
         self.home_btn.clicked.connect(self.go_home)
         self.address.submitted.connect(lambda text: self.navigate(text))
         self.address.escaped.connect(self._focus_page)
-        self.address.star_clicked.connect(self.bookmark_current)
         self.address.zoom_reset.connect(lambda: self._set_zoom(1.0))
         self.download_btn.clicked.connect(self._send_current_to_video_tab)
         self.bookmarks_btn.clicked.connect(self._on_bookmark_button)
@@ -620,7 +619,7 @@ class BrowserTab(QWidget):
 
     def apply_theme(self):
         self._dark = self._dark_mode()
-        t = self._t = theme.browser_tokens(accent=browser_data.get_browser_accent(), dark_mode=self._dark)
+        t = self._t = theme.tokens(dark_mode=self._dark)
         for b in (self.back_btn, self.fwd_btn, self.reload_btn, self.home_btn, self.shield_btn, self.menu_btn,
                   self.bookmarks_btn):
             b.apply_theme(t)
@@ -1390,8 +1389,6 @@ class BrowserTab(QWidget):
         page = not tab.on_home
         self.address.set_url(tab.url if page else "")
         self.address.set_zoom(tab.zoom if page else 1.0)
-        # One bookmark control, the toolbar's (the address bar's star was a second).
-        self.address.set_star_visible(False)
         marked = page and browser_data.is_bookmarked(browser_data.load_bookmarks(), tab.url)
         self.bookmarks_btn.set_kind("bookmark_filled" if marked else "bookmark")
         self.bookmarks_btn.tint = self._t["brand"] if marked else None

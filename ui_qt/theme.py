@@ -140,20 +140,6 @@ LIGHT = {
     "scroll_handle_hover": "rgba(15, 35, 90, 70)",
 }
 
-# The Browser tab's optional warm grade (its home page has the toggle):
-# same glass, warmer whites. Same key set as DARK so it is a drop-in.
-WARM = dict(DARK, **{
-    "card_bg_solid": "rgba(26, 21, 18, 247)",
-    "card_border": "rgba(255, 236, 214, 28)",
-    "divider": "rgba(255, 236, 214, 18)",
-    "text": "#f4ede4",
-    "text_muted": "#b6a898",
-    "text_faint": "#8e8173",
-    "field_bg": "rgba(12, 8, 5, 120)",
-    "field_border": "rgba(255, 236, 214, 26)",
-})
-
-
 _resolved = {}
 
 
@@ -168,15 +154,6 @@ def tokens(dark_mode=True):
         t = dict(base, **overrides) if overrides else base
         _resolved[key] = t
     return t
-
-
-def browser_tokens(accent="classic", dark_mode=True):
-    """Same shape/keys as tokens(), with the Browser tab's optional warm
-    grade on top of the night Sapphire palette (the jewel palettes bring
-    their own warmth)."""
-    if accent == "warm" and dark_mode and palettes.current() == palettes.DEFAULT:
-        return WARM
-    return tokens(dark_mode=dark_mode)
 
 
 def qcolor(value):

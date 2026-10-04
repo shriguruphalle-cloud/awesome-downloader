@@ -3,6 +3,8 @@ build/
 dist/
 dist-test/
 build-test/
+dist-release/
+build-release/
 Output/
 *.spec
 *.log

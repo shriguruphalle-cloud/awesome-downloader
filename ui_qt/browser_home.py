@@ -344,11 +344,6 @@ class HomeView(QObject):
         if self.view is not None and self._loaded:
             self.view.post_json({"type": "active", "on": bool(active)})
 
-    def focus_search(self):
-        if self.view is not None and self._loaded:
-            self.view.focus_page()
-            self.view.post_json({"type": "focus"})
-
     def replay(self):
         """The rise-in animation once more (a new tab was opened)."""
         if self.view is not None and self._loaded:

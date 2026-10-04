@@ -18,8 +18,7 @@ from app.utils import single_instance, uninstall
 SYNCHRONIZE = 0x00100000
 kernel32 = ctypes.windll.kernel32
 kernel32.OpenMutexW.restype = ctypes.c_void_p
-check(not kernel32.OpenMutexW(SYNCHRONIZE, False, single_instance.RUNNING_MUTEX),
-      "the running mutex exists before the app holds it (is the app open?)")
+# (Not "absent before": an open copy of the app holds it too, as it should.)
 check(single_instance.hold_running_mutex(), "couldn't create the running mutex")
 for name in (single_instance.RUNNING_MUTEX, "Global\\" + single_instance.RUNNING_MUTEX):
     handle = kernel32.OpenMutexW(SYNCHRONIZE, False, name)

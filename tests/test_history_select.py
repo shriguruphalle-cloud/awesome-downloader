@@ -6,7 +6,7 @@ the machine's real Recycle Bin."""
 import os
 
 import _support
-from _support import settle, build_window, check, no_modal_dialogs, pump, qapp
+from _support import settle, build_window, check, pump, qapp
 
 app = qapp()
 from PySide6.QtWidgets import QMessageBox  # noqa: E402

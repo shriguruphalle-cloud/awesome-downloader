@@ -193,9 +193,9 @@ def remove_shortcut(url):
 
 
 def _load_prefs():
-    """A plain dict of small scalar Browser-tab preferences (accent
-    choice, home background image path) -- separate from the list-shaped
-    files above, which _load()/_save() assume."""
+    """A plain dict of small scalar Browser-tab preferences (the home page's
+    wallpaper and options, the bookmarks bar) -- separate from the
+    list-shaped files above, which _load()/_save() assume."""
     try:
         with open(PREFS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -216,32 +216,12 @@ def _save_prefs(prefs):
         logger.exception("Failed to save %s", PREFS_PATH)
 
 
-def get_browser_accent():
-    """"classic" (the default since 2.5: the same cinematic glass every other
-    tab uses) or "warm" (a warmer grade, chosen from the home page's
-    toggle). The default used to be "warm", which made the Browser the one
-    tab that didn't look like the rest of the app."""
-    return _load_prefs().get("accent", "classic")
-
-
-def set_browser_accent(name):
-    prefs = _load_prefs()
-    prefs["accent"] = name
-    _save_prefs(prefs)
-
-
 def get_home_background_image():
     """Absolute path to a user-picked home-page background image, or None
     for the plain theme background -- same idea as Chrome's new-tab-page
     customize-background."""
     path = _load_prefs().get("home_background_image")
     return path if path and os.path.exists(path) else None
-
-
-def set_home_background_image(path):
-    prefs = _load_prefs()
-    prefs["home_background_image"] = path
-    _save_prefs(prefs)
 
 
 def clear_home_background_image():

@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QWidget  # noqa: E402
 
 from ui_qt import theme  # noqa: E402
 from ui_qt.torrent_tab import TorrentTab  # noqa: E402
-from ui_qt.widgets.speed_graph import GraphCard, nice_top, rate_label, smooth_path  # noqa: E402
+from ui_qt.widgets.speed_graph import GraphCard, nice_top, smooth_path  # noqa: E402
 from ui_qt.widgets.stats_strip import StatsStrip  # noqa: E402
 
 KB, MB, GB = 1024, 1024 ** 2, 1024 ** 3
@@ -31,8 +31,6 @@ for value, want in ((0, 100 * KB), (50 * KB, 100 * KB), (300 * KB, 400 * KB), (9
                     (1.5 * GB, 2 * GB)):
     check(nice_top(value) == want, "a peak of %d B/s topped the scale at %d, not %d" % (
         value, nice_top(value), want))
-for value, want in ((512 * KB, "512 KB/s"), (2 * MB, "2 MB/s"), (2.5 * MB, "2.5 MB/s"), (300, "300 B/s")):
-    check(rate_label(value) == want, "%d B/s is labelled %r" % (value, rate_label(value)))
 
 # ---- a curve never bulges past its points ------------------------------------------
 path = smooth_path([QPointF(i * 10, y) for i, y in enumerate([50, 50, 10, 50, 50, 48, 50])])

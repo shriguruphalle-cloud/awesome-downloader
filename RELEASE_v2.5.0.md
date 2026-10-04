@@ -5,7 +5,7 @@ one window, no ads and no sign-up.
 
 ## Download
 
-**[AwesomeVideoDownloaderSetup.exe](../../releases/download/v2.5.0/AwesomeVideoDownloaderSetup.exe)** — 113 MB
+**[AwesomeVideoDownloaderSetup.exe](../../releases/download/v2.5.0/AwesomeVideoDownloaderSetup.exe)** — 103 MB
 
 Everything is bundled. FFmpeg, the torrent engine and the AdGuard ad blocker
 are included, so there is nothing else to install.
@@ -22,7 +22,7 @@ certutil -hashfile AwesomeVideoDownloaderSetup.exe SHA256
 ```
 
 ```
-A90E30C8703789CE99E6BD838DF2F72FC20B501CC0272AD401856C46C68D97A3
+7DD112958748158DE9F7C7B052DFAC288C57B5CB4D70B27436DCFFE945B6063F
 ```
 
 If the value differs, the download was cut short or altered — delete it and

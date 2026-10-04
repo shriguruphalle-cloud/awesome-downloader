@@ -1,6 +1,6 @@
 """About panel: the name, the version, that it's free and open source, what
 it's built on, and who made it."""
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QUrl
+from PySide6.QtCore import QPointF, QRectF, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 

@@ -1032,9 +1032,6 @@ void main() {
     } else if (msg.type === 'active') {
       windowActive = !!msg.on;
       if (live) { if (animateOn()) startLive(); else if (liveRaf) { cancelAnimationFrame(liveRaf); liveRaf = 0; } }
-    } else if (msg.type === 'focus') {
-      q.focus();
-      q.select();
     } else if (msg.type === 'replay' && !still) {
       // Shown again (a new tab): the column rises in once more.
       body.classList.remove('ready');
