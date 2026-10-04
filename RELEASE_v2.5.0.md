@@ -67,7 +67,9 @@ And the browser around it:
 - A **bookmark button** beside Download bookmarks the page you're on and
   puts it on the **bookmarks bar** (now shown by default), then lets you
   rename it, take it back out, or open **All bookmarks** — a panel of every
-  bookmark you can search, also one click away at the bar's end. A bookmark opens in a **new tab** (the page you're
+  bookmark you can search, also one click away at the bar's end.
+  Right-click any bookmark — on the bar or in All bookmarks — and choose
+  **Edit…** to change its name or its address, as in Chrome. A bookmark opens in a **new tab** (the page you're
   on stays put), switches to its tab if it's already open, and uses a blank
   New Tab rather than leaving one behind. Middle-click opens one behind.
 - A **close all tabs** button at the left of the tab strip (Ctrl+Shift+W),
@@ -142,7 +144,9 @@ the background.
 
 The name is set as the website sets it — *Awesome Downloader* in Instrument
 Serif, the second word in italic and lit in your palette — in the title bar
-and the About panel. The title bar is its own band of dark glass, set off
+and the About panel; in the title bar the lightning logo leads it, exactly
+as tall as the letters. Beside the window controls, a **coffee cup** opens
+the website's *Buy me a coffee*: PayPal in any currency, or UPI by QR. The title bar is its own band of dark glass, set off
 from the page by a fine rim of light and a soft shadow. The window controls are larger traffic-light
 dots in a glass capsule, centred on the title row and lined up with the
 pages' edge; hover them and they show what they do.
@@ -222,7 +226,8 @@ alongside yt-dlp's.
 
 Each torrent's card carries its **speed over the last minute** in its glass,
 behind everything on it: download as a faint line with a soft fill, upload
-as a faint dotted line, sliding by continuously — whether it's speeding up,
+as little spikes, one a second, rising as they come in — all of it sliding
+by continuously — whether it's speeding up,
 stalling or done is a shape you read at a glance. The scale only ever tops
 out at a round number, so a trickle draws as a trickle. On top, its speeds,
 how much is done, time left, time spent, peers and seeds, and share ratio;
@@ -262,10 +267,13 @@ an empty Torrent tab uses no time at all.
   back.
 - **The search-engine list on the home page was drawn under the shortcuts**
   and could be read through. It's above them, and solid.
-- **All bookmarks could open and vanish in a blink** when the page had the
-  keyboard: the window handed it back to the page on the click, and the
-  panel closed as the app lost focus. A click on the browser's own bars
-  now leaves the keyboard where it is.
+- **All bookmarks could open and vanish in a blink.** Building its list
+  briefly opened a stray window, which took the focus as it came and went,
+  and the panel closed with it. The list is built in place now. (A click on
+  the browser's own bars also leaves the keyboard where it is.) A new
+  download's card had the same stray-window flash, also gone.
+- **The All bookmarks button sat low and out of line** with the toolbar
+  above it; the bookmarks bar now lines up with the toolbar's buttons.
 - **Panels kept a navy title bar whatever the colour palette.** Settings,
   About, Updates and every other panel now take the palette's colour for
   their title bar, its text and their edge.

@@ -270,6 +270,28 @@ def draw_icon(p, kind, rect, color, weight=1.0):
         arc(12, 14, 8, 0, 180)
         poly((12, 14), (16, 9))
         dot(12, 14, 1.4)
+    elif kind == "coffee":
+        # The website's coffee cup: a mug, its handle, three wisps of steam.
+        cup = QPainterPath(pt(3.5, 9))
+        cup.lineTo(pt(16.5, 9))
+        cup.lineTo(pt(16.5, 16.5))
+        cup.arcTo(QRectF(pt(9.5, 13), pt(16.5, 20)), 0, -90)
+        cup.lineTo(pt(7, 20))
+        cup.arcTo(QRectF(pt(3.5, 13), pt(10.5, 20)), 270, -90)
+        cup.closeSubpath()
+        p.drawPath(cup)
+        handle = QPainterPath(pt(16.5, 10.5))
+        handle.lineTo(pt(17.5, 10.5))
+        handle.arcTo(QRectF(pt(14.5, 10.5), pt(20.5, 16.5)), 90, -180)
+        handle.lineTo(pt(16.5, 16.5))
+        p.drawPath(handle)
+        for x in (7, 10, 13):
+            poly((x, 3.2), (x, 5.8))
+    elif kind == "card":
+        p.drawRoundedRect(QRectF(pt(2.5, 5.5), pt(21.5, 18.5)), 2 * u, 2 * u)
+        poly((2.5, 10), (21.5, 10))
+        poly((6.5, 14.5), (8.5, 14.5))
+        poly((12, 14.5), (16, 14.5))
     p.restore()
 
 
@@ -1875,6 +1897,7 @@ class BookmarksPanel(GlassPopup):
 
     open_url = Signal(str, bool)        # url, in a background tab
     remove_requested = Signal(str)
+    edit_requested = Signal(str)
     bar_toggled = Signal(bool)
     add_current = Signal()
 
@@ -1943,13 +1966,17 @@ class BookmarksPanel(GlassPopup):
         self.scroll.setWidget(listing)
         rows_h = len(self.rows) * (_BookmarkRow.H + 1)
         self.scroll.setFixedHeight(max(1, min(self.MAX_LIST_H, rows_h)))
-        self.scroll.setVisible(bool(self.rows))
+        # Into the panel first, then shown or hidden: setVisible(True) on a
+        # widget with no parent yet opens it as a window of its own. That
+        # window flashed up for a few ms, took the activation, and Qt closed
+        # the panel as it went -- All bookmarks opened and shut in a blink.
         self.body.addWidget(self.scroll)
+        self.scroll.setVisible(bool(self.rows))
 
         self.empty = self.label("Nothing saved yet. Click the star in the address bar, or press "
                                 "Ctrl+D, to keep the page you're on here.", role="muted", px=12, wrap=True)
-        self.empty.setVisible(not self.rows)
         self.body.addWidget(self.empty)
+        self.empty.setVisible(not self.rows)
 
         self.body.addWidget(self.divider())
         bar_row = QHBoxLayout()
@@ -1986,6 +2013,8 @@ class BookmarksPanel(GlassPopup):
             lambda: (self.close(), self.open_url.emit(url, False)))
         menu.addAction("Open in background tab").triggered.connect(lambda: self.open_url.emit(url, True))
         menu.addSeparator()
+        # The editor is a window of its own: the panel closes first.
+        menu.addAction("Edit\u2026").triggered.connect(lambda: (self.close(), self.edit_requested.emit(url)))
 
         def remove():
             self.remove_requested.emit(url)
@@ -2197,9 +2226,18 @@ class BookmarksBar(QWidget):
 
     open_url = Signal(str, bool)       # url, in a background tab
     remove_requested = Signal(str)
+    edit_requested = Signal(str)
     all_clicked = Signal()
 
-    H = 32
+    # Lined up with the toolbar above it: the same side insets as its
+    # buttons, and the toolbar's own bottom margin repeated under the chips,
+    # so they sit midway between the address bar and the page's hairline
+    # (centred in a 32px bar they had 11px above and 2px below -- reported
+    # as misaligned, the All bookmarks pill hugging the line).
+    CHIP = 26
+    GAP = 8
+    LEFT, RIGHT = 8, 10
+    H = CHIP + GAP + 1
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2261,9 +2299,9 @@ class BookmarksBar(QWidget):
         self._layout()
 
     def _layout(self):
-        x = 8
-        y = (self.H - 26) // 2
-        self.all_btn.move(self.width() - 8 - self.all_btn.width(), (self.H - self.all_btn.height()) // 2)
+        x = self.LEFT
+        y = 0
+        self.all_btn.move(self.width() - self.RIGHT - self.all_btn.width(), y)
         right = self.all_btn.x() - 6
         limit = right - self.more_btn.width() - 4
         hidden = False
@@ -2276,9 +2314,9 @@ class BookmarksBar(QWidget):
                 hidden = True
                 chip.hide()
         self.more_btn.setVisible(hidden)
-        self.more_btn.move(right - self.more_btn.width(), (self.H - self.more_btn.height()) // 2)
+        self.more_btn.move(right - self.more_btn.width(), y + (self.CHIP - self.more_btn.height()) // 2)
         self.empty.adjustSize()
-        self.empty.move(12, (self.H - self.empty.height()) // 2)
+        self.empty.move(self.LEFT + 4, y + (self.CHIP - self.empty.height()) // 2)
 
     def _show_more(self):
         menu = style_menu(QMenu(self), self._t)
@@ -2293,6 +2331,7 @@ class BookmarksBar(QWidget):
         menu.addAction("Open in new tab").triggered.connect(lambda: self.open_url.emit(url, False))
         menu.addAction("Open in background tab").triggered.connect(lambda: self.open_url.emit(url, True))
         menu.addSeparator()
+        menu.addAction("Edit\u2026").triggered.connect(lambda: self.edit_requested.emit(url))
         menu.addAction("Remove bookmark").triggered.connect(lambda: self.remove_requested.emit(url))
         menu.exec(pos)
 

@@ -9,11 +9,18 @@ ui_qt/fonts so Qt can use them (NOTICE.md).
 Painted, not two QLabels, so the gradient and the glow can be drawn. It takes
 no mouse input: in the title bar it sits on the window's drag handle, and a
 press on the name should move the window.
+
+With `logo` (an image path) the lightning mark leads the name, as tall as
+the letters are -- from the top of the tallest one to the baseline -- and
+set off from "Awesome" by the same space that sets "Awesome" off from
+"Downloader", so the three read as one even line (flush against the letters
+it looked cramped; the old 24px icon sat a wide gap away).
 """
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPen
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter,
+                           QPainterPath, QPen)
 from PySide6.QtWidgets import QWidget
 
 FAMILY = "Instrument Serif"
@@ -25,7 +32,7 @@ def _mix(a, b, t):
 
 
 class Wordmark(QWidget):
-    def __init__(self, px=22, parent=None, **_old_style):
+    def __init__(self, px=22, parent=None, logo=None, **_old_style):
         super().__init__(parent)
         from .. import theme
         theme.load_custom_fonts()
@@ -45,8 +52,23 @@ class Wordmark(QWidget):
         self._gap = fm1.horizontalAdvance(" ") * 0.95
         self._w2 = fm2.horizontalAdvance("Downloader") + px * 0.12   # the italic leans out past its advance
         self._pad = max(4, int(px * 0.3))                             # room for the glow
-        self.setFixedSize(int(math.ceil(self._w1 + self._gap + self._w2 + self._pad * 2)),
+        # The letters' ink, relative to the baseline: what "as tall as the
+        # text" means for the logo.
+        ink = QPainterPath()
+        ink.addText(0, 0, self._f1, "Awesome")
+        ink.addText(self._w1 + self._gap, 0, self._f2, "Downloader")
+        self._ink_top = ink.boundingRect().top()
+        self._logo = QImage(logo) if logo else QImage()
+        self._logo_scaled = None
+        # Only the italic glows, on the right; the left needs no glow room,
+        # so a logo starts at the widget's edge.
+        self._x0 = self.logo_diameter() + self._gap if not self._logo.isNull() else self._pad
+        self.setFixedSize(int(math.ceil(self._x0 + self._w1 + self._gap + self._w2 + self._pad)),
                           int(math.ceil(max(fm1.height(), fm2.height()) + self._pad)))
+
+    def logo_diameter(self):
+        """The logo's size: the letters' height, baseline to the tallest top."""
+        return -self._ink_top
 
     def set_colors(self, text, brand, dark, second=None):
         """`second`: the palette's second light, for the far end of the gradient."""
@@ -66,7 +88,7 @@ class Wordmark(QWidget):
         return (self.height() - fm.height()) / 2.0 + fm.ascent()
 
     def _gradient(self):
-        x0 = self._pad + self._w1 + self._gap
+        x0 = self._x0 + self._w1 + self._gap
         g = QLinearGradient(x0, 0, x0 + self._w2, self.height() * 0.35)
         hi = _mix(self._brand, QColor(255, 255, 255), 0.4 if self._dark else 0.12)
         g.setColorAt(0.0, hi)
@@ -85,7 +107,7 @@ class Wordmark(QWidget):
         p.scale(dpr, dpr)
         p.setFont(self._f2)
         p.setPen(QPen(QBrush(self._gradient()), 1))
-        p.drawText(QPointF(self._pad + self._w1 + self._gap, self._baseline()), "Downloader")
+        p.drawText(QPointF(self._x0 + self._w1 + self._gap, self._baseline()), "Downloader")
         p.end()
         small = img.scaled(max(1, img.width() // 6), max(1, img.height() // 6),
                            Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -104,14 +126,33 @@ class Wordmark(QWidget):
             p.drawImage(QPointF(0, 0), self._glow_image())
             p.setOpacity(1.0)
         y = self._baseline()
+        if not self._logo.isNull():
+            p.drawImage(self.logo_rect(), self._logo_image())
         p.setFont(self._f1)
         p.setPen(self._text)
-        p.drawText(QPointF(self._pad, y), "Awesome")
+        p.drawText(QPointF(self._x0, y), "Awesome")
         p.setFont(self._f2)
         p.setPen(QPen(QBrush(self._gradient()), 1))
-        p.drawText(QPointF(self._pad + self._w1 + self._gap, y), "Downloader")
+        p.drawText(QPointF(self._x0 + self._w1 + self._gap, y), "Downloader")
         p.end()
+
+    def logo_rect(self):
+        """Where the logo is: from the letters' top down to the baseline."""
+        if self._logo.isNull():
+            return QRectF()
+        d = self.logo_diameter()
+        return QRectF(0, self._baseline() + self._ink_top, d, d)
+
+    def _logo_image(self):
+        """The logo, scaled once for this screen (smooth, not per paint)."""
+        dpr = self.devicePixelRatioF()
+        side = max(1, round(self.logo_diameter() * dpr))
+        if self._logo_scaled is None or self._logo_scaled.width() != side:
+            self._logo_scaled = self._logo.scaled(side, side, Qt.AspectRatioMode.IgnoreAspectRatio,
+                                                  Qt.TransformationMode.SmoothTransformation)
+            self._logo_scaled.setDevicePixelRatio(dpr)
+        return self._logo_scaled
 
     def text_rect(self):
         """Where the letters are, without the glow margin."""
-        return QRectF(self._pad, 0, self._w1 + self._gap + self._w2, self.height())
+        return QRectF(self._x0, 0, self._w1 + self._gap + self._w2, self.height())

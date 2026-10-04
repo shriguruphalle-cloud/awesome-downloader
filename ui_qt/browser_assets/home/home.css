@@ -358,33 +358,31 @@ body.private .kdot { background: var(--brand-2); box-shadow: 0 0 10px var(--bran
 .rc .h { font: 400 10.5px/1.2 var(--mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- the corner links: the website, and the source -------------------- */
-.links { position: fixed; left: 22px; bottom: 22px; z-index: 5; display: flex; gap: 8px; }
+.links { position: fixed; left: 22px; bottom: 22px; z-index: 5; display: flex; gap: 6px; }
 .site {
-  display: inline-flex; align-items: center; gap: 9px;
-  height: 36px; padding: 0 12px 0 15px;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 10px 0 12px;
   text-decoration: none; cursor: pointer; color: var(--text);
   transition: border-color .25s var(--ease), background .25s var(--ease), transform .4s var(--ease);
 }
-.site-name { font: 400 17px/1 var(--display); letter-spacing: -.01em; white-space: nowrap; }
+.site-name { font: 400 15px/1 var(--display); letter-spacing: -.01em; white-space: nowrap; }
 .site-name em {
   font-style: italic;
   background: linear-gradient(102deg, var(--brand-hi) 0%, var(--brand) 45%, var(--brand-2) 100%);
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
-.site svg { width: 14px; height: 14px; color: var(--muted); transition: transform .35s var(--ease), color .25s; }
+.site svg { width: 12px; height: 12px; color: var(--muted); transition: transform .35s var(--ease), color .25s; }
 .site:hover { border-color: var(--brd-hi); background: var(--glass-hi); transform: translateY(-1px); }
 .site:hover svg { color: var(--text); transform: translate(2px, -2px); }
 .oss {
-  display: inline-flex; align-items: center; gap: 9px;
-  height: 36px; padding: 0 14px 0 13px;
-  font: 500 10.5px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 30px; padding: 0 12px 0 11px;
+  font: 500 10px/1 var(--mono); letter-spacing: .07em; text-transform: uppercase;
   color: var(--faint); text-decoration: none; cursor: pointer;
   transition: color .25s var(--ease), border-color .25s var(--ease), background .25s var(--ease);
 }
 .oss .kdot { width: 5px; height: 5px; }
-.oss .oss-sep { padding-left: 9px; border-left: 1px solid var(--brd); color: var(--muted); }
 .oss:hover { color: var(--text); border-color: var(--brd-hi); background: var(--glass-hi); }
-.oss:hover .oss-sep { color: var(--brand-hi); }
 body.private .links { display: none; }
 @media (max-width: 860px) { .oss { display: none; } }
 @media (max-width: 620px) { .links { display: none; } }

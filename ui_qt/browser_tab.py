@@ -71,6 +71,16 @@ def normalize_address(text):
     return browser_data.search_url(text)
 
 
+def bookmark_address(text):
+    """What's typed in a bookmark's URL box, as an address -- "example.com"
+    becomes https://example.com -- or None if it isn't one (no searches:
+    a bookmark points at a page)."""
+    url = normalize_address(text)
+    if url is None or url == browser_data.search_url((text or "").strip()):
+        return None
+    return url
+
+
 def _host(url):
     try:
         return (urlparse(url).hostname or "").lower()
@@ -505,6 +515,7 @@ class BrowserTab(QWidget):
         self.bookmarks_bar = BookmarksBar()
         self.bookmarks_bar.open_url.connect(self._open_bookmark)
         self.bookmarks_bar.remove_requested.connect(self._remove_bookmark)
+        self.bookmarks_bar.edit_requested.connect(self.edit_bookmark)
         self.bookmarks_bar.all_clicked.connect(lambda: self._show_bookmarks_panel(self.bookmarks_bar.all_btn))
         # On by default: a bookmark you can't see anywhere reads as one that
         # didn't save (reported as "the bookmark button doesn't work").
@@ -1531,6 +1542,26 @@ class BrowserTab(QWidget):
         browser_data.remove_bookmark(url)
         self._bookmarks_changed()
 
+    def edit_bookmark(self, url, dialog=None):
+        """Chrome's Edit...: the bookmark's name and address in a small
+        dialog, saved in place. `dialog` is for tests (anything with exec()
+        and values()). Returns whether it changed."""
+        item = next((b for b in browser_data.load_bookmarks() if b.get("url") == url), None)
+        if item is None:
+            return False
+        if dialog is None:
+            from .dialogs.bookmark_dialog import EditBookmarkDialog
+            dialog = EditBookmarkDialog(self.window(), item.get("title") or url, url,
+                                        dark_mode=self._dark, normalize=bookmark_address)
+        if not dialog.exec():
+            return False
+        title, new_url = dialog.values()
+        if not new_url or (title == item.get("title") and new_url == url):
+            return False
+        browser_data.update_bookmark(url, new_url, title)
+        self._bookmarks_changed()
+        return True
+
     def _bookmarks_changed(self):
         self._sync_toolbar()
         self._refresh_completer()
@@ -1576,6 +1607,7 @@ class BrowserTab(QWidget):
                                bar_visible=self.bookmarks_bar.isVisible(), can_add=page, added=added)
         panel.open_url.connect(self._open_bookmark)
         panel.remove_requested.connect(self._remove_bookmark)
+        panel.edit_requested.connect(self.edit_bookmark)
         panel.add_current.connect(self.bookmark_current)
         panel.bar_toggled.connect(lambda on: self._toggle_bookmarks_bar() if on != self.bookmarks_bar.isVisible()
                                   else None)

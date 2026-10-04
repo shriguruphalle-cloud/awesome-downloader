@@ -65,6 +65,24 @@ def add_bookmark(url, title):
     return bookmarks
 
 
+def update_bookmark(old_url, url, title):
+    """A bookmark renamed and/or pointed somewhere else, in place: it keeps
+    its spot in the list. If the new address is already another bookmark,
+    that one goes -- one bookmark per address."""
+    url = (url or "").strip()
+    bookmarks = load_bookmarks()
+    if not url or not is_bookmarked(bookmarks, old_url):
+        return bookmarks
+    out = []
+    for b in bookmarks:
+        if b.get("url") == old_url:
+            out.append(dict(b, url=url, title=(title or "").strip() or url))
+        elif b.get("url") != url:
+            out.append(b)
+    _save(BOOKMARKS_PATH, out)
+    return out
+
+
 def remove_bookmark(url):
     bookmarks = [b for b in load_bookmarks() if b.get("url") != url]
     _save(BOOKMARKS_PATH, bookmarks)

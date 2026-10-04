@@ -2,8 +2,10 @@
 
 The torrent's own card carries the graph in its glass, behind everything on
 it, the way the first version ran its graph behind the row: download as a
-faint line with a soft fill under it, upload as a faint dotted line, sliding
-by continuously and ending in a small dot at "now". It is a shape to read at
+faint line with a soft fill under it, ending in a small dot at "now"; upload
+as little spikes, one for each second's rate, that rise out of the floor as
+they come in at the right edge (a plain dotted line read as lifeless --
+asked for spikes). Everything slides by continuously. It is a shape to read at
 a glance -- speeding up, stalling, done -- with the exact numbers in the row's
 own columns on top of it. (A graph in a box of its own beside the numbers
 was reported as ugly; this is the background it asked for.)
@@ -34,6 +36,7 @@ FLOOR = 100 * 1024      # the scale's least peak
 KB, MB, GB = 1024, 1024 ** 2, 1024 ** 3
 IDLE_BELOW = 512        # under 0.5 KB/s throughout is "nothing moving"
 TOP_GAP = 36            # the graph starts under the card's title line
+SPIKE_GROW_S = 0.5      # how long a new upload spike takes to rise
 
 
 def nice_top(value, floor=FLOOR):
@@ -206,29 +209,59 @@ def paint_trace(p, area, trace, now, dark):
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         p.strokePath(curve, pen)
-    if any(v >= IDLE_BELOW for _, v in series[1]):
-        dotted = QColor(up_c)
-        dotted.setAlphaF(0.55 if dark else 0.6)
-        pen = QPen(dotted, 1.5)
-        pen.setDashPattern([0.6, 2.8])
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.strokePath(smooth_path([QPointF(x, y_of(v)) for x, v in series[1]]), pen)
-    # Where each line is now: a small dot at the right edge, breathing.
+    spikes = upload_spikes(area, trace, now, y_of)
+    if not spikes.isEmpty():
+        grad = QLinearGradient(0, area.top(), 0, area.bottom())
+        tip, foot = QColor(up_c), QColor(up_c)
+        tip.setAlphaF(0.75 if dark else 0.8)
+        foot.setAlphaF(0.32 if dark else 0.34)
+        grad.setColorAt(0, tip)
+        grad.setColorAt(1, foot)
+        p.fillPath(spikes, grad)
+    # Where download is now: a small dot at the right edge, breathing.
     pulse = 0.5 + 0.5 * math.sin(now * 2 * math.pi / 1.8)
-    for points, color in ((series[0], down_c), (series[1], up_c)):
-        v = trace.value_at_x(points, area.right())
-        if v is None or v < IDLE_BELOW:
-            continue
+    v = trace.value_at_x(series[0], area.right())
+    if v is not None and v >= IDLE_BELOW:
         c = QPointF(area.right(), y_of(v))
-        halo = QColor(color)
+        halo = QColor(down_c)
         halo.setAlphaF(0.10 + 0.10 * pulse)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(halo)
         p.drawEllipse(c, 5.5 + 1.2 * pulse, 5.5 + 1.2 * pulse)
-        dot = QColor(color)
+        dot = QColor(down_c)
         dot.setAlphaF(0.85)
         p.setBrush(dot)
         p.drawEllipse(c, 2.6, 2.6)
+
+
+def upload_spikes(area, trace, now, y_of):
+    """Upload as a row of slim spikes: one per sample (a second apart), as
+    tall as that second's rate, on the same scale as download. Raw rates,
+    not eased -- a spike is meant to be spiky. Each one rises out of the
+    floor over SPIKE_GROW_S as it comes in at the right edge."""
+    path = QPainterPath()
+    spacing = area.width() / WINDOW_S            # px between seconds
+    half = max(0.9, min(2.2, spacing * 0.17))    # half the spike's base
+    floor = area.bottom() + 1
+    for t, _down, up in trace.samples:
+        if up < IDLE_BELOW:
+            continue
+        x = trace.x_of(t, now, area)
+        if not (area.left() - half <= x <= area.right() + half):
+            continue
+        age = now - LAG_S - t                    # 0 at the right edge
+        if age <= 0:
+            continue
+        rise = min(1.0, age / SPIKE_GROW_S)
+        rise = 1.0 - (1.0 - rise) ** 3           # ease out
+        tip = floor - (floor - y_of(up)) * rise
+        if floor - tip < 1.0:
+            continue
+        path.moveTo(x - half, floor)
+        path.lineTo(x, tip)
+        path.lineTo(x + half, floor)
+        path.closeSubpath()
+    return path
 
 
 class _Clock(QObject):

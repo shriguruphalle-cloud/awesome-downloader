@@ -12,6 +12,9 @@ APP_PUBLISHER = "Shriguru Phalle"  # kept in sync with installer.iss's MyAppPubl
 GITHUB_REPO = "shriguruphalle-cloud/awesome-downloader"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 WEBSITE = "https://awesome-downloader.pages.dev"
+# The website's "Buy me a coffee": PayPal, and UPI by QR (ui_qt/assets/upi-qr.svg,
+# the website's own QR file).
+DONATE_PAYPAL = "https://www.paypal.com/ncp/payment/GTSR32T7LPR9N"
 
 IS_FROZEN = getattr(sys, "frozen", False)  # True when running as a PyInstaller .exe
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # hides console flashes on Windows

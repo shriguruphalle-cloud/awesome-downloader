@@ -100,7 +100,6 @@ class DownloadCard(_PaintedCard):
         self.pause_btn.setObjectName("historyPlain")
         self.pause_btn.setCursor(Qt.PointingHandCursor)
         self.pause_btn.clicked.connect(self._handle_pause_toggle)
-        self.pause_btn.setVisible(self._on_pause_toggle is not None)
         btn_col.addWidget(self.pause_btn)
         # Hidden until a failure -- a stuck/failed download's only way
         # forward besides dismissing it entirely (Chrome's own downloads
@@ -119,6 +118,9 @@ class DownloadCard(_PaintedCard):
         top.addLayout(btn_col)
 
         root.addLayout(top)
+        # Only now, with the card its parent: a widget with no parent yet
+        # that is made visible opens as a window of its own, for a flash.
+        self.pause_btn.setVisible(self._on_pause_toggle is not None)
 
         bar_row = QHBoxLayout()
         bar_row.setSpacing(10)

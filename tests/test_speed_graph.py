@@ -110,6 +110,25 @@ img = render()
 peak_alpha_like = max(QColor.fromRgba(img.pixel(x, yy)).blue() for yy in range(int(area.top()), int(area.bottom())))
 check(peak_alpha_like < 235, "the graph is drawn at full strength (blue %d)" % peak_alpha_like)
 
+# ---- upload: a spike a second, rising as it comes in ---------------------------------
+from ui_qt.widgets.speed_graph import LAG_S, SPIKE_GROW_S, upload_spikes  # noqa: E402
+feed(0, 2 * MB, seconds=10)
+area = card.graph_area()
+now = card.trace.samples[-1][0] + LAG_S + 0.1          # the newest spike has just come in
+y_of = lambda v: area.bottom() - min(v / card.trace.top, 1.04) * area.height()  # noqa: E731
+path = upload_spikes(area, card.trace, now, y_of)
+polys = path.toSubpathPolygons()
+check(len(polys) == 10, "10 seconds of upload drew %d spikes" % len(polys))
+newest = max(polys, key=lambda p: p.boundingRect().x()).boundingRect().height()
+grown = min(polys, key=lambda p: p.boundingRect().x()).boundingRect().height()
+check(newest < grown * 0.8, "a spike just in is already full height (%.1f vs %.1f)" % (newest, grown))
+later = upload_spikes(area, card.trace, now + SPIKE_GROW_S, y_of)
+newest_later = max(later.toSubpathPolygons(), key=lambda p: p.boundingRect().x()).boundingRect().height()
+check(abs(newest_later - grown) < 1.5, "a spike didn't finish rising (%.1f vs %.1f)" % (newest_later, grown))
+feed(0, 0, seconds=10)
+check(upload_spikes(area, card.trace, now, y_of).isEmpty(), "no upload still drew spikes")
+print("upload: %d spikes, the newest rising (%.0f of %.0f px)" % (len(polys), newest, grown))
+
 # ---- the tab feeds each row's card ------------------------------------------------
 owner = types.SimpleNamespace(_estimate_eta=lambda status: "--", _files_finish_time=lambda h, p: None)
 row = {"stats": StatsStrip(), "graph": GraphCard(), "active_s": 0.0, "took_s": None, "finished_at": None,

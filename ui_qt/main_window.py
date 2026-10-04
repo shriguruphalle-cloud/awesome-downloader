@@ -1291,14 +1291,17 @@ class MainWindow(FramelessMainWindow):
         topbar_layout.setSpacing(10)
         self._topbar_layout = topbar_layout
 
+        # The lightning logo and the name in the website's serif, one painted
+        # piece (widgets/wordmark.py): the logo as tall as the letters, right
+        # against them. When the row is too narrow for the name, the logo
+        # stays on its own, the same size.
+        self._wordmark = Wordmark(px=23, logo=ICON_PNG_PATH)
+        d = max(1, round(self._wordmark.logo_diameter()))
         self._logo_label = QLabel()
-        self._logo_label.setFixedSize(24, 24)
+        self._logo_label.setFixedSize(d, d)
         self._set_logo_pixmap()
+        self._logo_label.hide()
         topbar_layout.addWidget(self._logo_label)
-
-        # The name in the website's serif (widgets/wordmark.py); the lightning
-        # mark stands in for it only when the row is too narrow for the name.
-        self._wordmark = Wordmark(px=23)
         topbar_layout.addWidget(self._wordmark)
         # Kept as names for anything still reading them; the wordmark is one
         # painted widget now.
@@ -1340,6 +1343,17 @@ class MainWindow(FramelessMainWindow):
         for btn in (self.settings_btn, self.theme_btn, self.update_btn, self.about_btn):
             tray_layout.addWidget(btn)
         topbar_layout.addWidget(self._action_tray)
+
+        # Donate: a coffee cup in a little glass disc of its own, between the
+        # tray and the caption dots -- the website's "Buy me a coffee".
+        self._donate_capsule = _GlassCapsule()
+        self._donate_capsule.setFixedSize(_NAV_H, _NAV_H)
+        donate_layout = QHBoxLayout(self._donate_capsule)
+        donate_layout.setContentsMargins(3, 3, 3, 3)
+        self.donate_btn = _IconButton("Buy me a coffee -- support Awesome Downloader")
+        self.donate_btn.clicked.connect(self.open_donate)
+        donate_layout.addWidget(self.donate_btn)
+        topbar_layout.addWidget(self._donate_capsule)
 
         # Left margin matches the content's, so the logo starts on the same
         # vertical line as the panels below it. The right margin is the
@@ -1384,7 +1398,7 @@ class MainWindow(FramelessMainWindow):
         if not os.path.exists(ICON_PNG_PATH):
             return
         dpr = max(1.0, self.devicePixelRatioF())
-        size = int(round(24 * dpr))
+        size = int(round(self._logo_label.width() * dpr))
         pixmap = QPixmap(ICON_PNG_PATH).scaled(
             size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         pixmap.setDevicePixelRatio(dpr)
@@ -1450,7 +1464,16 @@ class MainWindow(FramelessMainWindow):
     def action_buttons(self):
         """Every control in the title row's action area, in order."""
         return [self.update_pill, self.settings_btn, self.theme_btn,
-                self.update_btn, self.about_btn]
+                self.update_btn, self.about_btn, self.donate_btn]
+
+    def open_donate(self):
+        """The donate panel, dropping from the coffee button: PayPal, or UPI
+        by QR -- what the website's "Buy me a coffee" offers."""
+        from .dialogs.donate_panel import DonatePanel
+        t = theme.tokens(dark_mode=self.dark_mode)
+        panel = DonatePanel(self, t, self.dark_mode)
+        panel.open_under(self.donate_btn)
+        return panel
 
     # ------------------------------------------------------------ panels ---
     def open_panel(self, name):
@@ -1596,10 +1619,12 @@ class MainWindow(FramelessMainWindow):
         self.theme_btn.setIcon(_theme_glyph_icon(muted, moon=self.dark_mode, size=16))
         self.update_btn.setIcon(_updates_glyph_icon(muted))
         self.about_btn.setIcon(_about_glyph_icon(muted))
+        from .browser_chrome import icon as line_icon
+        self.donate_btn.setIcon(line_icon("coffee", muted, 16))
         tip = "Switch to light theme" if self.dark_mode else "Switch to dark theme"
         self.theme_btn.setToolTip(tip)
         self.theme_btn.setAccessibleName(tip)
-        for w in (self._island, self._action_tray, self.update_pill, *self._tab_buttons):
+        for w in (self._island, self._action_tray, self._donate_capsule, self.update_pill, *self._tab_buttons):
             w.update()
         self.titleBar.refresh_caption(getattr(self, "_nc_hover_btn", None))
 
@@ -1785,7 +1810,8 @@ class MainWindow(FramelessMainWindow):
 
     def _fit_title_row(self):
         """Drops the wordmark, and then the update pill, when the row can't
-        hold everything beside the caption chips. Measured each time rather
+        hold everything beside the caption chips. The logo always shows: in
+        the wordmark, or on its own once the name has gone. Measured each time rather
         than set at a fixed window width, so it stays right whatever the
         labels, the font or the display scaling turn out to be."""
         row = getattr(self, "_topbar_layout", None)
@@ -1794,7 +1820,7 @@ class MainWindow(FramelessMainWindow):
         margins = row.contentsMargins()
         room = self.width() - margins.left() - margins.right()
         spacing = row.spacing()
-        fixed = [self._island, self._action_tray]
+        fixed = [self._island, self._action_tray, self._donate_capsule]
         # The two stretches either side of the nav are layout items too, and
         # each one costs a spacing gap even at zero width.
         need = sum(w.sizeHint().width() for w in fixed) + spacing * (len(fixed) + 2 - 1)
