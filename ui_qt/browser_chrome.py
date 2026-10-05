@@ -1360,15 +1360,28 @@ class AddressBar(QWidget):
 class NowPlaying(QWidget):
     """What's playing in any tab, with play/pause (and next/previous on the
     sites the page script knows how to drive). Click it to go to that tab.
-    From the media control in the user's own browser project."""
+    From the media control in the user's own browser project.
+
+    At rest it is compact -- the equalizer, the start of the title and
+    play/pause, about half its old width (asked for: it took a big bite out
+    of the address bar). Under the pointer it opens to the full title,
+    next/previous and mute. A thin line along its foot shows how far through
+    the track is; the wheel skips 10 s back or forward; right-click for the
+    rest (go to the tab, mute, download it, close the tab)."""
 
     activated = Signal()
     toggle_clicked = Signal()
     next_clicked = Signal()
     prev_clicked = Signal()
+    mute_clicked = Signal()
+    seek_requested = Signal(int)     # seconds, + or -
+    download_clicked = Signal()
+    close_clicked = Signal()
 
+    SKIP_S = 10
     H = 30
-    TEXT_MAX = 150
+    TEXT_MAX = 150          # open, under the pointer
+    TEXT_COMPACT = 56       # at rest
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1384,15 +1397,28 @@ class NowPlaying(QWidget):
         self.prev_btn = ChromeButton("prev", "Previous", size=22, icon_size=11, parent=self)
         self.play_btn = ChromeButton("pause", "Pause", size=22, icon_size=11, parent=self)
         self.next_btn = ChromeButton("next", "Next", size=22, icon_size=11, parent=self)
+        self.mute_btn = ChromeButton("speaker", "Mute tab", size=22, icon_size=12, parent=self)
         self.prev_btn.clicked.connect(self.prev_clicked)
         self.play_btn.clicked.connect(self.toggle_clicked)
         self.next_btn.clicked.connect(self.next_clicked)
+        self.mute_btn.clicked.connect(self.mute_clicked)
+        self._muted = False
+        self._playing = False
+        self._pos = self._dur = 0.0
+        self._pos_at = 0.0
+        self._ticks = 0
+        self._expanded = False
+        self._can_skip = False
+        self._collapse = QTimer(self)
+        self._collapse.setSingleShot(True)
+        self._collapse.setInterval(350)
+        self._collapse.timeout.connect(self._maybe_collapse)
         self.setFixedWidth(0)
         self.hide()
 
     def apply_theme(self, t):
         self._t = t
-        for b in (self.prev_btn, self.play_btn, self.next_btn):
+        for b in (self.prev_btn, self.play_btn, self.next_btn, self.mute_btn):
             b.apply_theme(t)
         self.update()
 
@@ -1411,24 +1437,58 @@ class NowPlaying(QWidget):
                              lambda: self.hide() if self._media is None else None)
             return
         playing = bool(media.get("playing"))
+        self._playing = playing
+        self._pos = float(media.get("position") or 0)
+        self._dur = float(media.get("duration") or 0)
+        self._pos_at = time.monotonic()
         self.play_btn.set_kind("pause" if playing else "play")
         self.play_btn.set_tip("Pause" if playing else "Play")
-        skip = bool(media.get("canSkip"))
-        self.prev_btn.setVisible(skip)
-        self.next_btn.setVisible(skip)
-        self.setToolTip(" -- ".join(x for x in (media.get("title"), media.get("artist")) if x))
+        self._can_skip = bool(media.get("canSkip"))
+        self._show_skip()
+        self.setToolTip(" -- ".join(x for x in (media.get("title"), media.get("artist")) if x)
+                        + "\nClick: go to the tab  ·  wheel: skip %d s  ·  right-click: more" % self.SKIP_S)
         if playing and not motion.reduced():
             self._eq.start()
         else:
             self._eq.stop()
-        target = self._natural_width()
-        self._layout_buttons(target)
         if not self.isVisible():
             self.setFixedWidth(0)
             self.show()
+        self._refit()
+
+    def _show_skip(self):
+        skip = self._can_skip and self._expanded
+        self.prev_btn.setVisible(skip)
+        self.next_btn.setVisible(skip)
+        self.mute_btn.setVisible(self._expanded)
+
+    def set_muted(self, muted):
+        self._muted = bool(muted)
+        self.mute_btn.set_kind("mute" if self._muted else "speaker")
+        self.mute_btn.set_tip("Unmute tab" if self._muted else "Mute tab")
+
+    def progress(self):
+        """How far through the track, 0..1, or None when the page gives no
+        length (a live stream)."""
+        if self._dur <= 1:
+            return None
+        pos = self._pos + (time.monotonic() - self._pos_at if self._playing else 0.0)
+        return max(0.0, min(1.0, pos / self._dur))
+
+    def _refit(self):
+        target = self._natural_width()
+        self._layout_buttons(target)
         if self.width() != target:
             motion.tween(self, self.width(), target, motion.MEDIUM, lambda v: self.setFixedWidth(round(v)))
         self.update()
+
+    def _maybe_collapse(self):
+        if self.underMouse() or not self._expanded:
+            return
+        self._expanded = False
+        self._show_skip()
+        if self._media is not None:
+            self._refit()
 
     def _text(self):
         m = self._media or {}
@@ -1436,16 +1496,18 @@ class NowPlaying(QWidget):
 
     def _natural_width(self):
         fm = QFontMetricsF(_font(self, 12, QFont.Weight.Medium))
-        text_w = min(self.TEXT_MAX, fm.horizontalAdvance(self._text()) + 2)
-        buttons = 22 + (2 * 24 if (self._media or {}).get("canSkip") else 0)
+        cap = self.TEXT_MAX if self._expanded else self.TEXT_COMPACT
+        text_w = min(cap, fm.horizontalAdvance(self._text()) + 2)
+        buttons = 22 + (2 * 24 if self._can_skip and self._expanded else 0) + (24 if self._expanded else 0)
         return round(10 + 16 + 8 + text_w + 6 + buttons + 5)
 
     def _layout_buttons(self, width):
         x = width - 5 - 22
         y = (self.H - 22) // 2
-        if self.next_btn.isVisibleTo(self):
-            self.next_btn.move(x, y)
-            x -= 24
+        for btn in (self.mute_btn, self.next_btn):
+            if btn.isVisibleTo(self):
+                btn.move(x, y)
+                x -= 24
         self.play_btn.move(x, y)
         x -= 24
         if self.prev_btn.isVisibleTo(self):
@@ -1460,14 +1522,55 @@ class NowPlaying(QWidget):
 
     def _tick(self):
         self._phase += 0.35
-        self.update(QRect(0, 0, 30, self.H))
+        self._ticks += 1
+        if self._ticks % 10 == 0 and self._dur > 1:
+            self.update()             # the progress line, twice a second
+        else:
+            self.update(QRect(0, 0, 30, self.H))
+
+    def wheelEvent(self, event):
+        dy = event.angleDelta().y()
+        if self._media is not None and self._dur > 1 and dy:
+            self.seek_requested.emit(self.SKIP_S if dy > 0 else -self.SKIP_S)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def contextMenuEvent(self, event):
+        if self._media is None:
+            return
+        menu = style_menu(QMenu(self), self._t)
+        menu.addAction("Go to the tab").triggered.connect(lambda: self.activated.emit())
+        menu.addSeparator()
+        menu.addAction("Pause" if self._playing else "Play").triggered.connect(lambda: self.toggle_clicked.emit())
+        if self._dur > 1:
+            menu.addAction("Back %d seconds" % self.SKIP_S).triggered.connect(
+                lambda: self.seek_requested.emit(-self.SKIP_S))
+            menu.addAction("Forward %d seconds" % self.SKIP_S).triggered.connect(
+                lambda: self.seek_requested.emit(self.SKIP_S))
+        if self._can_skip:
+            menu.addAction("Previous").triggered.connect(lambda: self.prev_clicked.emit())
+            menu.addAction("Next").triggered.connect(lambda: self.next_clicked.emit())
+        menu.addAction("Unmute tab" if self._muted else "Mute tab").triggered.connect(lambda: self.mute_clicked.emit())
+        menu.addSeparator()
+        menu.addAction("Download it in Awesome Downloader").triggered.connect(lambda: self.download_clicked.emit())
+        menu.addAction("Close the tab").triggered.connect(lambda: self.close_clicked.emit())
+        menu.exec(event.globalPos())
 
     def enterEvent(self, event):
         self._hover.to(1)
+        self._collapse.stop()
+        if not self._expanded and self._media is not None:
+            self._expanded = True
+            self._show_skip()
+            self._refit()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._hover.to(0)
+        # A moment's grace: the pointer crossing onto next/previous mustn't
+        # fold the control away under it.
+        self._collapse.start()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
@@ -1503,6 +1606,16 @@ class NowPlaying(QWidget):
         if right - left > 10:
             _faded_text(p, QRectF(left, 0, right - left, self.H), self._text(), qcolor(t["text"]),
                         _font(self, 12, QFont.Weight.Medium), self.devicePixelRatioF())
+        frac = self.progress()
+        if frac is not None and right - left > 10:
+            track = QRectF(left, self.H - 6, right - left, 2)
+            faint = qcolor(t["text_faint"])
+            faint.setAlphaF(0.35)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(faint)
+            p.drawRoundedRect(track, 1, 1)
+            p.setBrush(brand)
+            p.drawRoundedRect(QRectF(track.left(), track.top(), max(2.0, track.width() * frac), 2), 1, 1)
         p.end()
 
 
@@ -2300,6 +2413,119 @@ class BookmarksBar(QWidget):
         menu.addAction("Edit\u2026").triggered.connect(lambda: self.edit_requested.emit(url))
         menu.addAction("Remove bookmark").triggered.connect(lambda: self.remove_requested.emit(url))
         menu.exec(pos)
+
+
+# ------------------------------------------------------- update notice ----
+class UpdateBar(QWidget):
+    """"Awesome Downloader 2.6 is available" -- a bar under the toolbar, as
+    Chrome tells you about itself, each time the app starts while an update
+    is waiting: Update now, Don't remind me (for this version), or close it
+    (until next start)."""
+
+    update_clicked = Signal()
+    never_clicked = Signal()
+    closed = Signal()
+
+    H = 44
+    LEFT, RIGHT = 8, 10
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._t = theme.tokens(True)
+        self._dark = True
+        self.version = None
+        self.setFixedHeight(0)
+        self.hide()
+        self.text = QLabel(self)
+        self.text.setTextFormat(Qt.TextFormat.RichText)
+        self.update_btn = ActionButton("Update now", parent=self)
+        self.update_btn.clicked.connect(self.update_clicked)
+        self.never_btn = QPushButton("Don't remind me", self)
+        self.never_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.never_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.never_btn.clicked.connect(self.never_clicked)
+        self.close_btn = ChromeButton("close", "Close (until the app starts again)", size=26, icon_size=12, parent=self)
+        self.close_btn.clicked.connect(self.closed)
+
+    def apply_theme(self, t, dark):
+        self._t, self._dark = t, dark
+        self.update_btn.apply_theme(t)
+        self.close_btn.apply_theme(t)
+        self.never_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none; color: {t['text_muted']};"
+            f" font-size: 12px; font-weight: 600; padding: 4px 10px; }}"
+            f"QPushButton:hover {{ color: {t['text']}; }}")
+        self._set_text()
+        self.update()
+
+    def _set_text(self):
+        if not self.version:
+            return
+        t = self._t
+        self.text.setText(
+            f"<span style='color:{t['text']}; font-size:13px; font-weight:600'>"
+            f"Awesome Downloader {self.version} is available</span>"
+            f"<span style='color:{t['text_muted']}; font-size:12px'>"
+            f"&nbsp;&nbsp;·&nbsp;&nbsp;update in one click — your settings, history and downloads stay</span>")
+        self.text.adjustSize()
+
+    def show_for(self, version):
+        self.version = version
+        self._set_text()
+        if self.isVisible() and self.height() == self.H:
+            return
+        self.show()
+        self.update_btn.set_lit(True)
+        if motion.reduced():
+            self.setFixedHeight(self.H)
+        else:
+            motion.tween(self, self.height(), self.H, motion.MEDIUM, lambda v: self.setFixedHeight(round(v)))
+
+    def dismiss(self):
+        if not self.isVisible():
+            return
+        if motion.reduced():
+            self.setFixedHeight(0)
+            self.hide()
+        else:
+            motion.tween(self, self.height(), 0, motion.MEDIUM, lambda v: self.setFixedHeight(round(v)), self.hide)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout()
+
+    def _layout(self):
+        h = self.H
+        x = self.width() - self.RIGHT - self.close_btn.width()
+        self.close_btn.move(x, (h - self.close_btn.height()) // 2)
+        self.never_btn.adjustSize()
+        x -= self.never_btn.width() + 6
+        self.never_btn.move(x, (h - self.never_btn.height()) // 2)
+        x -= self.update_btn.width() + 10
+        self.update_btn.move(x, (h - self.update_btn.height()) // 2)
+        left = self.LEFT + 14 + 28
+        self.text.setGeometry(left, 0, max(40, x - left - 10), h)
+
+    def paintEvent(self, event):
+        if self.height() < 4:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        ember = qcolor(self._t["accent"])
+        r = QRectF(self.LEFT, 4, self.width() - self.LEFT - self.RIGHT, self.H - 8)
+        fill = QColor(ember)
+        fill.setAlphaF(0.10 if self._dark else 0.08)
+        line = QColor(ember)
+        line.setAlphaF(0.45)
+        p.setPen(QPen(line, 1))
+        p.setBrush(fill)
+        p.drawRoundedRect(r, 12, 12)
+        c = QPointF(r.left() + 20, r.center().y())
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ember)
+        p.drawEllipse(c, 10, 10)
+        draw_icon(p, "download", QRectF(c.x() - 7, c.y() - 7, 14, 14), qcolor(self._t["accent_text"]))
+        p.end()
 
 
 # ------------------------------------------------------- engine missing ----

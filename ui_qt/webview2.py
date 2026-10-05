@@ -456,6 +456,28 @@ class WebView2Widget(QWidget):
         else:
             self._pending.append(fn)
 
+    def _call(self, fn):
+        """Runs `fn(controller)` if the page is still alive. WebView2 can
+        dispose a controller on its own -- when its host window goes away
+        during shutdown -- without close_page() having run; touching it then
+        raised "members cannot be accessed after the WebView2 control is
+        disposed" (closing the window on a private tab recoloured the page
+        after that). Such a page is marked closed, and nothing touches it
+        again. Returns whether the call went through."""
+        ctl = self.controller
+        if ctl is None:
+            return False
+        try:
+            fn(ctl)
+            return True
+        except Exception as exc:   # noqa: BLE001
+            if "disposed" in str(exc) or "InvalidOperation" in type(exc).__name__:
+                logger.info("A page's controller was already disposed; dropping it")
+                self._closed = True
+                self.controller = self.core = None
+                return False
+            raise
+
     def close_page(self):
         self._closed = True
         if self.controller is not None:
@@ -478,7 +500,7 @@ class WebView2Widget(QWidget):
             return
         from System.Drawing import Rectangle
         w, h = self._device_size()
-        self.controller.Bounds = Rectangle(0, 0, w, h)
+        self._call(lambda c: setattr(c, "Bounds", Rectangle(0, 0, w, h)))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -487,8 +509,7 @@ class WebView2Widget(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if self.controller is not None:
-            self.controller.IsVisible = True
+        if self._call(lambda c: setattr(c, "IsVisible", True)):
             self._sync_bounds()
         self._place_soon()
 
@@ -595,8 +616,8 @@ class WebView2Widget(QWidget):
         if self.controller is None:
             return
         from System.Drawing import Color
-        c = self._background
-        self.controller.DefaultBackgroundColor = Color.FromArgb(255, c.red(), c.green(), c.blue())
+        bg = self._background
+        self._call(lambda c: setattr(c, "DefaultBackgroundColor", Color.FromArgb(255, bg.red(), bg.green(), bg.blue())))
 
     def set_color_scheme(self, dark):
         def go():
@@ -676,7 +697,9 @@ class WebView2Widget(QWidget):
         self._later(lambda: setattr(self.controller, "ZoomFactor", float(factor)))
 
     def zoom(self):
-        return float(self.controller.ZoomFactor) if self.controller is not None else 1.0
+        box = []
+        self._call(lambda c: box.append(float(c.ZoomFactor)))
+        return box[0] if box else 1.0
 
     def set_muted(self, muted):
         self._later(lambda: setattr(self.core, "IsMuted", bool(muted)))

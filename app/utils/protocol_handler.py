@@ -29,6 +29,13 @@ logger = get_logger("protocol_handler")
 
 _PROG_ID = "AwesomeDownloader.Magnet"
 _CLASSES = r"Software\Classes"
+# Windows' Settings > Default apps only lists an app for a link type if the app
+# declares it: a Capabilities key, named in RegisteredApplications. Without
+# them the app wasn't in the list to pick when Windows had magnet: locked to
+# another client.
+REGISTERED_NAME = "Awesome Downloader"
+_CAPABILITIES = r"Software\AwesomeDownloader\Capabilities"
+_REGISTERED_APPS = r"Software\RegisteredApplications"
 _USERCHOICE = (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer"
                r"\UrlAssociations\magnet\UserChoice")
 
@@ -118,6 +125,16 @@ def register():
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
                                rf"{_CLASSES}\magnet\shell\open\command") as key:
             winreg.SetValueEx(key, "", 0, winreg.REG_SZ, _launch_command())
+
+        # ...and the declaration that puts the app in Default apps.
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _CAPABILITIES) as key:
+            winreg.SetValueEx(key, "ApplicationName", 0, winreg.REG_SZ, REGISTERED_NAME)
+            winreg.SetValueEx(key, "ApplicationDescription", 0, winreg.REG_SZ,
+                              "Video, audio, images and torrents in one window")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _CAPABILITIES + r"\URLAssociations") as key:
+            winreg.SetValueEx(key, "magnet", 0, winreg.REG_SZ, _PROG_ID)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _REGISTERED_APPS) as key:
+            winreg.SetValueEx(key, REGISTERED_NAME, 0, winreg.REG_SZ, _CAPABILITIES)
         logger.info("Registered as magnet handler: %s", _launch_command())
         return True
     except Exception:
@@ -141,16 +158,40 @@ def unregister():
                       rf"{_CLASSES}\{_PROG_ID}\shell\open",
                       rf"{_CLASSES}\{_PROG_ID}\shell",
                       rf"{_CLASSES}\{_PROG_ID}\DefaultIcon",
-                      rf"{_CLASSES}\{_PROG_ID}"):
+                      rf"{_CLASSES}\{_PROG_ID}",
+                      _CAPABILITIES + r"\URLAssociations",
+                      _CAPABILITIES,
+                      r"Software\AwesomeDownloader"):
             try:
                 winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
-            except FileNotFoundError:
+            except (FileNotFoundError, OSError):
                 pass
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REGISTERED_APPS, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.DeleteValue(key, REGISTERED_NAME)
+        except (FileNotFoundError, OSError):
+            pass
         logger.info("Unregistered as magnet handler")
         return True
     except Exception:
         logger.exception("Failed to unregister as magnet handler")
         return False
+
+
+def open_default_apps():
+    """Windows' Default apps page for this app, where a locked magnet:
+    choice can be changed (Windows allows that only from its own UI)."""
+    from urllib.parse import quote
+    try:
+        os.startfile("ms-settings:defaultapps?registeredAppUser=" + quote(REGISTERED_NAME))
+        return True
+    except OSError:
+        try:
+            os.startfile("ms-settings:defaultapps")
+            return True
+        except OSError:
+            logger.exception("Couldn't open Default apps")
+            return False
 
 
 def set_enabled(enabled):

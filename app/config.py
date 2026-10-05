@@ -12,6 +12,11 @@ APP_PUBLISHER = "Shriguru Phalle"  # kept in sync with installer.iss's MyAppPubl
 GITHUB_REPO = "shriguruphalle-cloud/awesome-downloader"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 WEBSITE = "https://awesome-downloader.pages.dev"
+# In-app updates (app/utils/updater.py): a release is installed from inside the
+# app only if its update.json is signed with the developer's private key
+# (tools/release_sign.py). This is the matching public key -- it is safe to
+# publish; the private key never leaves the developer's PC.
+UPDATE_PUBLIC_KEY = "0f4db4f9f3fa8ce46d65d04578b82fd363a70c67d0b9a1c22e59bb47a3b7302e"
 # The website's "Buy me a coffee": PayPal, and UPI by QR (ui_qt/assets/upi-qr.svg,
 # the website's own QR file).
 DONATE_PAYPAL = "https://www.paypal.com/ncp/payment/GTSR32T7LPR9N"

@@ -22,7 +22,7 @@ certutil -hashfile AwesomeVideoDownloaderSetup.exe SHA256
 ```
 
 ```
-7DD112958748158DE9F7C7B052DFAC288C57B5CB4D70B27436DCFFE945B6063F
+50F811CCCB9D0C58B84B7AED618562082AAF19DD12B5DB9CE7D48ACA930745E8
 ```
 
 If the value differs, the download was cut short or altered — delete it and
@@ -72,6 +72,13 @@ And the browser around it:
   **Edit…** to change its name or its address, as in Chrome. A bookmark opens in a **new tab** (the page you're
   on stays put), switches to its tab if it's already open, and uses a blank
   New Tab rather than leaving one behind. Middle-click opens one behind.
+- A **compact music player** in the toolbar: half its old width at rest,
+  opening under the pointer to the full title, previous/next and mute; a
+  thin line shows how far through the track is, the mouse wheel skips 10 s,
+  and right-click has the rest (go to the tab, mute, download it, close).
+- **Magnet links open in Awesome Downloader by default**, and the app now
+  lists itself in Windows' Settings > Default apps — if Windows has magnet
+  links locked to another client, one click opens the right settings page.
 - A **close all tabs** button at the left of the tab strip (Ctrl+Shift+W),
   undone with one click — or one Ctrl+Shift+T.
 - Tabs you can drag to reorder, each its own card, a spinner while loading,
@@ -214,13 +221,28 @@ its own card within seconds, instead of the app reading every video's
 formats first. Each card can be set to **Best** or a specific resolution;
 the nearest one the video actually has is used.
 
-### Know when there's an update
+### Updates from inside the app — and a way back
 
-The app asks GitHub once at startup whether a newer version exists, and if
-so an **Update** button appears in the top bar that opens the release page.
-It never downloads or runs anything on its own. The check can be turned off
-in Settings, and the Updates panel now shows the app's own version status
-alongside yt-dlp's.
+When a newer version is published, **Update available** appears in the top
+bar beside the coffee cup, and the Browser tab shows a bar about it each
+time the app starts (**Update now**, **Don't remind me**, or close it for
+now). One click shows what's new and installs it — no website, no
+downloading by hand. Before anything runs, the update is checked, and you
+see each check pass:
+
+- published and **signed by the developer** (an Ed25519 signature the app
+  verifies against the key built into it — a release that isn't signed,
+  or was altered, is never installed);
+- downloaded from **GitHub over HTTPS** only, never bigger than signed;
+- its **checksum** matches the signed one, and the installer is the
+  **right version**;
+- **scanned by Microsoft Defender**.
+
+Then the app closes, Windows asks for permission once, and it reopens on
+the new version with your settings, history and downloads as they were.
+Changed your mind? **Settings > Updates > Go back to version …** reinstalls
+the version you came from, checked the same way. The startup check can
+still be turned off in Settings.
 
 ### Torrent stats
 
@@ -260,6 +282,16 @@ torrent engine starts with your first torrent rather than with the app, and
 an empty Torrent tab uses no time at all.
 
 ## Fixed
+
+- **AdGuard never started in an installed copy** ("AdGuard is still
+  starting", for ever). WebView2 has to write into an extension's folder to
+  load it, and Program Files isn't writable — so it failed with "Access is
+  denied" and the browser ran without an ad blocker. AdGuard now runs from a
+  copy in the app's data folder, and if it ever can't start, the shield says
+  why instead of "still starting".
+- **Closing the window with a private tab open crashed the app on its way
+  out.** Leaving the private look recoloured a page WebView2 had already
+  shut down. Pages are now let go of cleanly.
 
 - **A page could be drawn off to the side after switching browser tabs**,
   with the app's backdrop in the gap. Each page now checks where its window

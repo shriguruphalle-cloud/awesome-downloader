@@ -160,7 +160,8 @@ print("nav indicator follows the tab, and reduce motion jumps")
 check(not win.update_pill.isVisible(), "update pill shown with no release")
 win._on_update_found({"version": "9.9.0", "page": "https://example.invalid/r"})
 pump(2)
-check(win.update_pill.isVisible() and "9.9.0" in win.update_pill.text(), "update pill didn't appear")
+check(win.update_pill.isVisible() and win.update_pill.text() == "Update available"
+      and "9.9.0" in win.update_pill.toolTip(), "update pill didn't appear")
 tb = win.titleBar
 close_left = tb._buttons[0].mapTo(win, QPoint(0, 0)).x()
 right = win.update_pill.mapTo(win, QPoint(win.update_pill.width(), 0)).x()

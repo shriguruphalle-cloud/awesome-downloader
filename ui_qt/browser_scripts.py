@@ -263,7 +263,14 @@ def media_watch():
       return true;
     },
     next: function () { var s = SKIP[location.hostname]; return click(s && s.next); },
-    prev: function () { var s = SKIP[location.hostname]; return click(s && s.prev); }
+    prev: function () { var s = SKIP[location.hostname]; return click(s && s.prev); },
+    seek: function (seconds) {
+      var el = primary();
+      if (!el || !isFinite(el.duration) || !(el.duration > 0)) return false;
+      el.currentTime = Math.max(0, Math.min(el.duration - 0.25, el.currentTime + seconds));
+      soon();
+      return true;
+    }
   };
 })();
 """ % {"post": _POST}

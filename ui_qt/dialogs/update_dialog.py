@@ -150,7 +150,7 @@ class UpdateDialog(CinematicDialog):
         self.app_status.setObjectName("muted")
         self.app_status.setWordWrap(True)
         app_row.addWidget(self.app_status, 1)
-        self.app_release_btn = Button("Open release page")
+        self.app_release_btn = Button("Update now")
         self.app_release_btn.setObjectName("accent")
         self.app_release_btn.setCursor(Qt.PointingHandCursor)
         self.app_release_btn.setVisible(False)
@@ -210,6 +210,13 @@ class UpdateDialog(CinematicDialog):
         self._check_worker = _run_detached(_CheckWorker(), self._on_check_done)
 
     def _open_release_page(self):
+        """Updates from inside the app (the panel checks the release first);
+        the release page only where there's no window to do that from."""
+        window = self.parent()
+        if window is not None and hasattr(window, "open_app_update"):
+            self.accept()
+            window.open_app_update()
+            return
         page = (self._release or {}).get("page") or config.RELEASES_PAGE
         QDesktopServices.openUrl(QUrl(page))
 

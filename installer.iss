@@ -167,6 +167,24 @@ Root: HKA; Subkey: "Software\Classes\magnet\DefaultIcon"; ValueType: string; Val
     ValueData: "{app}\app_icon.ico"
 Root: HKA; Subkey: "Software\Classes\magnet\shell\open\command"; ValueType: string; ValueName: ""; \
     ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+; The app's own magnet ProgId, and the declaration that lists Awesome
+; Downloader in Windows' Settings > Default apps for MAGNET -- without it the
+; app couldn't be picked there when Windows has the protocol locked to another
+; client. All of these keys are the app's own, so uninstall removes them.
+Root: HKA; Subkey: "Software\Classes\AwesomeDownloader.Magnet"; ValueType: string; ValueName: ""; \
+    ValueData: "Awesome Downloader magnet link"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\AwesomeDownloader.Magnet\DefaultIcon"; ValueType: string; ValueName: ""; \
+    ValueData: "{app}\app_icon.ico"
+Root: HKA; Subkey: "Software\Classes\AwesomeDownloader.Magnet\shell\open\command"; ValueType: string; ValueName: ""; \
+    ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+Root: HKA; Subkey: "Software\AwesomeDownloader\Capabilities"; ValueType: string; ValueName: "ApplicationName"; \
+    ValueData: "{#MyAppDisplayName}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\AwesomeDownloader\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; \
+    ValueData: "Video, audio, images and torrents in one window"
+Root: HKA; Subkey: "Software\AwesomeDownloader\Capabilities\URLAssociations"; ValueType: string; ValueName: "magnet"; \
+    ValueData: "AwesomeDownloader.Magnet"
+Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#MyAppDisplayName}"; \
+    ValueData: "Software\AwesomeDownloader\Capabilities"; Flags: uninsdeletevalue
 
 
 [Run]
@@ -174,6 +192,10 @@ Root: HKA; Subkey: "Software\Classes\magnet\shell\open\command"; ValueType: stri
 ; launched ran as administrator too -- its browser, its downloads and its
 ; files then belonged to the elevated account, not to whoever installed it.
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppDisplayName}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; An update (or rollback) started from inside the app runs this installer
+; with /SILENT /RELAUNCH=1 (app/utils/updater.py): the app closed itself for
+; it, so it is started again here, as the person, once the files are in.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: ShouldRelaunch
 
 [UninstallDelete]
 ; What the app or the ffmpeg refresh may have added beside the installed
@@ -246,6 +268,11 @@ end;
 //
 // But it left no way to remove it either, which is its own problem for
 // anyone actually leaving. So: asked once, at uninstall, defaulting to No.
+function ShouldRelaunch: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
+end;
+
 // What the app itself registered for the person using it, outside anything
 // Setup installed: magnet: links (Torrent tab, "Open magnet links with this
 // app") and Launch at Windows startup (Settings). Each is removed only if it

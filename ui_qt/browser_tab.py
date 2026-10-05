@@ -38,7 +38,7 @@ from app.utils import browser_data, download_history, formatting, settings as se
 from . import browser_engine, browser_scripts, motion, palettes, theme, webview2
 from .browser_chrome import (
     ActionButton, AddressBar, AdGuardPanel, BookmarkPopup, BookmarksBar, BookmarksPanel, ChromeButton,
-    EngineMissing, LoadBar, NowPlaying, TabPill, TabStrip, favicons, icon, style_menu,
+    EngineMissing, LoadBar, NowPlaying, TabPill, TabStrip, favicons, icon, style_menu, UpdateBar,
 )
 from .browser_home import HomeView
 from .widgets.toast import show_toast
@@ -512,6 +512,14 @@ class BrowserTab(QWidget):
         chrome.addWidget(self.toolbar)
         self.load_bar = LoadBar(self.toolbar)
 
+        # "An update is available": each start while one is waiting.
+        self.update_bar = UpdateBar()
+        self.update_bar.update_clicked.connect(self._update_from_bar)
+        self.update_bar.never_clicked.connect(self._never_remind_update)
+        self.update_bar.closed.connect(self._close_update_bar)
+        self._update_bar_closed = False
+        chrome.addWidget(self.update_bar)
+
         self.bookmarks_bar = BookmarksBar()
         self.bookmarks_bar.open_url.connect(self._open_bookmark)
         self.bookmarks_bar.remove_requested.connect(self._remove_bookmark)
@@ -560,6 +568,13 @@ class BrowserTab(QWidget):
         self.now_playing.toggle_clicked.connect(lambda: self._media_command("toggle"))
         self.now_playing.next_clicked.connect(lambda: self._media_command("next"))
         self.now_playing.prev_clicked.connect(lambda: self._media_command("prev"))
+        self.now_playing.mute_clicked.connect(lambda: self._with_media_tab(self._toggle_mute))
+        self.now_playing.seek_requested.connect(
+            lambda s: self._with_media_tab(lambda t: t.view is not None and t.view.run_js(
+                "window.__awdMedia && window.__awdMedia.seek(%d)" % int(s))))
+        self.now_playing.download_clicked.connect(
+            lambda: self._with_media_tab(lambda t: self.open_in_video_tab.emit(t.url)))
+        self.now_playing.close_clicked.connect(lambda: self._with_media_tab(self._close))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -629,6 +644,7 @@ class BrowserTab(QWidget):
         self.now_playing.apply_theme(t)
         self.load_bar.apply_theme(t)
         self.bookmarks_bar.apply_theme(t, self._dark)
+        self.update_bar.apply_theme(t, self._dark)
         self.home.apply_theme()
         popup = self._completer.popup()
         popup.setStyleSheet(
@@ -1125,6 +1141,8 @@ class BrowserTab(QWidget):
             tab.audible = audible
         if muted is not None:
             tab.muted = muted
+            if tab is getattr(self, "_media_source", None):
+                self.now_playing.set_muted(muted)
         tab.pill.set_audio(tab.audible, tab.muted)
 
     def _on_zoom(self, tab, factor):
@@ -1463,6 +1481,12 @@ class BrowserTab(QWidget):
         tab = self._media_tab()
         self._media_source = tab
         self.now_playing.set_media(tab.media if tab is not None else None)
+        self.now_playing.set_muted(bool(tab is not None and tab.muted))
+
+    def _with_media_tab(self, fn):
+        tab = getattr(self, "_media_source", None)
+        if tab in self._tabs:
+            fn(tab)
 
     def _goto_media_tab(self):
         tab = getattr(self, "_media_source", None)
@@ -1565,6 +1589,33 @@ class BrowserTab(QWidget):
         self.home.refresh()
         if self.bookmarks_bar.isVisible():
             self.bookmarks_bar.set_bookmarks(browser_data.load_bookmarks())
+
+    # ---- the update notice ----
+    def show_update_notice(self, release):
+        """From the main window's startup check: a newer version exists."""
+        from app.utils import updater
+        version = (release or {}).get("version")
+        if not version or self._update_bar_closed or updater.is_dismissed(version):
+            return
+        self.update_bar.show_for(version)
+        QTimer.singleShot(400, self._apply_home_backdrop)
+
+    def _update_from_bar(self):
+        win = self.window()
+        if hasattr(win, "open_app_update"):
+            win.open_app_update()
+
+    def _never_remind_update(self):
+        from app.utils import updater
+        if self.update_bar.version:
+            updater.dismiss(self.update_bar.version)
+        self.update_bar.dismiss()
+        QTimer.singleShot(400, self._apply_home_backdrop)
+
+    def _close_update_bar(self):
+        self._update_bar_closed = True
+        self.update_bar.dismiss()
+        QTimer.singleShot(400, self._apply_home_backdrop)
 
     def _toggle_bookmarks_bar(self):
         on = not self.bookmarks_bar.isVisible()
@@ -1828,6 +1879,11 @@ class BrowserTab(QWidget):
                 message = "The browser engine isn't running, so neither is AdGuard."
             elif not browser_engine.adguard_bundled():
                 message = "This build doesn't include AdGuard."
+            elif getattr(self.services, "adguard_error", None):
+                # Not "still starting": it won't, this session. (It said so
+                # forever when loading had failed -- reported.)
+                message = ("AdGuard couldn't start: %s. Restart the app to try again; pages still "
+                           "load, without ad blocking." % self.services.adguard_error.rstrip("."))
             else:
                 message = "AdGuard is still starting -- it takes a few seconds the first time."
         panel = AdGuardPanel(self, self._t, self._dark, host,

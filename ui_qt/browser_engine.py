@@ -13,6 +13,7 @@ through a hidden page kept open for the session ("the service page").
 """
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -49,14 +50,61 @@ FILTERS_VERSION = 2
 DISABLED_FILTERS = (10,)
 
 
-def adguard_dir():
+def bundled_adguard_dir():
+    """The AdGuard extension as shipped (installed, it's under Program Files)."""
     if config.IS_FROZEN:
         return os.path.join(getattr(sys, "_MEIPASS", config.BASE_DIR), "adguard")
     return os.path.join(config.BASE_DIR, "vendor", "adguard-dl", "unpacked")
 
 
 def adguard_bundled():
-    return os.path.isfile(os.path.join(adguard_dir(), "manifest.json"))
+    return os.path.isfile(os.path.join(bundled_adguard_dir(), "manifest.json"))
+
+
+_adguard_dir = None
+
+
+def adguard_dir():
+    """Where AdGuard is loaded from: a copy in the app's data folder.
+
+    WebView2 needs to write into an extension's folder to load it, and an
+    installed app's folder (Program Files) isn't writable -- every installed
+    copy failed with "Access is denied" and ran without an ad blocker, while
+    builds run from a writable folder worked. The copy is per AdGuard
+    version, so it is made once and its path (which WebView2 ties the
+    extension and its settings to) stays the same across launches, updates
+    and copies of the app. Falls back to the bundled folder if it can't be
+    made."""
+    global _adguard_dir
+    if _adguard_dir is not None:
+        return _adguard_dir
+    src = bundled_adguard_dir()
+    try:
+        with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
+            version = str(json.load(f).get("version") or "0")
+    except (OSError, ValueError):
+        _adguard_dir = src
+        return src
+    root = os.path.join(config.APPDATA_DIR, "adguard")
+    dst = os.path.join(root, version)
+    marker = os.path.join(dst, ".copied")
+    try:
+        if not os.path.exists(marker):
+            tmp = dst + ".tmp"
+            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.copytree(src, tmp)
+            open(os.path.join(tmp, ".copied"), "w").close()
+            shutil.rmtree(dst, ignore_errors=True)
+            os.replace(tmp, dst)
+            logger.info("AdGuard %s copied to %s", version, dst)
+        for old in os.listdir(root):
+            if old != version and not old.endswith(".tmp"):
+                shutil.rmtree(os.path.join(root, old), ignore_errors=True)
+        _adguard_dir = dst
+    except OSError:
+        logger.exception("Couldn't copy AdGuard to the data folder; loading it from the app folder")
+        _adguard_dir = src
+    return _adguard_dir
 
 
 def _load_state():
@@ -93,6 +141,7 @@ class BrowserServices(QObject):
         self._service = None            # hidden WebView2Widget on an AdGuard page
         self._service_host = None
         self._state = _load_state()
+        self.adguard_error = None    # why AdGuard didn't start, when it didn't
         self._cookie_waiters = []
         self._cookie_request.connect(self._answer_cookies)
         browser_cookies.set_provider(self._cookie_provider)
@@ -158,6 +207,7 @@ class BrowserServices(QObject):
 
     def _adguard_failed(self, msg):
         logger.error("AdGuard could not be loaded: %s", msg)
+        self.adguard_error = str(msg)
         self.adguard_ready.emit(False)
 
     def _use_adguard(self, ext_id, fresh):
@@ -185,6 +235,7 @@ class BrowserServices(QObject):
                 QTimer.singleShot(700, lambda: self._wait_initialized(since))
             else:
                 logger.warning("AdGuard did not finish starting")
+                self.adguard_error = "it didn't finish starting within 45 seconds"
                 self.adguard_ready.emit(False)
         self.send({"type": "getIsAppInitialized"}, got)
 

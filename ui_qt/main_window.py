@@ -833,15 +833,18 @@ class _IconButton(QPushButton):
 
 
 class _UpdatePill(QPushButton):
-    """"Update 2.6" -- shown in the title bar only when GitHub has a newer
-    release. Ember, because it is the one thing in the chrome that asks you
-    to act. It opens the release page; it never downloads anything itself."""
+    """"Update available" -- in the title bar, beside the coffee cup, only
+    when GitHub has a newer release. Ember, because it is the one thing in
+    the chrome that asks you to act. As tall as the glass capsules beside it,
+    on their centre line. It opens the update panel (dialogs/
+    app_update_dialog.py), which checks the release before installing it."""
 
-    _QSS = "QPushButton { background: transparent; border: none; padding: 0px 12px 0px 24px; }"
+    _QSS = "QPushButton { background: transparent; border: none; padding: 0px 14px 0px 34px; }"
+    TEXT = "Update available"
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(_PILL_H)
+        self.setFixedHeight(_NAV_H)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
         self.setStyleSheet(self._QSS)
@@ -852,8 +855,8 @@ class _UpdatePill(QPushButton):
     def show_release(self, release):
         self.release = release
         version = release.get("version", "")
-        self.setText(f"Update {version}")
-        self.setToolTip(f"Awesome Downloader {version} is available -- open the release page")
+        self.setText(self.TEXT)
+        self.setToolTip(f"Awesome Downloader {version} is available -- click to update from inside the app")
         self.setAccessibleName(self.toolTip())
         self.setVisible(True)
 
@@ -872,16 +875,24 @@ class _UpdatePill(QPushButton):
         line.setAlpha(170)
         painter.setPen(QPen(line, 1.0))
         painter.drawRoundedRect(rect, radius, radius)
-        dot = QPointF(14.0, rect.center().y())
+        # A download arrow in an ember disc, then the words.
+        c = QPointF(18.0, rect.center().y())
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(ember)
-        painter.drawEllipse(dot, 3.0, 3.0)
+        painter.drawEllipse(c, 9.0, 9.0)
+        pen = QPen(theme.qcolor(t["accent_text"]), 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(c.x(), c.y() - 4.5), QPointF(c.x(), c.y() + 3.0))
+        painter.drawPolyline([QPointF(c.x() - 3.2, c.y() - 0.2), QPointF(c.x(), c.y() + 3.0),
+                              QPointF(c.x() + 3.2, c.y() - 0.2)])
         painter.setPen(theme.qcolor(t["text"]))
         font = QFont(self.font())
         font.setPixelSize(12)
         font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(font)
-        painter.drawText(rect.adjusted(24, 0, -12, 0), Qt.AlignVCenter | Qt.AlignLeft, self.text())
+        painter.drawText(rect.adjusted(34, 0, -14, 0), Qt.AlignVCenter | Qt.AlignLeft, self.text())
         painter.end()
 
     def sizeHint(self):
@@ -889,7 +900,7 @@ class _UpdatePill(QPushButton):
         font.setPixelSize(12)
         font.setWeight(QFont.Weight.DemiBold)
         width = QFontMetricsF(font).horizontalAdvance(self.text())
-        return QSize(int(math.ceil(width)) + 38, _PILL_H)
+        return QSize(int(math.ceil(width)) + 50, _NAV_H)
 
     def enterEvent(self, event):
         super().enterEvent(event)
@@ -1322,8 +1333,7 @@ class MainWindow(FramelessMainWindow):
         topbar_layout.addStretch(1)
 
         self.update_pill = _UpdatePill()
-        self.update_pill.clicked.connect(self._open_release_page)
-        topbar_layout.addWidget(self.update_pill)
+        self.update_pill.clicked.connect(lambda: self.open_app_update())
 
         # Window actions in their own glass tray: one group, not four loose
         # marks drifting between the nav and the caption chips.
@@ -1343,6 +1353,8 @@ class MainWindow(FramelessMainWindow):
         for btn in (self.settings_btn, self.theme_btn, self.update_btn, self.about_btn):
             tray_layout.addWidget(btn)
         topbar_layout.addWidget(self._action_tray)
+        # "Update available", when there is one: between the tray and the cup.
+        topbar_layout.addWidget(self.update_pill)
 
         # Donate: a coffee cup in a little glass disc of its own, between the
         # tray and the caption dots -- the website's "Buy me a coffee".
@@ -1505,14 +1517,21 @@ class MainWindow(FramelessMainWindow):
         threading.Thread(target=work, name="awd-app-update", daemon=True).start()
 
     def _on_update_found(self, release):
+        self.available_release = release
         self.update_pill.show_release(release)
         self._fit_title_row()
+        # The Browser tab shows a bar about it too (each start, until "Don't
+        # remind me" for that version).
+        for i in range(self.tabs.count()):
+            page = self.tabs.widget(i)
+            if hasattr(page, "show_update_notice"):
+                page.show_update_notice(release)
 
-    def _open_release_page(self):
-        from PySide6.QtCore import QUrl
-        from PySide6.QtGui import QDesktopServices
-        release = self.update_pill.release or {}
-        QDesktopServices.openUrl(QUrl(release.get("page") or config.RELEASES_PAGE))
+    def open_app_update(self, rollback_to=None):
+        """The update panel: the latest version, or `rollback_to` to go back."""
+        from .dialogs.app_update_dialog import AppUpdateDialog
+        dlg = AppUpdateDialog(self, rollback_to=rollback_to)
+        dlg.exec()
 
     # ------------------------------------------------------------- theme ---
     def _crossfade_theme(self, change):

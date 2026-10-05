@@ -38,3 +38,18 @@ desktop.ini
 
 # Local shortcut, machine-specific paths
 *.lnk
+
+# Showcase video project: dependencies, caches and rendered output
+video/node_modules/
+video/out/
+video/npm-install.log
+video/*.mp4
+
+# Never commit a release signing key (tools/release_sign.py keeps it outside the repo)
+*.key
+release-signing*
+
+# Showcase video: generated soundtrack and app captures (npm run audio / npm run capture)
+video/public/audio/
+video/public/captures/
+video/poster.png

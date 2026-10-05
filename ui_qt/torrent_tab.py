@@ -416,13 +416,15 @@ class TorrentTab(QWidget):
             self.magnet_handler_check.blockSignals(True)
             self.magnet_handler_check.setChecked(False)
             self.magnet_handler_check.blockSignals(False)
-            QMessageBox.information(
+            go = QMessageBox.question(
                 self, config.APP_NAME,
                 "Windows has magnet links locked to another app"
                 + (f" ({owner})" if owner else "") + ".\n\n"
-                "Open Settings > Apps > Default apps, search for \"magnet\", "
-                "and pick Awesome Downloader there — Windows only allows that "
-                "change from its own settings screen.")
+                "Windows only lets you change that in its own Default apps "
+                "settings. Open them now? Choose Awesome Downloader for MAGNET there.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes
+            if go:
+                protocol_handler.open_default_apps()
 
     def browse_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Choose folder", self.dir_entry.text())

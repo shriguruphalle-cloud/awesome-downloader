@@ -168,7 +168,7 @@ class SettingsDialog(CinematicDialog):
         self.check_status = QLabel(f"You have version {config.APP_VERSION}.")
         self.check_status.setObjectName("muted")
         self.check_status.setWordWrap(True)
-        self.release_btn = Button("Open release page")
+        self.release_btn = Button("Update now")
         self.release_btn.setObjectName("accent")
         self.release_btn.setCursor(Qt.PointingHandCursor)
         self.release_btn.setVisible(False)
@@ -179,6 +179,17 @@ class SettingsDialog(CinematicDialog):
         check_row.addWidget(self.check_status, 1)
         check_row.addWidget(self.release_btn)
         self._row(grid, 1, "", check_row)
+        # Going back: offered after an update made from inside the app.
+        from app.utils import updater
+        self.rollback_to = updater.rollback_version()
+        self.rollback_btn = None
+        if self.rollback_to:
+            self.rollback_btn = Button("Go back to version %s" % self.rollback_to)
+            self.rollback_btn.setCursor(Qt.PointingHandCursor)
+            self.rollback_btn.setToolTip("Reinstall the version you updated from -- checked the same way "
+                                         "as an update. Your settings and history stay.")
+            self.rollback_btn.clicked.connect(self._rollback)
+            self._row(grid, 2, "", button_row(self.rollback_btn, None, stretch_first=False))
         col.addWidget(card)
 
         # ---- Data ----
@@ -355,8 +366,18 @@ class SettingsDialog(CinematicDialog):
             self.check_status.setText(f"You're on the latest version ({config.APP_VERSION}).")
 
     def _open_release(self):
+        """Updates from inside the app; the release page only without a window."""
+        if hasattr(self.window_ref, "open_app_update"):
+            self.accept()
+            self.window_ref.open_app_update()
+            return
         page = (self._release or {}).get("page") or config.RELEASES_PAGE
         QDesktopServices.openUrl(QUrl(page))
+
+    def _rollback(self):
+        if hasattr(self.window_ref, "open_app_update"):
+            self.accept()
+            self.window_ref.open_app_update(rollback_to=self.rollback_to)
 
     def done(self, result):
         try:

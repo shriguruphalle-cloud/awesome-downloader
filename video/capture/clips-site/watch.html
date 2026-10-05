@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aurora over the fjord — 4K timelapse · Clips</title>
+<!-- A made-up video site for the showcase: our own page, clip and pictures. -->
+<style>
+  :root { --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e8ebf2; --muted: #9aa3b5; --hi: #7aa2ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 "Segoe UI", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 24px; padding: 14px 28px; border-bottom: 1px solid var(--line); }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 20px; letter-spacing: -.01em; }
+  .logo i { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, #7aa2ff, #b58cff); display: inline-block; }
+  .search { flex: 1; max-width: 560px; height: 38px; border-radius: 19px; background: var(--panel); border: 1px solid var(--line);
+            color: var(--muted); display: flex; align-items: center; padding: 0 18px; font-size: 14px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 28px; padding: 24px 28px; }
+  video { width: 100%; aspect-ratio: 16 / 9; border-radius: 14px; background: #000; display: block; object-fit: cover; }
+  h1 { font-size: 22px; margin: 16px 0 8px; font-weight: 650; letter-spacing: -.01em; }
+  .meta { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 14px; }
+  .avatar { width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg, #3b82f6, #22d3ee); }
+  .meta b { color: var(--text); font-weight: 600; }
+  .desc { margin-top: 14px; padding: 14px 16px; background: var(--panel); border-radius: 12px; color: var(--muted); font-size: 14px; }
+  aside h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .08em; }
+  .item { display: grid; grid-template-columns: 150px 1fr; gap: 12px; margin-bottom: 14px; }
+  .item img { width: 150px; aspect-ratio: 16/9; object-fit: cover; border-radius: 10px; display: block; }
+  .item b { display: block; font-size: 14px; font-weight: 600; line-height: 1.3; }
+  .item span { color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><i></i>Clips</div>
+  <div class="search">Search clips</div>
+</header>
+<main>
+  <section>
+    <video src="aurora.mp4" poster="poster.jpg" autoplay muted loop playsinline></video>
+    <h1>Aurora over the fjord — 4K timelapse</h1>
+    <div class="meta"><span class="avatar"></span><span><b>Northern Frames</b><br>Timelapse · 12 min</span></div>
+    <div class="desc">Shot over three nights above the fjord. A made-up page for the Awesome Downloader showcase.</div>
+  </section>
+  <aside>
+    <h2>Up next</h2>
+    <div class="item"><img src="alpine.jpg" alt=""><div><b>Alpine lakes from above</b><span>Northern Frames · 10:45</span></div></div>
+    <div class="item"><img src="night.jpg" alt=""><div><b>Moonrise over the ridge</b><span>Northern Frames · 4:59</span></div></div>
+    <div class="item"><img src="ocean.jpg" alt=""><div><b>Ocean waves — slow motion</b><span>Blue Hours · 21:00</span></div></div>
+    <div class="item"><img src="forest.jpg" alt=""><div><b>Morning walk through a pine forest</b><span>Quiet Trails · 15:03</span></div></div>
+  </aside>
+</main>
+</body>
+</html>

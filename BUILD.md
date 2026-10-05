@@ -113,6 +113,41 @@ data > Uninstall inside the app). Uninstalling removes the app, its magnet
 link and start-with-Windows entries when they still point at it, and asks
 whether to keep the user's data (`%LOCALAPPDATA%\Awesome Downloader`).
 
+## Publishing an update
+
+The app installs updates from inside itself (**Update available** in the
+title bar, a bar in the Browser tab, Settings > Updates) — but only releases
+signed with your key. Each release's `update.json` (version, installer name,
+SHA-256, size, notes) is signed with Ed25519; the app checks it against the
+public key in `app/config.py` (`UPDATE_PUBLIC_KEY`), then downloads the
+installer from GitHub over HTTPS, checks its size, checksum and version,
+has Microsoft Defender scan it, and runs it silently (it relaunches the app).
+Settings offers to go back to the version before, checked the same way.
+
+**Once:** the signing key. It already exists on the development PC
+(`%USERPROFILE%\.awesome-downloader\release-signing.key`, matching the
+public key in `app/config.py`). **Back it up somewhere safe and never commit
+or share it** — anyone with it can publish updates the app will install;
+without it no update can be published (a new key means a new public key,
+which people only get by installing a version by hand). To make a new one:
+`.venv312\Scripts\python.exe tools\release_sign.py keygen --force`.
+
+**Every release:**
+
+1. Bump `APP_VERSION` in `app/config.py` and `MyAppVersion` in `installer.iss`;
+   write `RELEASE_v<version>.md` (its "What's new" becomes the in-app notes).
+2. `build_exe.bat`, then `ISCC installer.iss` (see above).
+3. `.venv312\Scripts\python.exe tools\release_sign.py sign`
+   → `Output\update.json` and `Output\update.json.sig`.
+4. Publish a GitHub release tagged `v<version>` with all three files:
+   ```bat
+   gh release create v<version> Output\AwesomeVideoDownloaderSetup.exe ^
+     Output\update.json Output\update.json.sig --notes-file RELEASE_v<version>.md
+   ```
+
+Running copies see it at their next start. A release without `update.json`
+is still announced, but only opens the release page.
+
 ## Code signing
 
 `build_exe.bat` contains an optional signing step that is a no-op unless a

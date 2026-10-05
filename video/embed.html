@@ -1,0 +1,50 @@
+<!--
+  Awesome Downloader showcase -- embed for the website.
+  Put final.mp4 and poster.jpg next to the page (or change the paths), and
+  set the absolute URLs in the JSON-LD below to where they're hosted.
+-->
+<section class="ad-showcase" aria-labelledby="ad-showcase-title">
+  <h2 id="ad-showcase-title">See Awesome Downloader in action</h2>
+  <p>Video, audio, images and torrents in one window — a built-in browser with AdGuard,
+     live torrent graphs and seven colour palettes. Free and open source (GPL-3.0).</p>
+  <video
+    controls
+    playsinline
+    preload="metadata"
+    poster="poster.jpg"
+    width="1920" height="1080"
+    style="width:100%;height:auto;border-radius:16px;background:#0d1734"
+    title="Awesome Downloader — product tour">
+    <source src="final.mp4" type="video/mp4">
+    Your browser can't play this video. <a href="final.mp4">Download the MP4</a>.
+  </video>
+  <p><a href="https://github.com/shriguruphalle-cloud/awesome-downloader/releases/latest">Download for Windows</a>
+     · <a href="https://github.com/shriguruphalle-cloud/awesome-downloader">Star on GitHub</a></p>
+</section>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "VideoObject",
+  "name": "Awesome Downloader — product tour",
+  "description": "A tour of Awesome Downloader, a free and open-source Windows app for downloading video, audio, images and torrents in one window: paste a link, queue playlists, a built-in Microsoft Edge WebView2 browser with AdGuard, live per-torrent speed graphs, history, and seven colour palettes.",
+  "thumbnailUrl": "https://awesome-downloader.pages.dev/poster.jpg",
+  "contentUrl": "https://awesome-downloader.pages.dev/final.mp4",
+  "uploadDate": "2026-10-05",
+  "duration": "PT4M52S",
+  "inLanguage": "en",
+  "isFamilyFriendly": true,
+  "publisher": { "@type": "Person", "name": "Shriguru Phalle" },
+  "about": {
+    "@type": "SoftwareApplication",
+    "name": "Awesome Downloader",
+    "applicationCategory": "MultimediaApplication",
+    "operatingSystem": "Windows 10, Windows 11 (64-bit)",
+    "softwareVersion": "2.5.0",
+    "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "url": "https://awesome-downloader.pages.dev",
+    "downloadUrl": "https://github.com/shriguruphalle-cloud/awesome-downloader/releases/latest"
+  }
+}
+</script>
