@@ -135,7 +135,7 @@ def show_about(parent=None, dark_mode=True):
     credit.set_colors(t["text"], t["brand"], dark_mode, palettes.spec(dark_mode)["glows"][1][0])
     layout.addWidget(credit)
 
-    tagline_label = QLabel("Artists don't lack creativity; we lack patience for tools that slow us down.")
+    tagline_label = QLabel("We don't lack creativity; we lack patience for tools that slow us down.")
     tagline_label.setObjectName("muted")
     tagline_label.setWordWrap(True)
     layout.addWidget(tagline_label)
