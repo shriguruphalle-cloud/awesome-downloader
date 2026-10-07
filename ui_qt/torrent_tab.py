@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 
 from app import config
+from app.core import downloader
 from app.core.torrent_manager import LIBTORRENT_AVAILABLE, TorrentManager
 from app.logging_setup import get_logger
 from app.utils import (
@@ -114,6 +115,7 @@ class TorrentTab(QWidget):
     # signal is thread-safe and Qt auto-queues delivery to
     # _on_magnet_forwarded on the GUI thread, the same pattern
     magnet_forwarded = Signal(str)
+    _torrent_file_sig = Signal(str, str)
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -124,6 +126,7 @@ class TorrentTab(QWidget):
         self.rows = {}
         self._row_counter = 0
         self.magnet_forwarded.connect(self._on_magnet_forwarded)
+        self._torrent_file_sig.connect(self._on_torrent_file)
         self._manager = None
 
         if not LIBTORRENT_AVAILABLE:
@@ -462,6 +465,23 @@ class TorrentTab(QWidget):
         if path:
             self.add_torrent_path(path)
 
+    def add_torrent_url(self, url):
+        """A link to a .torrent file, pasted into another tab: fetched, then
+        added like one opened from disk."""
+        def work():
+            try:
+                self._torrent_file_sig.emit(downloader.fetch_torrent_file(url), "")
+            except Exception as e:   # noqa: BLE001
+                logger.exception("Couldn't fetch %s", url)
+                self._torrent_file_sig.emit("", str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_torrent_file(self, path, err):
+        if err:
+            QMessageBox.warning(self, config.APP_NAME, "Couldn't get that torrent:\n%s" % err)
+            return
+        self.add_torrent_path(path)
+
     def add_torrent_path(self, path):
         """Adds a .torrent file already on disk -- the file picker's pick, or
         one the Browser tab just downloaded."""
@@ -491,6 +511,20 @@ class TorrentTab(QWidget):
         if dialog.result is None:
             return  # cancelled -- AddTorrentDialog already removed it from the session
 
+        # A folder chosen in the dialog, for this torrent only. It was added
+        # (to fetch its file list) into the tab's folder; anything it already
+        # wrote moves along with it.
+        chosen = dialog.result.get("save_path") or save_dir
+        if os.path.normcase(os.path.normpath(chosen)) != os.path.normcase(os.path.normpath(save_dir)):
+            try:
+                os.makedirs(chosen, exist_ok=True)
+                if self.manager.move(handle, chosen):
+                    save_dir = chosen
+            except OSError as e:
+                logger.exception("Couldn't use the folder %s", chosen)
+                QMessageBox.warning(self, config.APP_NAME,
+                                    f"Couldn't save to that folder, so this torrent stays in\n{save_dir}\n\n{e}")
+
         selected = dialog.result["selected"]
         if selected is not None and dialog.file_list is not None:
             try:
@@ -500,10 +534,9 @@ class TorrentTab(QWidget):
                 logger.exception("Failed to set file priorities")
 
         if not dialog.result["auto_start"]:
-            try:
-                handle.pause()
-            except Exception:
-                pass
+            # manager.pause, not handle.pause: the session's auto-manager
+            # resumes a plain pause straight away
+            self.manager.pause(handle)
 
         name = dialog.name_label.text()
         self._add_row(name, kind, uri_or_path, save_dir, handle, selected)

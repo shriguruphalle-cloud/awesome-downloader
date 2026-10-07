@@ -7,6 +7,7 @@ import os
 import time
 
 from .. import config
+from . import secure_store
 from ..logging_setup import get_logger
 
 logger = get_logger("browser_data")
@@ -29,8 +30,7 @@ _DEFAULT_SHORTCUTS = [
 
 def _load(path):
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = secure_store.read_json(path)
         return data if isinstance(data, list) else []
     except FileNotFoundError:
         return []
@@ -42,8 +42,7 @@ def _load(path):
 def _save(path, entries):
     try:
         os.makedirs(config.APPDATA_DIR, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(entries, f, indent=2)
+        secure_store.write_json(path, entries)
     except Exception:
         logger.exception("Failed to save %s", path)
 
@@ -167,8 +166,7 @@ def load_shortcuts():
     every default) from "first run, nothing saved yet" via FileNotFoundError
     -- only the second case falls back to the seeded defaults."""
     try:
-        with open(SHORTCUTS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = secure_store.read_json(SHORTCUTS_PATH)
         return data if isinstance(data, list) else []
     except FileNotFoundError:
         return list(_DEFAULT_SHORTCUTS)
@@ -197,8 +195,7 @@ def _load_prefs():
     wallpaper and options, the bookmarks bar) -- separate from the
     list-shaped files above, which _load()/_save() assume."""
     try:
-        with open(PREFS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = secure_store.read_json(PREFS_PATH)
         return data if isinstance(data, dict) else {}
     except FileNotFoundError:
         return {}
@@ -210,8 +207,7 @@ def _load_prefs():
 def _save_prefs(prefs):
     try:
         os.makedirs(config.APPDATA_DIR, exist_ok=True)
-        with open(PREFS_PATH, "w", encoding="utf-8") as f:
-            json.dump(prefs, f, indent=2)
+        secure_store.write_json(PREFS_PATH, prefs)
     except Exception:
         logger.exception("Failed to save %s", PREFS_PATH)
 

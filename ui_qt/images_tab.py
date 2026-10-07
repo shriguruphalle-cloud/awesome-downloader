@@ -5,6 +5,7 @@ pick which ones, download at highest available resolution.
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from app import config
-from app.core import downloader, errors
+from app.core import downloader, errors, link_router
 from app.logging_setup import get_logger
 from app.utils import download_history, settings as settings_store
 
@@ -31,6 +32,21 @@ _TILE_GAP = 12
 _TILE_RATIO = 1.25         # 4:5 portrait, the shape of most social posts
 _PREVIEW_PX = 520          # fetched this big, so a wide tile stays sharp
 MAX_CONTENT_W = 1760
+
+
+_URL_RE = re.compile(r"(?:https?://|magnet:)\S+", re.I)
+
+
+def _split_links(text):
+    """Every link in a pasted blob, in order, without repeats (as the Video
+    tab's field reads a list copied out of notes or chat)."""
+    seen, out = set(), []
+    for raw in _URL_RE.findall(text or ""):
+        url = raw.rstrip(".,;)]}'\"")
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
 
 
 def _pil_to_pixmap(img):
@@ -307,6 +323,14 @@ class _TileGrid(QWidget):
 class ImagesTab(QWidget):
     _fetch_done_sig = Signal(str, list, int)
     _fetch_error_sig = Signal(str)
+    # (url, result of downloader.split_media, append to what's shown)
+    _split_sig = Signal(str, object, bool)
+    _split_progress_sig = Signal(str)
+    # A link that belongs in another tab: ("video" | "torrent", [urls]).
+    send_to_tab = Signal(str, object)
+    # Videos found in an account, a story or a post, for the Video tab's
+    # queue: (title, entries, note, switch there).
+    videos_found = Signal(str, object, str, bool)
     _tile_preview_sig = Signal(int, object)
     _download_progress_sig = Signal(str)
     _download_done_sig = Signal(str, int, int)
@@ -317,6 +341,15 @@ class ImagesTab(QWidget):
     # A link to sign in for: the Browser tab opens it, so the site's own
     # login is one click away.
     open_browser_requested = Signal(str)
+    # Signed in at last (in the Browser tab) for a link that asked for it: main_qt
+    # brings this tab back, and the link is fetched again by itself.
+    signed_in_again = Signal()
+
+    # The cookie a site sets once someone is signed in.
+    SESSION_COOKIES = {"instagram.com": "sessionid", "facebook.com": "c_user", "x.com": "auth_token",
+                       "twitter.com": "auth_token", "reddit.com": "reddit_session", "tiktok.com": "sessionid",
+                       "pinterest.com": "_pinterest_sess", "threads.net": "sessionid"}
+    SIGN_IN_WAIT_S = 15 * 60
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -330,6 +363,13 @@ class ImagesTab(QWidget):
 
         self._fetch_done_sig.connect(self._on_fetch_done)
         self._fetch_error_sig.connect(self._on_fetch_error)
+        self._split_sig.connect(self._on_split)
+        self._split_progress_sig.connect(lambda t: self.status_label.setText(t))
+        # Previews load a few at a time: an Instagram account can bring
+        # hundreds of pictures, and a thread each would swamp the connection.
+        self._preview_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="img-preview")
+        self._previous_url_text = ""
+        self._suppress_url_change = False
         self._tile_preview_sig.connect(self._on_tile_preview_ready)
         self._download_progress_sig.connect(lambda t: self.progress_label.setText(t))
         self._download_done_sig.connect(self._on_download_done)
@@ -337,6 +377,11 @@ class ImagesTab(QWidget):
             lambda browser, message: self.status_label.setText(
                 signin_dialog.handle_cookie_fallback(self.settings, browser, message)))
         downloader.cookie_fallback_listeners.append(self._cookie_notice_sig.emit)
+
+        self._sign_in_for = None          # (link, site, cookie, since) while waiting for a sign-in
+        self._sign_in_timer = QTimer(self)
+        self._sign_in_timer.setInterval(3000)
+        self._sign_in_timer.timeout.connect(self._check_signed_in)
 
         self._build_ui()
 
@@ -354,8 +399,10 @@ class ImagesTab(QWidget):
         self.url_entry = QLineEdit()
         self.url_entry.setObjectName("heroField")
         self.url_entry.setFixedHeight(46)
-        self.url_entry.setPlaceholderText("Instagram, Facebook, Reddit, X ... every image in the post, full size")
+        self.url_entry.setPlaceholderText(
+            "A post, an Instagram account or story, or any picture link -- videos go to the Video tab")
         self.url_entry.returnPressed.connect(self.on_fetch)
+        self.url_entry.textChanged.connect(self._on_url_text_changed)
         url_row.addWidget(self.url_entry, 1)
         self.fetch_btn = Button("Fetch")
         self.fetch_btn.setObjectName("accent")
@@ -385,6 +432,14 @@ class ImagesTab(QWidget):
         self.select_all_btn.clicked.connect(self._select_all)
         self.select_none_btn.clicked.connect(self._select_none)
         self.select_card.set_state(0, 0)
+        # Empties the list: every picture from every link pasted so far.
+        self.clear_btn = Button("Clear")
+        self.clear_btn.setObjectName("quiet")
+        self.clear_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_btn.setToolTip("Remove every picture from the list")
+        self.clear_btn.setEnabled(False)
+        self.clear_btn.clicked.connect(self.clear_all)
+        select_row.addWidget(self.clear_btn)
         select_row.addWidget(self.select_card)
         gallery_layout.addLayout(select_row)
 
@@ -478,12 +533,122 @@ class ImagesTab(QWidget):
         if not url:
             QMessageBox.warning(self, config.APP_NAME, "Paste a link first, or copy one to your clipboard.")
             return
+        links = _split_links(url)
+        if len(links) > 1:
+            self.fetch_links(links)
+            return
+        self.fetch_links([links[0] if links else url])
 
+    def fetch_links(self, urls, append=False):
+        """Each link where it belongs (app/core/link_router.py): videos,
+        channels and reels to the Video tab, magnets to Torrent; posts,
+        accounts, stories and picture links are read here, and any videos
+        they hold go to the Video tab's queue."""
+        here, elsewhere = [], {}
+        for url in urls:
+            route = link_router.classify(url)
+            if route.tab in (link_router.VIDEO, link_router.TORRENT):
+                elsewhere.setdefault(route.tab, []).append(url)
+            else:
+                here.append(url)
+        for tab, links in elsewhere.items():
+            self.send_to_tab.emit(tab, links)
+            where = "Video" if tab == link_router.VIDEO else "Torrent"
+            self.status_label.setText(
+                "That's %s -- opened it in the %s tab." % (link_router.classify(links[0]).describe(), where)
+                if len(links) == 1 else "Sent %d links to the %s tab." % (len(links), where))
+        if not here:
+            self._set_field("")
+            return
         self.status_label.setText("Fetching images...")
         self.fetch_btn.setEnabled(False)
         self.fetch_btn.set_busy(True)
         self.download_btn.setEnabled(False)
-        threading.Thread(target=self._fetch_thread, args=(url,), daemon=True).start()
+        cookies = self._cookies_from_browser()
+        for n, url in enumerate(here):
+            threading.Thread(target=self._split_thread, args=(url, cookies, append or n > 0),
+                             daemon=True).start()
+
+    def _set_field(self, text):
+        self._suppress_url_change = True
+        try:
+            self.url_entry.setText(text)
+        finally:
+            self._suppress_url_change = False
+        self._previous_url_text = text
+
+    def _on_url_text_changed(self, text):
+        """Pasting a link fetches it, as in the Video tab; typing doesn't."""
+        previous, self._previous_url_text = self._previous_url_text, text
+        if self._suppress_url_change or len(text) - len(previous) < 8:
+            return
+        links = _split_links(text)
+        if links:
+            self._set_field(links[0] if len(links) == 1 else "")
+            self.fetch_links(links)
+
+    def _split_thread(self, url, cookies, append):
+        route = link_router.classify(url)
+        name = route.name if route.kind in ("ig_profile", "ig_story") else ""
+
+        def progress(n):
+            self._split_progress_sig.emit("Reading %s's posts... %d so far" % (name or "the account", n))
+        try:
+            res = downloader.split_media(url, cookies, progress=progress)
+            self._split_sig.emit(url, res, append)
+        except Exception as e:   # noqa: BLE001 -- reported in the tab
+            logger.exception("Image fetch failed for %s", url)
+            self._fetch_error_sig.emit(str(e))
+
+    def _on_split(self, url, res, append):
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.set_busy(False)
+        videos, images = res["videos"], res["images"]
+        route = link_router.classify(url)
+        if videos and not images and route.tab == link_router.POST and len(videos) == 1:
+            # a video posted as a post: it opens in the Video tab, as a video
+            self.send_to_tab.emit(link_router.VIDEO, [url])
+            self.status_label.setText("That post is a video -- opened it in the Video tab.")
+            return
+        if videos:
+            self.videos_found.emit(res["title"], videos, res.get("note", ""), not images)
+        if images:
+            self.show_items(res["title"], images, res.get("note", ""), append=append,
+                            videos_sent=len(videos))
+        elif not videos:
+            self.status_label.setText("Loaded: %s -- no images found." % (res["title"] or "that link"))
+            if not append:
+                self._rebuild_grid_placeholder("No images found in this post.")
+
+    def receive_items(self, title, items, note="", append=False):
+        """Pictures handed over by the Video tab: replacing what's shown, or
+        added to it when they came from a pasted list of links."""
+        self.show_items(title, items, note, append=append)
+
+    def show_items(self, title, items, note="", append=False, videos_sent=0):
+        """Shows `items` ({"title", "url"}) for picking, adding them to what's
+        already here when `append` (several links, or pictures handed over
+        from the Video tab while some are already showing)."""
+        if append and self.items:
+            known = {it["url"] for it in self.items}
+            items = [it for it in items if it["url"] not in known]
+            if not items:
+                return
+            self.items = self.items + list(items)
+            self.post_title = self.post_title or title
+        else:
+            self.items = list(items)
+            self.post_title = title
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.set_busy(False)
+        text = "Loaded: %s -- %d image(s)." % (title, len(items))
+        if videos_sent:
+            text += " %d video(s) went to the Video tab's queue." % videos_sent
+        if note:
+            text += " " + note
+        self.status_label.setText(text)
+        self._rebuild_grid()
+        self.download_btn.setEnabled(True)
 
     def _cookies_from_browser(self):
         return (self.settings or {}).get("cookies_from_browser")
@@ -539,12 +704,52 @@ class ImagesTab(QWidget):
         if choice is None:
             return
         if choice == "browser_tab":
-            self.open_browser_requested.emit(self.url_entry.text().strip() or "")
+            link = self.url_entry.text().strip() or ""
+            self.open_browser_requested.emit(link)
+            self._wait_for_sign_in(link)
             return
         self.settings["cookies_from_browser"] = choice
         settings_store.save_settings(self.settings)
         self.status_label.setText("Using your %s sign-in — fetching again..." % choice)
         self.on_fetch()
+
+    def _wait_for_sign_in(self, link):
+        """Watches the Browser tab for the sign-in, then fetches `link` again
+        -- no coming back to press Fetch."""
+        import time
+        import urllib.parse
+        host = (urllib.parse.urlparse(link).hostname or "").lower()
+        site = next((s for s in self.SESSION_COOKIES if host == s or host.endswith("." + s)), None)
+        if not link or not site:
+            return
+        self._sign_in_for = (link, site, self.SESSION_COOKIES[site], time.monotonic())
+        self.status_label.setText("Sign in to %s in the Browser tab — this link is fetched again as soon as you "
+                                  "have." % site.split(".")[0].capitalize())
+        self._sign_in_timer.start()
+
+    def _check_signed_in(self):
+        import time
+        from app.utils import browser_cookies
+        if self._sign_in_for is None:
+            self._sign_in_timer.stop()
+            return
+        link, site, cookie, since = self._sign_in_for
+        if time.monotonic() - since > self.SIGN_IN_WAIT_S:
+            self._sign_in_for = None
+            self._sign_in_timer.stop()
+            return
+        try:
+            rows = browser_cookies.scoped_rows("https://www.%s/" % site)
+        except Exception:   # noqa: BLE001 -- asked again in a moment
+            return
+        if not any(r[1] == cookie for r in rows):
+            return
+        self._sign_in_for = None
+        self._sign_in_timer.stop()
+        self.signed_in_again.emit()
+        self.status_label.setText("Signed in — fetching it again...")
+        self._set_field(link)
+        self.fetch_links([link])
 
     # ------------------------------------------------------------ Gallery ---
     def _clear_grid(self):
@@ -570,14 +775,19 @@ class ImagesTab(QWidget):
             tile = _ImageTile(idx)
             tile.toggled.connect(self._update_selection_label)
             tiles.append(tile)
-            threading.Thread(target=self._load_tile_preview, args=(self._generation, idx, item["url"]),
-                             daemon=True).start()
+            self._preview_pool.submit(self._load_tile_preview, self._generation, idx, item["url"])
         self.tiles = tiles
         self.tile_grid.set_tiles(tiles)
         self._update_selection_label()
 
     def _load_tile_preview(self, generation, idx, url):
-        pil_image = downloader.fetch_thumbnail_image(url, size=(_PREVIEW_PX, _PREVIEW_PX))
+        if generation != getattr(self, "_generation", 0):
+            return       # a newer grid replaced this one before its turn came
+        try:
+            pil_image = downloader.fetch_thumbnail_image(url, size=(_PREVIEW_PX, _PREVIEW_PX))
+        except Exception:   # noqa: BLE001 -- the tile just stays blank
+            logger.debug("Preview failed for %s", url, exc_info=True)
+            return
         self._tile_preview_sig.emit(generation * 100000 + idx, pil_image)
 
     def _on_tile_preview_ready(self, tag, pil_image):
@@ -585,6 +795,21 @@ class ImagesTab(QWidget):
         if generation != getattr(self, "_generation", 0) or idx >= len(self.tiles):
             return  # the grid was rebuilt (a new fetch) while this one loaded
         self.tiles[idx].set_pixmap(_pil_to_pixmap(pil_image))
+
+    def clear_all(self):
+        """Back to an empty list, as when the app opened."""
+        self._generation = getattr(self, "_generation", 0) + 1     # drop previews still loading
+        self.items = []
+        self.post_title = ""
+        self._clear_grid()
+        self.empty_label.show()
+        self.selection_label.setText("")
+        self.select_card.set_state(0, 0)
+        self.download_btn.setText("Download Selected")
+        self.download_btn.setEnabled(False)
+        self.clear_btn.setEnabled(False)
+        self.progress_label.setText("")
+        self.status_label.setText("Paste a post link, then click Fetch.")
 
     def _select_all(self):
         for tile in self.tiles:
@@ -603,6 +828,7 @@ class ImagesTab(QWidget):
         n = sum(1 for tile in self.tiles if tile.isChecked())
         self.selection_label.setText(f"{n} of {len(self.tiles)} selected")
         self.select_card.set_state(n, len(self.tiles))
+        self.clear_btn.setEnabled(bool(self.tiles))
         self.download_btn.setText(f"Download Selected ({n})" if n else "Download Selected")
         self.download_btn.setEnabled(bool(n))
 
@@ -624,6 +850,10 @@ class ImagesTab(QWidget):
         for i, item in enumerate(selected, start=1):
             self._download_progress_sig.emit(f"Downloading {i} of {len(selected)}...")
             suffix = f"_{i}" if len(selected) > 1 else ""
+            if item.get("title") and item["title"] != self.post_title:
+                # pictures from many posts (an account) are named by post
+                base_name = re.sub(r"[^\w\-. ]", "_", item["title"])[:60]
+                suffix = ""
             # No extension here on purpose -- save_thumbnail appends the real
             # one from the source image (it saves the original bytes rather
             # than re-encoding everything to JPEG, which was silently costing

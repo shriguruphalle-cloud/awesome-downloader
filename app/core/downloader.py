@@ -334,36 +334,222 @@ def _is_tab_listing(entries):
     return len(tabs) == len(entries)
 
 
+# The tabs of a channel that hold its own uploads: long videos and Shorts.
+# Live (past streams) is left out -- hours long, and not what "everything
+# from this channel" usually means.
+CHANNEL_TABS = ("/videos", "/shorts")
+
+
+def _is_playlist_ref(entry):
+    """An entry that is itself a playlist: a channel's Podcasts and Playlists
+    tabs list playlists, not videos."""
+    url = _entry_url(entry) or ""
+    if entry.get("_type") == "playlist":
+        return True
+    return ("list=" in url and "watch?" not in url) or "/playlist" in url
+
+
 def playlist_entries(info, cookies_from_browser=None):
     """Flattens a playlist result into [{"url", "title", "duration",
-    "uploader", "thumbnail_url"}], following a channel root into its Videos
-    tab first. Entries with no usable link (deleted or private videos show up
-    in playlists as placeholders) are dropped."""
+    "uploader", "thumbnail_url"}]. A channel's root gives its Videos *and*
+    its Shorts (up to PLAYLIST_LIMIT of each); a tab that lists playlists
+    (Podcasts, Playlists) gives the videos inside them. Entries with no
+    usable link (deleted or private videos show up in playlists as
+    placeholders) are dropped."""
     entries = list(info.get("entries") or [])
+    groups = [entries]
     if _is_tab_listing(entries):
-        tab = next((e for e in entries if "/videos" in (_entry_url(e) or "")), entries[0])
-        tab_url = _entry_url(tab)
-        if tab_url:
-            sub_info, _sizes = fetch_info_with_sizes(tab_url, cookies_from_browser)
+        tabs = [e for e in entries if any(t in (_entry_url(e) or "") for t in CHANNEL_TABS)] or entries[:1]
+        groups = []
+        for tab in tabs:
+            tab_url = _entry_url(tab)
+            if not tab_url:
+                continue
+            try:
+                sub_info, _sizes = fetch_info_with_sizes(tab_url, cookies_from_browser)
+            except Exception:   # noqa: BLE001 -- a channel without Shorts, say
+                logger.info("Couldn't read the channel tab %s", tab_url, exc_info=True)
+                continue
             if is_playlist(sub_info):
-                entries = list(sub_info.get("entries") or [])
+                groups.append(list(sub_info.get("entries") or []))
+    elif entries and all(isinstance(e, dict) and _is_playlist_ref(e) for e in entries):
+        groups = []
+        budget = PLAYLIST_LIMIT
+        for ref in entries:
+            if budget <= 0:
+                break
+            ref_url = _entry_url(ref)
+            try:
+                sub_info, _sizes = fetch_info_with_sizes(ref_url, cookies_from_browser)
+            except Exception:   # noqa: BLE001
+                logger.info("Couldn't read the playlist %s", ref_url, exc_info=True)
+                continue
+            if is_playlist(sub_info):
+                sub = list(sub_info.get("entries") or [])[:budget]
+                groups.append(sub)
+                budget -= len(sub)
 
-    out = []
-    for e in entries[:PLAYLIST_LIMIT]:
-        if not isinstance(e, dict):
-            continue
-        url = _entry_url(e)
-        title = e.get("title") or ""
-        if not url or title in ("[Deleted video]", "[Private video]"):
-            continue
-        out.append({
-            "url": url,
-            "title": title or url,
-            "duration": int(e.get("duration") or 0),
-            "uploader": e.get("uploader") or e.get("channel") or info.get("uploader") or "",
-            "thumbnail_url": best_thumbnail_url(e),
-        })
+    out, seen = [], set()
+    for group in groups:
+        for e in group[:PLAYLIST_LIMIT]:
+            if not isinstance(e, dict):
+                continue
+            url = _entry_url(e)
+            title = e.get("title") or ""
+            if not url or url in seen or title in ("[Deleted video]", "[Private video]"):
+                continue
+            seen.add(url)
+            out.append({
+                "url": url,
+                "title": title or url,
+                "duration": int(e.get("duration") or 0),
+                "uploader": e.get("uploader") or e.get("channel") or info.get("uploader") or "",
+                "thumbnail_url": best_thumbnail_url(e),
+            })
     return out
+
+
+# ------------------------------------------------------------------ split
+# Links that hold pictures and videos together -- an Instagram account, its
+# stories, a carousel post -- are sorted here: videos for the Video tab's
+# queue, pictures for the Images tab. See app/core/link_router.py.
+
+_DIRECT_HOSTS = ("cdninstagram.com", "fbcdn.net", "video.twimg.com")
+
+
+def is_direct_media_url(url):
+    """A link straight to a media file (as a carousel's or a story's video
+    is queued) rather than to a page yt-dlp reads."""
+    try:
+        parsed = urllib.parse.urlparse(url or "")
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    if any(host == h or host.endswith("." + h) for h in _DIRECT_HOSTS):
+        return True
+    return (parsed.path or "").lower().endswith((".mp4", ".webm", ".mov", ".m4v", ".mkv"))
+
+
+def _is_video_format(f):
+    """Instagram's own files come with no codec details at all (vcodec None),
+    so "unknown" counts as video when the file is a video file."""
+    vcodec = f.get("vcodec")
+    if vcodec == "none":
+        return False
+    return vcodec is not None or (f.get("ext") or "") in ("mp4", "webm", "mov", "m4v")
+
+
+def _direct_video_url(entry):
+    """The best single-file rendition of an entry, for an item with no page
+    of its own: a carousel slide, one story. Never a DASH or HLS piece (those
+    are video without sound, or a playlist of fragments). One with sound
+    first, then the largest; with nothing to tell them apart, the first --
+    Instagram lists its best version first."""
+    best, key = None, None
+    for idx, f in enumerate(entry.get("formats") or []):
+        fid = str(f.get("format_id") or "")
+        if (not f.get("url") or not str(f.get("protocol") or "https").startswith("http")
+                or fid.startswith(("dash", "hls")) or not _is_video_format(f)):
+            continue
+        k = (f.get("acodec") not in (None, "none"), f.get("height") or 0, f.get("width") or 0,
+             f.get("tbr") or 0, -idx)
+        if key is None or k > key:
+            best, key = f, k
+    return best["url"] if best else None
+
+
+def split_media(url, cookies_from_browser=None, progress=None, cancelled=None):
+    """Blocking. What `url` holds, sorted: {"title", "videos", "images",
+    "note"} -- videos in the queue's entry shape, images in the Images
+    tab's. Raises like the other fetches (a login wall included)."""
+    from . import instagram, link_router
+    route = link_router.classify(url)
+
+    if route.kind == "ig_profile":
+        res = instagram.profile_media(route.name, cookies_from_browser, progress=progress, cancelled=cancelled)
+        note = ""
+        if res.get("stopped") and res["partial"]:
+            note = ("Got the latest %d of %d posts — Instagram shows the rest only to someone signed in. Sign in "
+                    "to Instagram in the Browser tab to get them all." % (res["posts"], res["total"]))
+        elif res["partial"]:
+            note = "Read the latest %d of %d posts." % (res["posts"], res["total"])
+        return {"title": res["title"], "videos": res["videos"], "images": res["images"], "note": note}
+
+    if route.kind == "image":
+        name = os.path.splitext(os.path.basename(urllib.parse.urlparse(url).path))[0] or "image"
+        return {"title": name, "videos": [], "images": [{"title": name, "url": url, "is_video": False}],
+                "note": ""}
+
+    if "reddit.com" in url.lower():
+        title, items = fetch_reddit_gallery(url)
+        if items:
+            return {"title": title, "videos": [], "images": items, "note": ""}
+
+    opts = {**base_ydl_opts(cookies_from_browser, url), "skip_download": True,
+            "ignore_no_formats_error": True}
+    try:
+        info = _run(opts, url, lambda ydl: ydl.extract_info(url, download=False))
+    finally:
+        release_opts(opts)
+
+    if route.kind == "ig_post" and not cookies_from_browser and not _instagram_signed_in(url):
+        # signed out, a post's page shows only the first photo of a carousel:
+        # its account's feed has them all
+        whole = _instagram_post_signed_out(info, url)
+        if whole is not None:
+            return whole
+
+    title = info.get("title") or "Untitled post"
+    uploader = info.get("uploader") or info.get("channel") or ""
+    entries = info.get("entries")
+    single = entries is None
+    slides = [info] if single else [e for e in entries if e]
+    videos, images = [], []
+    for n, e in enumerate(slides, start=1):
+        has_video = any(_is_video_format(f) for f in (e.get("formats") or []))
+        thumb = best_thumbnail_url(e)
+        # slides of one post share a title; numbered, their files don't
+        # overwrite one another
+        name = (e.get("title") or title) if single else "%s (%d)" % (e.get("title") or title, n)
+        if has_video:
+            link = url if single else (_direct_video_url(e) or e.get("webpage_url") or url)
+            videos.append({"url": link, "title": name, "duration": int(e.get("duration") or 0),
+                           "uploader": e.get("uploader") or e.get("channel") or uploader,
+                           "thumbnail_url": thumb})
+        elif thumb:
+            images.append({"title": name, "url": thumb, "is_video": False})
+    return {"title": title, "videos": videos, "images": images, "note": ""}
+
+
+def _instagram_signed_in(url):
+    try:
+        return any(r[1] == "sessionid" for r in browser_cookies.scoped_rows(url))
+    except Exception:   # noqa: BLE001
+        return False
+
+
+def _instagram_post_signed_out(info, url):
+    """A post's every slide, from its account's feed (instagram.py), when
+    the post page gave only one. None to keep what yt-dlp found."""
+    from . import instagram
+    if (info.get("entries") or []) or any(_is_video_format(f) for f in (info.get("formats") or [])):
+        return None             # a reel, or already every slide
+    code = [s for s in urllib.parse.urlparse(url).path.split("/") if s]
+    code = code[code.index("p") + 1] if "p" in code and code.index("p") + 1 < len(code) else ""
+    user_id = info.get("uploader_id") or info.get("channel_id")
+    if not code or not user_id or not str(user_id).isdigit():
+        return None
+    try:
+        found = instagram.post_media_signed_out(user_id, code, info.get("channel") or "")
+    except Exception as e:   # noqa: BLE001 -- yt-dlp's answer stands
+        logger.info("Couldn't read %s from its account's feed: %s", url, e)
+        return None
+    if not found:
+        return None
+    videos, images = found
+    if len(videos) + len(images) <= 1:
+        return None
+    return {"title": info.get("title") or "Instagram post", "videos": videos, "images": images, "note": ""}
 
 
 _REDDIT_COOKIE_JAR = None
@@ -482,6 +668,21 @@ def fetch_image_gallery(url, cookies_from_browser=None):
             "is_video": has_video,
         })
     return post_title, items
+
+
+def fetch_torrent_file(url):
+    """Blocking. Downloads a .torrent file from a link to a temporary file
+    and returns its path; raises if what came back isn't one."""
+    import tempfile
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = resp.read(10 * 1024 * 1024 + 1)
+    if len(data) > 10 * 1024 * 1024 or not data.startswith(b"d") or b"4:info" not in data:
+        raise ValueError("That link didn't lead to a .torrent file.")
+    fd, path = tempfile.mkstemp(prefix="awd-", suffix=".torrent")
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return path
 
 
 def best_thumbnail_url(info):
@@ -639,9 +840,19 @@ def run_with_client_fallback(opts, url):
     raise last_error
 
 
-def download_audio(url, save_dir, bitrate, progress_hook, time_range=None, cookies_from_browser=None):
+def _outtmpl(save_dir, url, name):
+    """Files are named after their title. A direct file link has none of its
+    own (the server's file name is a string of digits), so it takes the name
+    it was queued with."""
+    if name and is_direct_media_url(url):
+        safe = yt_dlp.utils.sanitize_filename(name, restricted=False)[:120].strip() or "video"
+        return os.path.join(save_dir, safe.replace("%", "%%") + ".%(ext)s")
+    return os.path.join(save_dir, "%(title)s.%(ext)s")
+
+
+def download_audio(url, save_dir, bitrate, progress_hook, time_range=None, cookies_from_browser=None, name=None):
     """Returns (info, mp3_path_or_None, used_fallback_client_or_None)."""
-    outtmpl = os.path.join(save_dir, "%(title)s.%(ext)s")
+    outtmpl = _outtmpl(save_dir, url, name)
     opts = {
         **base_ydl_opts(cookies_from_browser, url),
         **range_ydl_opts(time_range),
@@ -659,9 +870,9 @@ def download_audio(url, save_dir, bitrate, progress_hook, time_range=None, cooki
     return info, _final_path(info, save_dir, ".mp3"), used_fallback
 
 
-def download_video(url, save_dir, height, progress_hook, time_range=None, cookies_from_browser=None):
+def download_video(url, save_dir, height, progress_hook, time_range=None, cookies_from_browser=None, name=None):
     """Returns (info, merged_mkv_path_or_None, used_fallback_client_or_None)."""
-    outtmpl = os.path.join(save_dir, "%(title)s.%(ext)s")
+    outtmpl = _outtmpl(save_dir, url, name)
     # The trailing "/bestvideo+bestaudio/best" is a last resort for a height
     # the video simply doesn't go down to: without it, asking for 360p on a
     # video whose smallest stream is 480p failed outright with "Requested

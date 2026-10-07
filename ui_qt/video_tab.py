@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from app import config
+from app.core import link_router
 from app.core import downloader, errors, ffmpeg_utils, size_estimate
 from app.logging_setup import get_logger
 from app.utils import (
@@ -486,6 +487,16 @@ class VideoTab(QWidget):
     # A link to sign in for: the Browser tab opens it, so the site's own
     # login is one click away.
     open_browser_requested = Signal(str)
+    # A link that belongs in another tab: ("images" | "torrent", [urls]).
+    send_to_tab = Signal(str, object)
+    # Pictures found while reading an account, a story or a post, for the
+    # Images tab: (title, items, note, switch there, add to what it shows --
+    # true for a pasted list, so its pictures arrive together).
+    images_found = Signal(str, object, str, bool, bool)
+    # The result of sorting a link into videos and pictures (worker thread ->
+    # GUI): (url, result or None, error text, how it was asked for).
+    _split_sig = Signal(str, object, str, str)
+    _split_progress_sig = Signal(str)
 
     def __init__(self, settings, download_tab, parent=None):
         super().__init__(parent)
@@ -545,6 +556,8 @@ class VideoTab(QWidget):
         self._thumb_save_done_sig.connect(self._on_thumb_save_done)
         self._thumb_save_error_sig.connect(self._on_thumb_save_error)
         self._playlist_sig.connect(self._on_playlist)
+        self._split_sig.connect(self._on_split)
+        self._split_progress_sig.connect(self.status_label_set)
         self._form_playlist_sig.connect(self._on_form_playlist)
         self._cookie_notice_sig.connect(self._on_cookie_fallback)
         downloader.cookie_fallback_listeners.append(self._cookie_notice_sig.emit)
@@ -901,6 +914,19 @@ class VideoTab(QWidget):
             return
 
 
+        # Every link is sent where it can be downloaded (app/core/link_router.py):
+        # a picture to Images, a magnet to Torrent; an Instagram account, its
+        # stories or a post -- which can hold pictures and videos together --
+        # is read and sorted first.
+        route = link_router.classify(url)
+        if route.tab in (link_router.IMAGES, link_router.TORRENT):
+            self._hand_over(route, [url])
+            return
+        if route.tab in (link_router.SPLIT, link_router.POST):
+            self._last_fetch_url = url
+            self._start_split(url, route, "form")
+            return
+
         # Held so _on_fetch_done can build the row against the URL that was
         # actually fetched -- the entry field is cleared the moment a row
         # lands, so it cannot be read back at that point.
@@ -942,6 +968,16 @@ class VideoTab(QWidget):
             self._fetch_error_sig.emit(str(e))
 
     def _on_fetch_done(self, title, uploader, duration, height_sizes, thumb_image, thumbnail_url, is_image):
+        if is_image and thumbnail_url:
+            # A picture, not a video: it opens in the Images tab, where it can
+            # be seen and saved at full size, instead of an image mode here.
+            self.fetch_btn.setEnabled(True)
+            self.fetch_btn.set_busy(False)
+            self._clear_form_for_next()
+            self.images_found.emit(title, [{"title": title, "url": thumbnail_url, "is_video": False}], "", True,
+                                   False)
+            self.status_label.setText("That link is a picture -- it's open in the Images tab.")
+            return
         self.is_image_mode = is_image
         if is_image and not thumbnail_url:
             self.status_label.setText(f"Loaded: {title} — but no video or downloadable image was found for this post.")
@@ -1311,9 +1347,22 @@ class VideoTab(QWidget):
 
     def queue_links(self, urls):
         """Stacks every link straight away, then fills in each title and best
-        resolution as its lookup comes back."""
-        added = 0
+        resolution as its lookup comes back. Links that belong elsewhere go
+        there (pictures to Images, magnets to Torrent), and accounts, stories
+        and posts are read and sorted."""
+        videos, elsewhere = [], {}
         for url in urls:
+            route = link_router.classify(url)
+            if route.tab in (link_router.IMAGES, link_router.TORRENT):
+                elsewhere.setdefault(route.tab, []).append(url)
+            elif route.tab in (link_router.SPLIT, link_router.POST):
+                self._start_split(url, route, "queue")
+            else:
+                videos.append(url)
+        for tab, links in elsewhere.items():
+            self.send_to_tab.emit(tab, links)
+        added = 0
+        for url in videos:
             if any(st.payload["url"] == url for st in self._queue_strips):
                 continue
             strip = self._add_queue_strip(self._blank_payload(url))
@@ -1399,6 +1448,13 @@ class VideoTab(QWidget):
             strip.mark_failed("No video or downloadable image was found for this link.")
             self.status_label.setText(
                 "One queued link has nothing downloadable: %s" % strip.payload["url"])
+            return
+        if info["is_image"]:
+            # a picture: to the Images tab, not a card here
+            self._on_strip_remove(strip)
+            self.images_found.emit(info["title"], [{"title": info["title"], "url": info["thumbnail_url"],
+                                                    "is_video": False}], "", False, True)
+            self.status_label.setText("One link was a picture -- it's in the Images tab.")
             return
         strip.resolve(info, _pil_to_pixmap(info.get("thumb_image")))
         # Kept so selecting the card later fills the form at once, without
@@ -1673,6 +1729,100 @@ class VideoTab(QWidget):
         for strip in list(self._queue_strips):
             self._on_strip_remove(strip)
         self.status_label.setText("Queue cleared.")
+
+    # ------------------------------------------------------- Link routing ---
+    def status_label_set(self, text):
+        self.status_label.setText(text)
+
+    def _hand_over(self, route, urls):
+        """A link that belongs in another tab goes there, and the field is
+        cleared for the next one."""
+        self._suppress_url_change = True
+        try:
+            self.url_entry.clear()
+        finally:
+            self._suppress_url_change = False
+        self._previous_url_text = ""
+        self.send_to_tab.emit(route.tab, list(urls))
+        where = "Images" if route.tab == link_router.IMAGES else "Torrent"
+        self.status_label.setText("That's %s -- opened it in the %s tab." % (route.describe(), where))
+
+    def _start_split(self, url, route, how):
+        if how == "form":
+            self.fetch_btn.setEnabled(False)
+            self.fetch_btn.set_busy(True)
+        name = route.name if route.kind in ("ig_profile", "ig_story") and route.name not in ("", "highlights") else ""
+        self.status_label.setText("Reading %s%s..." % (route.describe(), " " + name if name else ""))
+        cookies = self._cookies_from_browser()
+
+        def progress(n):
+            self._split_progress_sig.emit("Reading %s's posts... %d so far" % (name or "the account", n))
+
+        def work():
+            try:
+                res = downloader.split_media(url, cookies, progress=progress)
+                self._split_sig.emit(url, res, "", how)
+            except Exception as e:   # noqa: BLE001 -- reported in the tab
+                logger.exception("Couldn't read %s", url)
+                self._split_sig.emit(url, None, str(e), how)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_split(self, url, res, err, how):
+        route = link_router.classify(url)
+        if how == "form":
+            self.fetch_btn.setEnabled(True)
+            self.fetch_btn.set_busy(False)
+        if res is None:
+            if how == "form":
+                self._on_fetch_error(err)
+            else:
+                self.status_label.setText("Couldn't read %s: %s" % (url, errors.friendly(err)[0]))
+            return
+        videos, images = res["videos"], res["images"]
+        # One video and nothing else -- a reel posted as /p/, an X video --
+        # opens in the form like any video, with its resolutions and sizes.
+        if how == "form" and route.tab == link_router.POST and len(videos) == 1 and not images:
+            self._last_fetch_url = url
+            self.status_label.setText("Fetching info...")
+            self.fetch_btn.setEnabled(False)
+            self.fetch_btn.set_busy(True)
+            threading.Thread(target=self._fetch_thread, args=(url,), daemon=True).start()
+            return
+        if how == "form":
+            self._clear_form_for_next()
+        added = self._stack_entries(videos, None) if videos else 0
+        if images:
+            self.images_found.emit(res["title"], images, res.get("note", ""), not videos, how == "queue")
+        parts = []
+        if videos:
+            parts.append("stacked %d video%s" % (added, "" if added == 1 else "s"))
+        if images:
+            parts.append("sent %d picture%s to the Images tab" % (len(images), "" if len(images) == 1 else "s"))
+        if not parts:
+            text = "Nothing to download was found in %s." % (res["title"] or "that link")
+        else:
+            text = "%s: %s." % (res["title"] or route.describe().capitalize(), " and ".join(parts))
+        if res.get("note"):
+            text += " " + res["note"]
+        self.status_label.setText(text)
+
+    def open_link(self, url):
+        """A link handed over from another tab: fetched exactly as if it had
+        been pasted here."""
+        self._suppress_url_change = True
+        try:
+            self.url_entry.setText(url)
+        finally:
+            self._suppress_url_change = False
+        self._previous_url_text = url
+        self.on_fetch()
+
+    def stack_found(self, title, entries, note=""):
+        """Videos the Images tab found in an account, story or post."""
+        added = self._stack_entries(entries, None)
+        text = "Stacked %d video%s from %s." % (added, "" if added == 1 else "s", title or "the link")
+        self.status_label.setText(text + (" " + note if note else ""))
+        return added
 
     def queue_url(self, url):
         """Entry point for the Browser tab's download button.
@@ -2072,16 +2222,17 @@ class VideoTab(QWidget):
         # read successfully *because* of a chosen browser's cookies then failed
         # to download without them.
         cookies = self._cookies_from_browser()
+        name = (self._jobs.get(job_id) or {}).get("title")
         try:
             if mode == "audio":
                 _, final_path, used_fallback = downloader.download_audio(
-                    url, save_dir, bitrate, hook, time_range, cookies_from_browser=cookies)
+                    url, save_dir, bitrate, hook, time_range, cookies_from_browser=cookies, name=name)
                 warning = self._fallback_client_warning(used_fallback) if used_fallback else ""
                 self._download_done_sig.emit(job_id, warning, "audio", final_path)
                 return
 
             info, merged_path, used_fallback = downloader.download_video(
-                url, save_dir, height, hook, time_range, cookies_from_browser=cookies
+                url, save_dir, height, hook, time_range, cookies_from_browser=cookies, name=name
             )
 
             warning = ""

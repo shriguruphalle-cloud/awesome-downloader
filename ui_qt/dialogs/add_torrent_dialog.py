@@ -8,9 +8,11 @@ The old CTk version used a ttk.Treeview with a manually-toggled unicode
 checkbox column; Qt's QTableWidget has real per-item checkboxes, so that
 click-region-detection dance isn't needed here.
 """
+import os
+
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QAbstractItemView, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
     QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
@@ -97,14 +99,23 @@ class AddTorrentDialog(CinematicDialog):
         files_layout.addWidget(self.table, 1)
         layout.addWidget(files_card, 1)
 
+        # Where this torrent goes: the Torrent tab's folder unless changed
+        # here, for this torrent only.
+        self.save_path = save_path
         save_row = QHBoxLayout()
         save_row.setSpacing(10)
         save_label = QLabel("Save to")
         save_label.setObjectName("muted")
         save_row.addWidget(save_label)
-        save_entry = QLineEdit(save_path)
-        save_entry.setReadOnly(True)
-        save_row.addWidget(save_entry, 1)
+        self.save_entry = QLineEdit(save_path)
+        self.save_entry.setReadOnly(True)
+        self.save_entry.setCursorPosition(0)
+        self.save_entry.setToolTip(save_path)
+        save_row.addWidget(self.save_entry, 1)
+        self.change_btn = Button("Change…")
+        self.change_btn.setToolTip("Choose another folder for this torrent")
+        self.change_btn.clicked.connect(self._choose_folder)
+        save_row.addWidget(self.change_btn)
         layout.addLayout(save_row)
 
         self.autostart_check = QCheckBox("Start downloading when added")
@@ -206,13 +217,22 @@ class AddTorrentDialog(CinematicDialog):
             self.checked[idx] = value
         self.table.blockSignals(False)
 
+    def _choose_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Save this torrent to", self.save_path)
+        if d:
+            self.save_path = os.path.normpath(d)
+            self.save_entry.setText(self.save_path)
+            self.save_entry.setCursorPosition(0)
+            self.save_entry.setToolTip(self.save_path)
+
     def _confirm(self):
         if self.file_list is not None and not any(self.checked.values()):
             QMessageBox.warning(self, config.APP_NAME, "Select at least one file to download.")
             return
         self._poll_timer.stop()
         selected = {idx for idx, c in self.checked.items() if c} if self.file_list is not None else None
-        self.result = {"selected": selected, "auto_start": self.autostart_check.isChecked()}
+        self.result = {"selected": selected, "auto_start": self.autostart_check.isChecked(),
+                       "save_path": self.save_path}
         self.accept()
 
     def _cancel(self):

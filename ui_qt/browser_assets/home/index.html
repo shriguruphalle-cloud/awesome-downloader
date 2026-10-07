@@ -90,6 +90,24 @@
   </form>
 </div>
 
+<section id="player" class="player glass" aria-label="Now playing">
+  <img id="np-art" class="art" alt="">
+  <div id="np-meta" class="meta" title="Go to the tab that's playing" role="button" tabindex="0">
+    <div id="np-title" class="t"></div>
+    <div id="np-artist" class="a"></div>
+  </div>
+  <button id="np-prev" class="np-btn" type="button" aria-label="Previous">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 6h2v12H7zM20 6v12l-9-6z"/></svg>
+  </button>
+  <button id="np-toggle" class="np-btn pp" type="button" aria-label="Pause">
+    <svg class="i-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
+    <svg class="i-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+  </button>
+  <button id="np-next" class="np-btn" type="button" aria-label="Next">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15 6h2v12h-2zM4 6v12l9-6z"/></svg>
+  </button>
+  <div class="np-bar"><i id="np-bar"></i></div>
+</section>
 <script src="home.js"></script>
 </body>
 </html>

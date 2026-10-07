@@ -106,11 +106,14 @@ vt.queue_url("https://youtube.com/watch?v=b1")
 check(any(c.payload["url"].endswith("b1") for c in vt._queue_strips), "queue_url didn't stack")
 check(not shown, "queue_url put up a dialog: %r" % shown)
 
-# ---- Save Image path for image posts goes through the same starter ------------
+# ---- a link that turns out to be a picture goes to the Images tab -------------
+handed = []
+vt.images_found.connect(lambda title, items, note, switch, append: handed.append((title, items, switch)))
 vt._last_fetch_url = "https://a.com/img"
 vt._on_fetch_done("An Image", "", 0, {}, None, "https://t/i.jpg", True)
-vt._on_image_download()
 pump()
-check(calls["images"], "image download didn't start")
+check(handed and handed[0][1][0]["url"] == "https://t/i.jpg" and handed[0][2],
+      "a picture fetched in the Video tab wasn't handed to the Images tab: %r" % handed)
+check(not vt.info_card.isVisible(), "the Video tab kept a picture in its form")
 
 print("\nQUEUE FORM OK")

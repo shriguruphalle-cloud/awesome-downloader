@@ -66,7 +66,7 @@ check(("seek", 10) in fired and ("seek", -10) in fired, "the wheel didn't skip: 
 QApplication.sendEvent(w, QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(5, 5), QPoint(5, 5)))
 texts = [a.text() for a in menus[-1].actions() if not a.isSeparator()]
 want = ["Go to the tab", "Pause", "Back 10 seconds", "Forward 10 seconds", "Previous", "Next", "Unmute tab",
-        "Download it in Awesome Downloader", "Close the tab"]
+        "Picture in picture", "Download it in Awesome Downloader", "Close the tab"]
 check(texts == want, "menu: %s" % texts)
 for a in menus[-1].actions():
     if not a.isSeparator():

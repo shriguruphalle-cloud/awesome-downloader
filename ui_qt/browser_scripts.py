@@ -26,6 +26,67 @@ _POST = """
 """
 
 
+# Picture-in-picture, shared by the scripts below. Chromium's own
+# requestPictureInPicture(), on the video that's playing (else the largest);
+# a site that opted its video out (disablePictureInPicture) is overridden,
+# since the person asked for it -- Google's own PiP extension does the same.
+_PIP = """
+  function __awdPipPick() {
+    var vids = document.getElementsByTagName('video'), best = null, score = -1;
+    for (var i = 0; i < vids.length; i++) {
+      var v = vids[i], r = v.getBoundingClientRect();
+      if (v.readyState === 0 && !v.currentSrc) continue;
+      var s = Math.max(0, r.width) * Math.max(0, r.height) + (!v.paused && !v.ended ? 1e9 : 0);
+      if (s > score) { best = v; score = s; }
+    }
+    return best;
+  }
+  function __awdPipToggle(video) {
+    if (document.pictureInPictureElement) {
+      return document.exitPictureInPicture().then(function () { return 'closed'; },
+                                                  function () { return 'closed'; });
+    }
+    var v = video || __awdPipPick();
+    if (!v) return Promise.resolve('none');
+    if (v.hasAttribute('disablepictureinpicture')) v.removeAttribute('disablepictureinpicture');
+    try { v.disablePictureInPicture = false; } catch (e) {}
+    return v.requestPictureInPicture().then(function () { return 'opened'; },
+      function (e) { return 'refused: ' + ((e && e.message) || e); });
+  }
+  function __awdPipIcon() {
+    var NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('width', '16'); svg.setAttribute('height', '16');
+    svg.style.cssText = 'display:block;pointer-events:none';
+    var a = document.createElementNS(NS, 'rect');
+    [['x', '3.5'], ['y', '5.5'], ['width', '17'], ['height', '13'], ['rx', '2'], ['fill', 'none'],
+     ['stroke', 'currentColor'], ['stroke-width', '1.8']].forEach(function (k) { a.setAttribute(k[0], k[1]); });
+    var b = document.createElementNS(NS, 'rect');
+    [['x', '11.6'], ['y', '11.4'], ['width', '6.6'], ['height', '4.8'], ['rx', '1'],
+     ['fill', 'currentColor']].forEach(function (k) { b.setAttribute(k[0], k[1]); });
+    svg.appendChild(a); svg.appendChild(b);
+    return svg;
+  }
+  function __awdPipButton() {
+    var b = document.createElement('button');
+    b.title = 'Picture in picture (Alt+P)';
+    b.setAttribute('aria-label', 'Picture in picture');
+    b.appendChild(__awdPipIcon());
+    b.style.cssText = [
+      'position:fixed', 'z-index:2147483646', 'top:0', 'left:0', 'width:32px', 'height:32px', 'padding:0',
+      'display:flex', 'align-items:center', 'justify-content:center', 'border-radius:16px', 'cursor:pointer',
+      'color:#f4f7ff', 'background:rgba(10,16,32,.72)', 'border:1px solid rgba(255,255,255,.18)',
+      'box-shadow:0 4px 16px rgba(0,0,0,.35)', 'backdrop-filter:blur(10px) saturate(1.4)',
+      '-webkit-backdrop-filter:blur(10px) saturate(1.4)', 'opacity:0', 'pointer-events:none',
+      'transform:translateY(-6px)', 'transition:opacity .2s ease, transform .25s cubic-bezier(.2,.9,.3,1.15), background .15s'
+    ].join(';');
+    b.addEventListener('mouseenter', function () { b.style.background = 'rgba(56,189,248,.85)'; b.style.color = '#04121f'; });
+    b.addEventListener('mouseleave', function () { b.style.background = 'rgba(10,16,32,.72)'; b.style.color = '#f4f7ff'; });
+    return b;
+  }
+"""
+
+
 def _logo_data_uri(size=72):
     """The logo for the in-page button, at the size it's drawn (twice over,
     for high-DPI). This script is parsed by every page and frame, so what it
@@ -57,8 +118,9 @@ def overlay_button():
   if (window.top !== window.self || window.__awdOverlay) return;
   window.__awdOverlay = true;
   %(post)s
+  %(pip)s
   var LOGO = %(logo)s;
-  var pill = null, shown = false, reported = null, timer = null, target = null, raf = 0;
+  var pill = null, pipBtn = null, shown = false, reported = null, timer = null, target = null, raf = 0;
 
   function build() {
     pill = document.createElement('button');
@@ -99,6 +161,12 @@ def overlay_button():
       __awdPost({type: 'download', url: location.href});
     }, true);
     (document.body || document.documentElement).appendChild(pill);
+    pipBtn = __awdPipButton();
+    pipBtn.addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      __awdPipToggle(target);
+    }, true);
+    (document.body || document.documentElement).appendChild(pipBtn);
   }
 
   function pickVideo() {
@@ -120,8 +188,13 @@ def overlay_button():
     if (!pill || !target || !shown) return;
     var r = target.getBoundingClientRect();
     var top = Math.max(8, r.top + 12), right = Math.min(window.innerWidth, r.right) - 12;
-    pill.style.left = Math.max(8, right - pill.offsetWidth) + 'px';
+    var left = Math.max(8, right - pill.offsetWidth);
+    pill.style.left = left + 'px';
     pill.style.top = top + 'px';
+    if (pipBtn) {
+      pipBtn.style.left = Math.max(8, left - 40) + 'px';
+      pipBtn.style.top = top + 'px';
+    }
   }
   function schedulePlace() { if (!raf) raf = requestAnimationFrame(place); }
 
@@ -136,12 +209,18 @@ def overlay_button():
     if (present && !pill && document.body) build();
     if (!pill) return;
     if (!pill.isConnected) (document.body || document.documentElement).appendChild(pill);
+    if (pipBtn && !pipBtn.isConnected) (document.body || document.documentElement).appendChild(pipBtn);
     target = video;
     if (present !== shown) {
       shown = present;
       pill.style.opacity = present ? '1' : '0';
       pill.style.transform = present ? 'translateY(0) scale(1)' : 'translateY(-6px)';
       pill.style.pointerEvents = present ? 'auto' : 'none';
+      if (pipBtn) {
+        pipBtn.style.opacity = pill.style.opacity;
+        pipBtn.style.transform = pill.style.transform;
+        pipBtn.style.pointerEvents = pill.style.pointerEvents;
+      }
     }
     place();
   }
@@ -161,7 +240,68 @@ def overlay_button():
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
 })();
-""" % {"post": _POST, "logo": json.dumps(_logo_data_uri())}
+""" % {"post": _POST, "pip": _PIP, "logo": json.dumps(_logo_data_uri())}
+
+
+def pip_control():
+    """The toolbar's picture-in-picture button, Alt+P and the Now Playing
+    menu reach the page through this (called with a user gesture, which PiP
+    requires), and it tells the toolbar when a video goes in or out."""
+    return """
+(function () {
+  if (window.top !== window.self || window.__awdPip) return;
+  %(post)s
+  %(pip)s
+  window.__awdPip = {toggle: function () { return __awdPipToggle(null); }};
+  document.addEventListener('enterpictureinpicture', function () { __awdPost({type: 'pip', on: true}); }, true);
+  document.addEventListener('leavepictureinpicture', function () { __awdPost({type: 'pip', on: false}); }, true);
+})();
+""" % {"post": _POST, "pip": _PIP}
+
+
+def pip_frames():
+    """Videos inside frames -- embedded players, most of them from another
+    site -- get the same button on hover. The page's own script can't reach
+    into another site's frame, but this runs in every frame."""
+    return """
+(function () {
+  if (window.top === window.self || window.__awdPipFrame) return;
+  window.__awdPipFrame = true;
+  %(pip)s
+  var btn = null, target = null, hideTimer = null;
+  function hide() {
+    if (!btn) return;
+    btn.style.opacity = '0'; btn.style.pointerEvents = 'none'; btn.style.transform = 'translateY(-6px)';
+  }
+  function show(video) {
+    if (!btn) {
+      btn = __awdPipButton();
+      btn.addEventListener('click', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        __awdPipToggle(target);
+      }, true);
+    }
+    if (!btn.isConnected) (document.body || document.documentElement).appendChild(btn);
+    target = video;
+    var r = video.getBoundingClientRect();
+    btn.style.left = Math.max(8, Math.min(window.innerWidth, r.right) - 44) + 'px';
+    btn.style.top = Math.max(8, r.top + 12) + 'px';
+    btn.style.opacity = '1'; btn.style.pointerEvents = 'auto'; btn.style.transform = 'translateY(0)';
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(hide, 2500);
+  }
+  document.addEventListener('mousemove', function (e) {
+    if (document.fullscreenElement) { hide(); return; }
+    var vids = document.getElementsByTagName('video');
+    for (var i = 0; i < vids.length; i++) {
+      var r = vids[i].getBoundingClientRect();
+      if (r.width >= 200 && r.height >= 110 && e.clientX >= r.left && e.clientX <= r.right &&
+          e.clientY >= r.top && e.clientY <= r.bottom) { show(vids[i]); return; }
+    }
+  }, {passive: true, capture: true});
+  document.addEventListener('fullscreenchange', hide);
+})();
+""" % {"pip": _PIP}
 
 
 # Cosmetic hiding under AdGuard: a short list of well-known ad containers,
@@ -406,4 +546,4 @@ def ad_skip():
 
 
 def all_scripts():
-    return [ad_css(), overlay_button(), media_watch(), link_clicks(), ad_skip()]
+    return [ad_css(), overlay_button(), pip_control(), pip_frames(), media_watch(), link_clicks(), ad_skip()]

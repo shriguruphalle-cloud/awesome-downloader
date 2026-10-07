@@ -15,6 +15,7 @@ import json
 import os
 
 from .. import config
+from . import secure_store
 from ..logging_setup import get_logger
 
 logger = get_logger("video_queue_state")
@@ -52,8 +53,7 @@ def from_entry(entry):
 
 def load():
     try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = secure_store.read_json(STATE_PATH)
         if isinstance(data, list):
             return [e for e in data if isinstance(e, dict) and e.get("url")]
         return []
@@ -67,7 +67,6 @@ def load():
 def save(entries):
     try:
         os.makedirs(config.APPDATA_DIR, exist_ok=True)
-        with open(STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(entries, f, indent=2)
+        secure_store.write_json(STATE_PATH, entries)
     except Exception:
         logger.exception("Failed to save queued links to %s", STATE_PATH)

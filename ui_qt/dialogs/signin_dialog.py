@@ -117,11 +117,22 @@ def show_sign_in_help(parent, url="", dark_mode=True, current=None):
     layout.setContentsMargins(26, 24, 26, 20)
     layout.setSpacing(12)
 
-    layout.addLayout(header(
-        "This post needs a signed-in account",
-        "The site returned nothing for an anonymous request. It opens in your "
-        "browser because you are signed in there. Pick how this app should "
-        "get a session:"))
+    # Named for what was pasted: Instagram shows accounts and stories only to
+    # signed-in visitors, which "this post" didn't say.
+    from app.core import link_router
+    kind = link_router.classify(url or "").kind
+    title, why = {
+        "ig_profile": ("Instagram shows accounts only to signed-in visitors",
+                       "Signed out, Instagram won't list an account's posts. Sign in to Instagram once "
+                       "and this account -- and any other -- downloads in full. Pick how:"),
+        "ig_story": ("Instagram stories need a signed-in account",
+                     "Instagram shows stories only to signed-in visitors. Sign in to Instagram once "
+                     "and stories download like anything else. Pick how:"),
+    }.get(kind, ("This post needs a signed-in account",
+                 "The site returned nothing for an anonymous request. It opens in your "
+                 "browser because you are signed in there. Pick how this app should "
+                 "get a session:"))
+    layout.addLayout(header(title, why))
 
     card_a, lay_a = make_card("Sign in inside this app")
     detail_a = QLabel(

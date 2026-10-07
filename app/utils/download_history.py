@@ -7,6 +7,7 @@ import os
 import time
 
 from .. import config
+from . import secure_store
 from ..logging_setup import get_logger
 
 logger = get_logger("download_history")
@@ -32,8 +33,7 @@ def register_listener(fn):
 
 def load():
     try:
-        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = secure_store.read_json(HISTORY_PATH)
         return data if isinstance(data, list) else []
     except FileNotFoundError:
         return []
@@ -141,7 +141,6 @@ def clear_all():
 def _save(entries):
     try:
         os.makedirs(config.APPDATA_DIR, exist_ok=True)
-        with open(HISTORY_PATH, "w", encoding="utf-8") as f:
-            json.dump(entries, f, indent=2)
+        secure_store.write_json(HISTORY_PATH, entries)
     except Exception:
         logger.exception("Failed to save download history to %s", HISTORY_PATH)

@@ -22,7 +22,7 @@
 ; the wizard. MyAppName stays for the install folder and Start menu group, so
 ; an upgrade lands in the same place as every earlier version.
 #define MyAppDisplayName "Awesome Downloader"
-#define MyAppVersion "2.5.0"
+#define MyAppVersion "2.5.1"
 #define MyAppPublisher "Shriguru Phalle"
 #define MyAppExeName "Awesome Downloader.exe"
 #define MyAppURL "https://awesome-downloader.pages.dev"
@@ -62,6 +62,9 @@ OutputBaseFilename=AwesomeVideoDownloaderSetup
 SetupIconFile=app_icon.ico
 Compression=lzma2
 SolidCompression=yes
+; For the optional ffmpeg refresh ([Code] GetLatestFFmpeg): a .7z extractor
+; that streams large files instead of holding the whole archive in memory.
+ArchiveExtraction=enhanced/nopassword
 WizardStyle=modern
 ; Branded wizard graphics -- without these Inno falls back to its own stock
 ; images, which is why the setup screens still showed generic art after the
@@ -104,9 +107,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; there's no separate "latest version" to fetch for those at install time --
 ; the bundled build-day ffmpeg.exe from [Files] below already covers most
 ; users; this is just an optional refresh to whatever is newest right now).
-; Unchecked by default and fully best-effort (see UpdateFFmpegIfRequested in
-; [Code]) so a slow/unavailable network can never fail the install itself.
-Name: "updateffmpeg"; Description: "Download the latest version of ffmpeg during setup (recommended, needs internet)"; GroupDescription: "Additional options:"; Flags: unchecked
+; Unchecked by default and fully best-effort (see GetLatestFFmpeg in [Code])
+; so a slow/unavailable network can never fail the install itself.
+Name: "updateffmpeg"; Description: "Download the latest version of ffmpeg during setup (about 35 MB, needs internet)"; GroupDescription: "Additional options:"; Flags: unchecked
 
 [InstallDelete]
 ; 2.5 ships as a folder (the .exe plus its _internal libraries) instead of a
@@ -125,7 +128,11 @@ Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 ; To enable, create a "vendor" folder next to this .iss file and put
 ; ffmpeg.exe inside it. If the folder/file doesn't exist, this line is
 ; skipped automatically and the installer still works fine.
-Source: "vendor\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "vendor\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Check: not HaveLatestFFmpeg
+; ...or the newer one fetched on the Ready page, once it has been checked
+; (GetLatestFFmpeg). It is copied with the other files, under the normal
+; progress bar.
+Source: "{tmp}\ffmpeg-latest\ffmpeg.exe"; DestDir: "{app}"; Flags: external ignoreversion skipifsourcedoesntexist; Check: HaveLatestFFmpeg
 
 [Icons]
 Name: "{group}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"
@@ -206,57 +213,122 @@ Type: files; Name: "{app}\ffmpeg.exe"
 Type: dirifempty; Name: "{app}"
 
 [Code]
-// Best-effort only: downloads a fresh ffmpeg.exe over whatever build-day
-// copy [Files] already installed. Every failure mode (no internet, both
-// mirrors down, PowerShell missing/blocked) is swallowed by the script's
-// own try/catch and by ignoring Exec's result code here -- this can only
-// ever improve on the bundled ffmpeg, never break the install, since the
-// working build-day copy is never removed before the replacement is
-// actually ready.
-procedure UpdateFFmpegIfRequested;
+// The optional ffmpeg refresh. It used to run a hidden PowerShell download
+// of a 115 MB zip after the files were copied, with Setup waiting on it and
+// nothing on screen -- for minutes on a slow line, so people took Setup for
+// frozen and cancelled it. Now it happens when Install is clicked, on Setup's
+// own pages: a progress bar for the download (the 35 MB .7z of the same
+// build), then one for unpacking, both saying not to close Setup and offering
+// Skip. Still best-effort: any failure, or Skip, keeps the ffmpeg that comes
+// with the app, and the install always carries on.
+const
+  FFmpegUrl = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.7z';
+  FFmpegArchive = 'ffmpeg-latest.7z';
+
 var
-  ResultCode: Integer;
-  PSCommand: string;
-  AppFfmpegPath: string;
+  FFmpegDownloadPage: TDownloadWizardPage;
+  FFmpegExtractPage: TExtractionWizardPage;
+  LatestFFmpeg: String;
+
+function HaveLatestFFmpeg: Boolean;
 begin
-  if not WizardIsTaskSelected('updateffmpeg') then
-    exit;
-
-  AppFfmpegPath := ExpandConstant('{app}\ffmpeg.exe');
-
-  PSCommand :=
-    '$ErrorActionPreference=''SilentlyContinue''; ' +
-    'try { ' +
-    '  $urls = @(' +
-    '    ''https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'', ' +
-    '    ''https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip''' +
-    '  ); ' +
-    '  $tmpZip = Join-Path $env:TEMP ''awesomedl_ffmpeg_setup.zip''; ' +
-    '  $tmpDir = Join-Path $env:TEMP ''awesomedl_ffmpeg_setup_extract''; ' +
-    '  $ok = $false; ' +
-    '  foreach ($u in $urls) { ' +
-    '    try { Invoke-WebRequest -Uri $u -OutFile $tmpZip -UseBasicParsing -TimeoutSec 90; $ok = $true; break } catch { } ' +
-    '  } ' +
-    '  if ($ok) { ' +
-    '    Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue; ' +
-    '    Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force; ' +
-    '    $exe = Get-ChildItem -Path $tmpDir -Recurse -Filter ffmpeg.exe | Select-Object -First 1; ' +
-    '    if ($exe) { Copy-Item -Path $exe.FullName -Destination ''' + AppFfmpegPath + ''' -Force } ' +
-    '  } ' +
-    '  Remove-Item -Force $tmpZip -ErrorAction SilentlyContinue; ' +
-    '  Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue; ' +
-    '} catch { } ';
-
-  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -Command "' + PSCommand + '"',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := LatestFFmpeg <> '';
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+function OnFFmpegDownload(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
 begin
-  if CurStep = ssPostInstall then
-  begin
-    UpdateFFmpegIfRequested;
+  // the page draws the bar; this says how far, in words
+  if (FileName = FFmpegArchive) and (ProgressMax > 0) then
+    FFmpegDownloadPage.Msg2Label.Caption := 'ffmpeg: ' + IntToStr(Progress div 1048576) +
+      ' of ' + IntToStr(ProgressMax div 1048576) + ' MB';
+  Result := True;
+end;
+
+procedure InitializeWizard;
+begin
+  FFmpegDownloadPage := CreateDownloadPage('Downloading the latest ffmpeg',
+    'About 35 MB. This can take a minute or two on a slow connection. Please don''t close Setup. ' +
+    'Skip keeps the ffmpeg that comes with the app.', @OnFFmpegDownload);
+  FFmpegDownloadPage.ShowBaseNameInsteadOfUrl := True;
+  FFmpegDownloadPage.AbortButton.Caption := 'Skip';
+  FFmpegExtractPage := CreateExtractionPage('Unpacking ffmpeg',
+    'Almost done. Please don''t close Setup.', nil);
+  FFmpegExtractPage.ShowArchiveInsteadOfFile := True;
+  FFmpegExtractPage.AbortButton.Caption := 'Skip';
+end;
+
+// The archive's published checksum, read from the .sha256 file beside it.
+function PublishedSHA256(const FileName: String): String;
+var
+  Text: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(FileName, Text) then
+    Result := Lowercase(Trim(Copy(String(Text), 1, 64)));
+end;
+
+procedure GetLatestFFmpeg;
+var
+  Dir, Exe, Want, Got: String;
+  ResultCode: Integer;
+begin
+  Dir := ExpandConstant('{tmp}\ffmpeg-latest');
+  FFmpegDownloadPage.Clear;
+  FFmpegDownloadPage.Add(FFmpegUrl + '.sha256', FFmpegArchive + '.sha256', '');
+  FFmpegDownloadPage.Add(FFmpegUrl, FFmpegArchive, '');
+  try
+    FFmpegDownloadPage.Show;
+    try
+      FFmpegDownloadPage.Download;
+    finally
+      FFmpegDownloadPage.Hide;
+    end;
+
+    Want := PublishedSHA256(ExpandConstant('{tmp}\' + FFmpegArchive + '.sha256'));
+    Got := Lowercase(GetSHA256OfFile(ExpandConstant('{tmp}\' + FFmpegArchive)));
+    if (Length(Want) <> 64) or (Got <> Want) then
+      RaiseException('the download did not match its published checksum');
+
+    FFmpegExtractPage.Clear;
+    FFmpegExtractPage.Add(ExpandConstant('{tmp}\' + FFmpegArchive), Dir, False);
+    FFmpegExtractPage.Show;
+    try
+      FFmpegExtractPage.Extract;
+    finally
+      FFmpegExtractPage.Hide;
+    end;
+    DeleteFile(ExpandConstant('{tmp}\' + FFmpegArchive));
+
+    // only an ffmpeg that actually runs replaces the one that comes with the app
+    Exe := Dir + '\ffmpeg.exe';
+    if FileExists(Exe) and
+       Exec(Exe, '-hide_banner -version', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and
+       (ResultCode = 0) then
+    begin
+      LatestFFmpeg := Exe;
+      Log('Latest ffmpeg ready: ' + Exe);
+    end else
+      RaiseException('the downloaded ffmpeg did not start');
+  except
+    LatestFFmpeg := '';
+    if FFmpegDownloadPage.AbortedByUser or FFmpegExtractPage.AbortedByUser then
+      Log('ffmpeg refresh skipped by the user.')
+    else begin
+      Log('ffmpeg refresh failed: ' + GetExceptionMessage);
+      SuppressibleMsgBox('Setup couldn''t get the latest ffmpeg (' + GetExceptionMessage + ').' + #13#10#13#10 +
+        'Nothing is wrong: Setup will install the ffmpeg that comes with the app, and everything works.',
+        mbInformation, MB_OK, IDOK);
+    end;
   end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  // Interactive installs only: an update started from inside the app runs
+  // Setup silently and should finish quickly, with the ffmpeg it already has.
+  if (CurPageID = wpReady) and WizardIsTaskSelected('updateffmpeg') and not WizardSilent then
+    GetLatestFFmpeg;
+  Result := True;
 end;
 
 // Everything the app remembers -- settings, download and browsing history,

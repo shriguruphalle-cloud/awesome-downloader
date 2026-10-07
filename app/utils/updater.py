@@ -320,11 +320,25 @@ def check_installer(path, update, scan=defender_scan):
 INSTALL_ARGS = "/SILENT /SP- /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RELAUNCH=1"
 
 
+# The first version that encrypts saved data (app/utils/secure_store.py).
+# One before it reads only plain files, and finding encrypted ones it would
+# show an empty history -- and then save over it.
+ENCRYPTION_SINCE = "2.5.1"
+
+
 def install(path, from_version, to_version, rollback=False, launch=None):
     """Starts the installer (it asks Windows for permission, closes this app,
     installs, starts the app again) after remembering where we came from.
     The caller quits the app right after. Returns whether it started."""
     _record(from_version, to_version, rollback)
+    if rollback and is_outdated(to_version, ENCRYPTION_SINCE):
+        # going back past encryption: leave the files as that version reads them
+        try:
+            from . import secure_store
+            secure_store.ENCRYPT = False
+            secure_store.rewrite_all(secure_store.covered_paths())
+        except Exception:   # noqa: BLE001
+            logger.exception("Couldn't decrypt saved data before going back to %s", to_version)
     if launch is None:
         shell = ctypes.windll.shell32.ShellExecuteW
         rc = shell(None, "open", path, INSTALL_ARGS, os.path.dirname(path), 1)

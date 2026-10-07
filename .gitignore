@@ -4,7 +4,9 @@ dist/
 dist-test/
 build-test/
 dist-release/
+dist-test*/
 build-release/
+build-test*/
 Output/
 *.spec
 *.log

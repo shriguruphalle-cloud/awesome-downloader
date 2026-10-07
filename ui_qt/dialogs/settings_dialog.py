@@ -199,6 +199,13 @@ class SettingsDialog(CinematicDialog):
         note.setObjectName("muted")
         note.setWordWrap(True)
         lay.addWidget(note)
+        self.encrypt = QCheckBox("Encrypt my history, bookmarks and queues on this PC")
+        self.encrypt.setChecked(bool(self.settings.get("encrypt_data", True)))
+        self.encrypt.setToolTip("Windows' own encryption, tied to your Windows account: another account "
+                                "on this PC, or someone with the disk, can't read them. Sign-ins in the "
+                                "Browser tab are always encrypted by the browser itself.")
+        self.encrypt.toggled.connect(self._set_encrypt)
+        lay.addWidget(self.encrypt)
         data_btn = Button("Open data folder")
         data_btn.setCursor(Qt.PointingHandCursor)
         data_btn.clicked.connect(self._open_data_folder)
@@ -228,6 +235,12 @@ class SettingsDialog(CinematicDialog):
             self.setMinimumWidth(need)
         if need > self.width():
             self.resize(need, self.height())
+
+    def _set_encrypt(self, on):
+        from app.utils import secure_store
+        self._set("encrypt_data", bool(on))
+        secure_store.ENCRYPT = bool(on)
+        secure_store.rewrite_all(secure_store.covered_paths())
 
     # ---- building blocks ----
     @staticmethod

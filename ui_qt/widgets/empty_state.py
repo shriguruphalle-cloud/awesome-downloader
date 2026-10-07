@@ -57,6 +57,17 @@ class _Glyph(QWidget):
         p.end()
 
     @staticmethod
+    def _draw_music(p, c, r):
+        """Two notes on a beam."""
+        from PySide6.QtCore import QPointF as P
+        x, y = c.x(), c.y()
+        p.drawLine(P(x - .55 * r, y + .75 * r), P(x - .55 * r, y - .85 * r))
+        p.drawLine(P(x - .55 * r, y - .85 * r), P(x + .95 * r, y - 1.15 * r))
+        p.drawLine(P(x + .95 * r, y - 1.15 * r), P(x + .95 * r, y + .55 * r))
+        p.drawEllipse(P(x - .9 * r, y + .8 * r), .38 * r, .3 * r)
+        p.drawEllipse(P(x + .6 * r, y + .6 * r), .38 * r, .3 * r)
+
+    @staticmethod
     def _draw_download(p, c, r):
         p.drawLine(QPointF(c.x(), c.y() - r * 1.1), QPointF(c.x(), c.y() + r * 0.45))
         head = QPainterPath()

@@ -12,6 +12,7 @@ import json
 import os
 
 from .. import config
+from . import secure_store
 from ..logging_setup import get_logger
 
 logger = get_logger("download_queue_state")
@@ -21,8 +22,7 @@ STATE_PATH = os.path.join(config.APPDATA_DIR, "pending_downloads.json")
 
 def load():
     try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = secure_store.read_json(STATE_PATH)
         if isinstance(data, list):
             return data
         return []
@@ -36,7 +36,6 @@ def load():
 def save(entries):
     try:
         os.makedirs(config.APPDATA_DIR, exist_ok=True)
-        with open(STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(entries, f, indent=2)
+        secure_store.write_json(STATE_PATH, entries)
     except Exception:
         logger.exception("Failed to save pending-download state to %s", STATE_PATH)

@@ -140,6 +140,50 @@ def draw_icon(p, kind, rect, color, weight=1.0):
     elif kind == "plus":
         poly((12, 5), (12, 19))
         poly((5, 12), (19, 12))
+    elif kind == "mic":
+        # a microphone on its stand
+        poly((9, 6.5), (9, 11.5))
+        poly((15, 6.5), (15, 11.5))
+        arc(12, 6.5, 3.0, 0, 180)
+        arc(12, 11.5, 3.0, 180, 180)
+        arc(12, 11.2, 6.0, 180, 180)
+        poly((12, 17.2), (12, 20.2))
+        poly((9, 20.2), (15, 20.2))
+    elif kind == "shuffle":
+        # two crossing paths, each ending in an arrow
+        poly((4, 7), (8.5, 7), (15.5, 17), (20, 17))
+        poly((4, 17), (8.5, 17), (15.5, 7), (20, 7))
+        poly((17.4, 4.4), (20, 7), (17.4, 9.6))
+        poly((17.4, 14.4), (20, 17), (17.4, 19.6))
+    elif kind in ("repeat", "repeat_one"):
+        # a loop with an arrow at each end
+        poly((5, 11), (5, 8.6), (6.6, 7), (18.5, 7))
+        poly((16, 4.4), (18.6, 7), (16, 9.6))
+        poly((19, 13), (19, 15.4), (17.4, 17), (5.5, 17))
+        poly((8, 14.4), (5.4, 17), (8, 19.6))
+        if kind == "repeat_one":
+            poly((11.2, 10.6), (12.4, 9.6), (12.4, 14.4))
+    elif kind == "expand":
+        poly((14, 4.5), (19.5, 4.5), (19.5, 10))
+        poly((19.5, 4.5), (13.5, 10.5))
+        poly((10, 19.5), (4.5, 19.5), (4.5, 14))
+        poly((4.5, 19.5), (10.5, 13.5))
+    elif kind == "shrink":
+        poly((19.5, 10), (14, 10), (14, 4.5))
+        poly((14, 10), (20, 4))
+        poly((4.5, 14), (10, 14), (10, 19.5))
+        poly((10, 14), (4, 20))
+    elif kind == "check":
+        poly((5, 12.5), (9.8, 17.2), (19, 7))
+    elif kind == "music":
+        # two notes on a beam
+        poly((9.2, 17.2), (9.2, 5.6), (19, 3.9), (19, 15.6))
+        dot(6.9, 17.4, 2.4)
+        dot(16.7, 15.8, 2.4)
+    elif kind == "pip":
+        # a screen with a small picture in its corner
+        poly((3.5, 5.5), (20.5, 5.5), (20.5, 18.5), (3.5, 18.5), close=True)
+        poly((11.6, 11.4), (18.2, 11.4), (18.2, 16.2), (11.6, 16.2), close=True, fill=True)
     elif kind in ("star", "star_filled"):
         pts = []
         for i in range(10):
@@ -1175,9 +1219,19 @@ class _AddressEdit(QLineEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._select_on_click = False
+        self._editing = False
 
+    # The suggestions list under the field is a popup, and each time it opens
+    # or refreshes -- on every keystroke while it's showing -- Qt sends this
+    # field a focus-out and a focus-in "because of a popup". Taken as real,
+    # they swapped the text for the page's address and selected all of it
+    # between keystrokes, so on an open page nothing could be typed or
+    # deleted. Only a real arrival or departure counts.
     def focusInEvent(self, event):
         super().focusInEvent(event)
+        if self._editing:
+            return
+        self._editing = True
         self.focused.emit(True)
         # Select everything on the click that focuses the field, the way a
         # browser's address bar does -- but not on every later click.
@@ -1192,7 +1246,20 @@ class _AddressEdit(QLineEdit):
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
+        if event.reason() == Qt.FocusReason.PopupFocusReason or self._suggestions_open():
+            return
+        if not self._editing:
+            return
+        self._editing = False
         self.focused.emit(False)
+
+    def editing(self):
+        """In the field, typing -- even while the suggestions popup holds the keyboard."""
+        return self._editing
+
+    def _suggestions_open(self):
+        popup = self.completer().popup() if self.completer() else None
+        return popup is not None and popup.isVisible()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
@@ -1221,12 +1288,14 @@ class AddressBar(QWidget):
     """The address and search field. Its left edge says how the page was
     reached (a lock for HTTPS, a warning for plain HTTP, a magnifier while
     typing); its right edge holds the page zoom -- only when it isn't 100%
-    -- and nothing else: the bookmark button is the toolbar's."""
+    -- and Chrome's star: bookmark this tab, filled once it is (click again
+    to rename or remove it)."""
 
     submitted = Signal(str)
     escaped = Signal()
     site_clicked = Signal()
     zoom_reset = Signal()
+    star_clicked = Signal()
 
     H = 34
 
@@ -1258,10 +1327,15 @@ class AddressBar(QWidget):
         self.zoom_chip.clicked.connect(self.zoom_reset)
         self.zoom_chip.hide()
         lay.addWidget(self.zoom_chip)
+        self.star_btn = ChromeButton("star", "Bookmark this tab (Ctrl+D)", size=26, icon_size=15, parent=self)
+        self.star_btn.clicked.connect(self.star_clicked)
+        self.star_btn.hide()
+        lay.addWidget(self.star_btn)
 
     def apply_theme(self, t, dark):
         self._t, self._dark = t, dark
         self.site_btn.apply_theme(t)
+        self.star_btn.apply_theme(t)
         self.edit.setStyleSheet(
             f"QLineEdit {{ background: transparent; border: none; color: {t['text']};"
             f" selection-background-color: {t['selection']}; font-size: 13px; padding: 0 2px; }}")
@@ -1275,13 +1349,22 @@ class AddressBar(QWidget):
     # ---- content ----
     def set_url(self, url):
         self._url = url or ""
-        if not self.edit.hasFocus():
+        if not self.edit.editing():
             self.edit.setText(display_url(self._url))
             self.edit.setCursorPosition(0)
         self._sync_site_icon()
 
     def url(self):
         return self._url
+
+    def set_bookmarked(self, can_bookmark, marked):
+        """The star: hidden where there is no page to bookmark (the home
+        page), filled in the brand colour once this tab is bookmarked."""
+        self.star_btn.setVisible(can_bookmark)
+        self.star_btn.set_kind("star_filled" if marked else "star")
+        self.star_btn.tint = self._t["brand"] if marked else None
+        self.star_btn.set_tip("Edit bookmark (Ctrl+D)" if marked else "Bookmark this tab (Ctrl+D)")
+        self.star_btn.update()
 
     def set_zoom(self, factor):
         pct = round(factor * 100)
@@ -1294,7 +1377,7 @@ class AddressBar(QWidget):
 
     def _sync_site_icon(self):
         t = self._t
-        if self.edit.hasFocus() or not self._url:
+        if self.edit.editing() or not self._url:
             kind, tip, tint = "search", "", None
         elif self._url.startswith("https://"):
             kind, tip, tint = "lock", "Connection is secure", None
@@ -1377,6 +1460,7 @@ class NowPlaying(QWidget):
     seek_requested = Signal(int)     # seconds, + or -
     download_clicked = Signal()
     close_clicked = Signal()
+    pip_clicked = Signal()
 
     SKIP_S = 10
     H = 30
@@ -1552,6 +1636,7 @@ class NowPlaying(QWidget):
             menu.addAction("Previous").triggered.connect(lambda: self.prev_clicked.emit())
             menu.addAction("Next").triggered.connect(lambda: self.next_clicked.emit())
         menu.addAction("Unmute tab" if self._muted else "Mute tab").triggered.connect(lambda: self.mute_clicked.emit())
+        menu.addAction("Picture in picture").triggered.connect(lambda: self.pip_clicked.emit())
         menu.addSeparator()
         menu.addAction("Download it in Awesome Downloader").triggered.connect(lambda: self.download_clicked.emit())
         menu.addAction("Close the tab").triggered.connect(lambda: self.close_clicked.emit())
@@ -2330,7 +2415,7 @@ class BookmarksBar(QWidget):
         # Chrome's "All Bookmarks", at the bar's right end.
         self.all_btn = _AllBookmarksButton(self)
         self.all_btn.clicked.connect(self.all_clicked)
-        self.empty = QLabel("Bookmark a page with the bookmark button in the toolbar (Ctrl+D), "
+        self.empty = QLabel("Bookmark a page with the star in the address bar (Ctrl+D), "
                             "and it shows up here.", self)
         favicons().ready.connect(self._icon_arrived)
 

@@ -249,6 +249,7 @@ class HomeView(QObject):
         self.strip = None             # QImage of the wallpaper above the page
         self.strip_top = 0
         self._wanted = set()
+        self._now_playing = None
         from .browser_chrome import favicons
         favicons().ready.connect(self._icon_arrived)
         self._adopt_new_default()
@@ -536,13 +537,29 @@ class HomeView(QObject):
             self.view.post_json({"type": "icons", "icons": {host: uri, host.removeprefix("www."): uri}})
 
     # ---- what the page asks for ----
+    def set_now_playing(self, media):
+        """What's playing in any tab, for the page's mini player (None: hide it)."""
+        keep = ("present", "playing", "title", "artist", "artwork", "position", "duration", "canSkip")
+        self._now_playing = {k: media.get(k) for k in keep} if media else None
+        if self.view is not None:
+            self.view.post_json({"type": "np", "media": self._now_playing})
+
     def _on_message(self, msg):
         if not isinstance(msg, dict):
             return
         kind = msg.get("type")
+        if kind == "np-cmd":
+            cmd = msg.get("cmd")
+            if cmd == "goto":
+                self.browser._goto_media_tab()
+            elif cmd in ("toggle", "next", "prev"):
+                self.browser._media_command(cmd)
+            return
         if kind == "ready":
             self._loaded = True
             self.view.post_json(self.state())
+            if self._now_playing:
+                self.view.post_json({"type": "np", "media": self._now_playing})
         elif kind == "go":
             text = str(msg.get("text") or "").strip()
             where = msg.get("where") if msg.get("where") in ("current", "tab", "background") else "current"

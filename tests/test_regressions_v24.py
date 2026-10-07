@@ -60,12 +60,12 @@ print("failed save reported and button re-enabled: ok")
 seen = []
 
 
-def fake_video(url, save_dir, height, hook, time_range=None, cookies_from_browser=None):
+def fake_video(url, save_dir, height, hook, time_range=None, cookies_from_browser=None, name=None):
     seen.append(cookies_from_browser)
     return {"height": height}, None, None
 
 
-def fake_audio(url, save_dir, bitrate, hook, time_range=None, cookies_from_browser=None):
+def fake_audio(url, save_dir, bitrate, hook, time_range=None, cookies_from_browser=None, name=None):
     seen.append(cookies_from_browser)
     return {}, None, None
 

@@ -29,6 +29,8 @@ if REPO not in sys.path:
 STATE_DIR = tempfile.mkdtemp(prefix="awd-test-state-")
 os.environ["LOCALAPPDATA"] = STATE_DIR
 os.environ["USERPROFILE"] = STATE_DIR
+# no blocklist downloads from the tests (app/core/safe_browsing.py)
+os.environ["AWD_OFFLINE_LISTS"] = "1"
 atexit.register(shutil.rmtree, STATE_DIR, True)
 
 try:
@@ -79,11 +81,58 @@ def _isolate_clipboard():
 _isolate_clipboard()
 
 
+# Which screen test windows open on: the second one when there is one, so
+# a person watching the first isn't covered by them (AWD_TEST_SCREEN=0 puts
+# them back on the main screen).
+TEST_SCREEN = int(os.environ.get("AWD_TEST_SCREEN", "1"))
+_screen_filter = None
+
+
+def _to_test_screen(w):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QGuiApplication
+    screens = QGuiApplication.screens()
+    if TEST_SCREEN >= len(screens):
+        return
+    target = screens[TEST_SCREEN]
+    current = w.screen()
+    if current is target:
+        return
+    dst = target.availableGeometry()
+    src = current.availableGeometry() if current is not None else dst
+    state = w.windowState()
+    if state & (Qt.WindowState.WindowMaximized | Qt.WindowState.WindowFullScreen):
+        w.setWindowState(Qt.WindowState.WindowNoState)
+    if w.windowHandle() is not None:
+        w.windowHandle().setScreen(target)
+    at = w.frameGeometry().topLeft() - src.topLeft() + dst.topLeft()
+    x = max(dst.left(), min(at.x(), dst.right() - w.frameGeometry().width()))
+    y = max(dst.top(), min(at.y(), dst.bottom() - w.frameGeometry().height()))
+    w.move(QPoint(x, y))
+    if state & (Qt.WindowState.WindowMaximized | Qt.WindowState.WindowFullScreen):
+        w.setWindowState(state)
+
+
 def qapp():
-    """The one QApplication for this process, with the app's stylesheet."""
-    global _app
-    from PySide6.QtWidgets import QApplication
+    """The one QApplication for this process, with the app's stylesheet --
+    and every window it shows sent to the test screen (TEST_SCREEN)."""
+    global _app, _screen_filter
+    from PySide6.QtCore import QEvent, QObject, Qt
+    from PySide6.QtWidgets import QApplication, QWidget
     _app = QApplication.instance() or QApplication(sys.argv)
+    if _screen_filter is None:
+        class _ToTestScreen(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
+                    kind = obj.windowFlags() & Qt.WindowType.WindowType_Mask
+                    if kind not in (Qt.WindowType.Popup, Qt.WindowType.ToolTip):
+                        try:
+                            _to_test_screen(obj)
+                        except Exception:   # noqa: BLE001 -- a test runs wherever, rather than not at all
+                            pass
+                return False
+        _screen_filter = _ToTestScreen(_app)
+        _app.installEventFilter(_screen_filter)
     return _app
 
 
@@ -156,6 +205,11 @@ def build_window(tabs=("video", "torrent", "images", "browser", "download", "his
             from ui_qt.images_tab import ImagesTab
             made[name] = ImagesTab(settings=st)
             win.add_tab(made[name], "Images")
+        elif name == "music":
+            from ui_qt.music_tab import MusicTab
+            made[name] = MusicTab(settings=st)
+            win.add_tab(made[name], "Music")
+            win.set_full_bleed(made[name])
         elif name == "browser":
             from ui_qt.browser_tab import BrowserTab
             made[name] = BrowserTab(settings=st, download_tab=dl)
@@ -171,6 +225,10 @@ def build_window(tabs=("video", "torrent", "images", "browser", "download", "his
     win.resize(*size)
     win.show()
     pump(3)
+    # the window centres itself on the main screen once shown; the test
+    # screen wins (TEST_SCREEN)
+    _to_test_screen(win)
+    pump(2)
     return win, made
 
 

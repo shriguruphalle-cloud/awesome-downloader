@@ -21,6 +21,9 @@ import ctypes
 import os
 import re
 import time
+import urllib.parse
+import json
+import html
 import webbrowser
 from urllib.parse import urlparse
 
@@ -33,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from app import config
 from app.logging_setup import get_logger
+from app.core import safe_browsing
 from app.utils import browser_data, download_history, formatting, settings as settings_store
 
 from . import browser_engine, browser_scripts, motion, palettes, theme, webview2
@@ -52,7 +56,7 @@ _IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?(/\S*)?$")
 
 VK_CONTROL, VK_SHIFT, VK_MENU = 0x11, 0x10, 0x12
 VK_TAB, VK_ESCAPE, VK_PRIOR, VK_NEXT, VK_HOME = 0x09, 0x1B, 0x21, 0x22, 0x24
-VK_F4, VK_F6 = 0x73, 0x75
+VK_F4, VK_F6, VK_F11 = 0x73, 0x75, 0x7A
 
 
 def normalize_address(text):
@@ -141,6 +145,44 @@ def _short_count(n):
     return f"{n / 1000:.0f}k" if n >= 10000 else (f"{n / 1000:.1f}k" if n >= 1000 else str(n))
 
 
+
+# What a stopped page shows instead. Built with plain markup (it's our own
+# string, shown with NavigateToString), and it talks back with the same
+# messages as the page scripts.
+_BLOCKED_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Blocked: %(host)s</title>
+<style>
+  html, body { margin: 0; height: 100%%; background: #0b0f1c; color: #eaf2ff;
+    font: 15px/1.6 "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; }
+  body { display: grid; place-items: center; }
+  .card { width: min(560px, calc(100vw - 48px)); padding: 32px 34px; border-radius: 22px;
+    background: rgba(255, 107, 107, .07); border: 1px solid rgba(255, 107, 107, .35); }
+  .k { font: 600 12px/1 "Segoe UI", sans-serif; letter-spacing: .14em; text-transform: uppercase; color: #ff8b8b; }
+  h1 { font-size: 26px; line-height: 1.2; margin: 12px 0 10px; }
+  p { color: rgba(234, 242, 255, .78); margin: 0 0 14px; }
+  .host { font-family: Consolas, monospace; color: #fff; }
+  .row { display: flex; gap: 12px; align-items: center; margin-top: 22px; flex-wrap: wrap; }
+  button { font: 600 14px "Segoe UI", sans-serif; border-radius: 999px; padding: 11px 22px; cursor: pointer; }
+  .back { background: #38bdf8; color: #04121f; border: 0; }
+  .risk { background: none; border: 0; color: rgba(234, 242, 255, .55); text-decoration: underline; padding: 11px 4px; }
+  small { display: block; margin-top: 18px; color: rgba(234, 242, 255, .45); font-size: 12px; }
+</style></head><body><div class="card">
+  <div class="k">Dangerous site stopped</div>
+  <h1>This site may harm you</h1>
+  <p><span class="host">%(host)s</span> is on an open list of known dangerous sites: it's listed as %(what)s.</p>
+  <p>Nothing from it has loaded. If you got here from an email or a message, close it.</p>
+  <div class="row">
+    <button class="back" id="back" autofocus>Go back to safety</button>
+    <button class="risk" id="risk">I understand the risk -- continue anyway</button>
+  </div>
+  <small>Listed by %(list)s. Lists only know what's been reported, so a site that isn't
+  stopped isn't necessarily safe.</small>
+</div>
+<script>
+  function post(m) { try { chrome.webview.postMessage(m); } catch (e) {} }
+  document.getElementById('back').onclick = function () { post({type: 'sb-back'}); };
+  document.getElementById('risk').onclick = function () { post({type: 'sb-continue', url: %(url)s}); };
+</script></body></html>"""
+
 class _Tab:
     """One browser tab. Its page (a WebView2Widget) is created the first
     time the tab is actually shown -- a tab opened in the background, or
@@ -164,6 +206,7 @@ class _Tab:
         self.media = None
         self.media_at = 0.0
         self.has_video = False
+        self.pip = False
         self.adguard = None
         self.opener = None
         self.hidden_since = time.monotonic()
@@ -415,6 +458,9 @@ class BrowserTab(QWidget):
         self.download_tab = download_tab
         self.download_dir = settings_store.get_save_dir(settings, "video", config.DEFAULT_DOWNLOAD_DIR)
         self._tabs = []
+        # Tabs in the order they were last used: closing one goes back to
+        # the one used before it, as in Chrome and Edge.
+        self._recent = []
         self._cur = None
         self._closed = []
         self._page_fullscreen = False
@@ -492,15 +538,24 @@ class BrowserTab(QWidget):
         self.address = AddressBar()
         bar.addWidget(self.address, 1)
         bar.addSpacing(6)
-        self.now_playing = NowPlaying()
-        bar.addWidget(self.now_playing)
+        # Download right after the address (it's about this page); the music
+        # player after it (it's about whichever tab is playing).
         self.download_btn = ActionButton("Download")
         self.download_btn.setToolTip("Download this page's video with Awesome Downloader")
         bar.addWidget(self.download_btn)
+        bar.addSpacing(4)
+        self.now_playing = NowPlaying()
+        bar.addWidget(self.now_playing)
         bar.addSpacing(2)
+        # Picture in picture for the page's video (Alt+P), the way Google's
+        # PiP extension does it -- built in, like AdGuard.
+        self.pip_btn = ChromeButton("pip", "Picture in picture (Alt+P)")
+        bar.addWidget(self.pip_btn)
         # Bookmarks this page (and puts it on the bookmarks bar); right-click
         # -- or a click on a New Tab -- lists every bookmark.
-        self.bookmarks_btn = ChromeButton("bookmark", "Bookmark this page (Ctrl+D) -- right-click for all bookmarks")
+        # Adding a bookmark is the address bar's star (Chrome's place for it);
+        # this button is the way to every bookmark.
+        self.bookmarks_btn = ChromeButton("bookmark", "All bookmarks (Ctrl+Shift+O)")
         self.bookmarks_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.bookmarks_btn.customContextMenuRequested.connect(
             lambda _pos: self._show_bookmarks_panel(self.bookmarks_btn))
@@ -561,7 +616,9 @@ class BrowserTab(QWidget):
         self.address.escaped.connect(self._focus_page)
         self.address.zoom_reset.connect(lambda: self._set_zoom(1.0))
         self.download_btn.clicked.connect(self._send_current_to_video_tab)
-        self.bookmarks_btn.clicked.connect(self._on_bookmark_button)
+        self.bookmarks_btn.clicked.connect(lambda: self._show_bookmarks_panel(self.bookmarks_btn))
+        self.pip_btn.clicked.connect(lambda: self.toggle_pip())
+        self.address.star_clicked.connect(self._on_bookmark_button)
         self.shield_btn.clicked.connect(self._show_adguard_panel)
         self.menu_btn.clicked.connect(self._show_menu)
         self.now_playing.activated.connect(self._goto_media_tab)
@@ -575,6 +632,7 @@ class BrowserTab(QWidget):
         self.now_playing.download_clicked.connect(
             lambda: self._with_media_tab(lambda t: self.open_in_video_tab.emit(t.url)))
         self.now_playing.close_clicked.connect(lambda: self._with_media_tab(self._close))
+        self.now_playing.pip_clicked.connect(lambda: self._with_media_tab(self.toggle_pip))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -603,6 +661,7 @@ class BrowserTab(QWidget):
             add("Ctrl+W", self.close_current_tab),
             add("Ctrl+Shift+W", self.close_all_tabs),
             add("Ctrl+Shift+O", lambda: self._show_bookmarks_panel(self.bookmarks_btn)),
+            add("Alt+P", lambda: self.toggle_pip()),
             add("Ctrl+F4", self.close_current_tab),
             add("Ctrl+Tab", lambda: self._cycle(1)),
             add("Ctrl+Shift+Tab", lambda: self._cycle(-1)),
@@ -636,7 +695,7 @@ class BrowserTab(QWidget):
         self._dark = self._dark_mode()
         t = self._t = theme.tokens(dark_mode=self._dark)
         for b in (self.back_btn, self.fwd_btn, self.reload_btn, self.home_btn, self.shield_btn, self.menu_btn,
-                  self.bookmarks_btn):
+                  self.bookmarks_btn, self.pip_btn):
             b.apply_theme(t)
         self.strip.apply_theme(t, self._dark)
         self.address.apply_theme(t, self._dark)
@@ -722,6 +781,8 @@ class BrowserTab(QWidget):
             view.add_startup_script(js)
         view.created.connect(lambda v=view: v.set_color_scheme(self._dark))
         view.urlChanged.connect(lambda u, t=tab: self._on_url(t, u))
+        view.nav_guard = self._dangerous
+        view.navigationBlocked.connect(lambda u, hit, t=tab: self._show_blocked(t, u, hit))
         view.titleChanged.connect(lambda s, t=tab: self._on_title(t, s))
         view.loadStarted.connect(lambda t=tab: self._on_load_started(t))
         view.loadProgress.connect(lambda v, t=tab: self._on_progress(t, v))
@@ -828,6 +889,7 @@ class BrowserTab(QWidget):
     def _switch_to(self, tab):
         if tab not in self._tabs:
             return
+        self._recent = [t for t in self._recent if t is not tab and t in self._tabs] + [tab]
         prev = self._current()
         if prev is not None and prev is not tab:
             prev.pill.set_active(False)
@@ -899,8 +961,13 @@ class BrowserTab(QWidget):
             view.close_page()
             self.pages.removeWidget(view)
             view.deleteLater()
+        self._recent = [t for t in self._recent if t is not tab]
         if was_current:
-            target = tab.opener if tab.opener in self._tabs else self._tabs[min(idx, len(self._tabs) - 1)]
+            # back to the tab used before this one; failing that, the one
+            # that opened it, then its neighbour
+            target = next((t for t in reversed(self._recent) if t in self._tabs), None)
+            if target is None:
+                target = tab.opener if tab.opener in self._tabs else self._tabs[min(idx, len(self._tabs) - 1)]
             self._cur = None
             self._switch_to(target)
         self._update_now_playing()
@@ -1106,6 +1173,7 @@ class BrowserTab(QWidget):
             self._status_fast()
         tab.loading = True
         tab.has_video = False
+        tab.pip = False
         tab.adguard = None
         tab.private_blocked = 0
         tab.pill.set_loading(True)
@@ -1202,6 +1270,9 @@ class BrowserTab(QWidget):
         if self._fs_exit is not None:
             self._fs_exit.lift()
         win = self.window()
+        if getattr(win, "_app_fullscreen", False) and not self._page_fullscreen:
+            win.leave_fullscreen()          # the app's own full screen (F11)
+            return
         stuck = self._page_fullscreen or (hasattr(win, "isFullScreen") and win.isFullScreen())
         if not stuck:
             return
@@ -1231,10 +1302,26 @@ class BrowserTab(QWidget):
             tab.has_video = bool(msg.get("value"))
             if tab is self._cur:
                 self.download_btn.set_lit(tab.has_video)
+                self._sync_pip_button(tab)
+        elif kind == "pip":
+            tab.pip = bool(msg.get("on"))
+            if tab is self._cur:
+                self._sync_pip_button(tab)
         elif kind == "media":
             tab.media = msg if msg.get("present") else None
             tab.media_at = time.monotonic()
             self._update_now_playing()
+        elif kind == "sb-back":
+            if tab.view is not None and tab.view.can_go_back():
+                tab.view.back()
+            else:
+                self.go_home()
+        elif kind == "sb-continue":
+            url = str(msg.get("url") or "")
+            if url.startswith(("http://", "https://")):
+                safe_browsing.allow(url)
+                logger.warning("Opening a listed dangerous site at the person's request: %s", url)
+                tab.view.load(url)
         elif kind == "open-tab":
             url = str(msg.get("url") or "")
             if url.startswith(("http://", "https://")):
@@ -1323,6 +1410,12 @@ class BrowserTab(QWidget):
                 action = self.go_home
         elif vk == VK_F6 and not (ctrl or alt):
             action = self.address.focus_and_select
+        elif vk == VK_F11 and not (ctrl or alt):
+            win = self.window()
+            if hasattr(win, "toggle_app_fullscreen") and not self._page_fullscreen:
+                action = win.toggle_app_fullscreen
+        if alt and not ctrl and vk == 0x50:     # Alt+P
+            action = self.toggle_pip
         elif vk == VK_ESCAPE:
             QTimer.singleShot(0, self._escape_fallback)
             return
@@ -1407,12 +1500,9 @@ class BrowserTab(QWidget):
         page = not tab.on_home
         self.address.set_url(tab.url if page else "")
         self.address.set_zoom(tab.zoom if page else 1.0)
-        marked = page and browser_data.is_bookmarked(browser_data.load_bookmarks(), tab.url)
-        self.bookmarks_btn.set_kind("bookmark_filled" if marked else "bookmark")
-        self.bookmarks_btn.tint = self._t["brand"] if marked else None
-        self.bookmarks_btn.set_tip(("Edit bookmark (Ctrl+D)" if marked else "Bookmark this page (Ctrl+D)")
-                                   + " -- right-click for all bookmarks")
-        self.bookmarks_btn.update()
+        can_mark = page and (tab.url or "").startswith(("http://", "https://", "file:"))
+        marked = can_mark and browser_data.is_bookmarked(browser_data.load_bookmarks(), tab.url)
+        self.address.set_bookmarked(can_mark, marked)
         can_back = page
         can_fwd = (tab.on_home and tab.page_ahead) or (page and tab.view is not None and tab.view.can_go_forward())
         self.back_btn.setEnabled(can_back)
@@ -1422,6 +1512,7 @@ class BrowserTab(QWidget):
         self.reload_btn.set_tip("Stop loading (Esc)" if page and tab.loading else "Reload (Ctrl+R)")
         self.download_btn.setEnabled(page and tab.url.startswith(("http://", "https://")))
         self.download_btn.set_lit(page and tab.has_video)
+        self._sync_pip_button(tab)
         if not (page and tab.loading):
             self.load_bar.reset()
         self._sync_shield()
@@ -1482,6 +1573,62 @@ class BrowserTab(QWidget):
         self._media_source = tab
         self.now_playing.set_media(tab.media if tab is not None else None)
         self.now_playing.set_muted(bool(tab is not None and tab.muted))
+        self.home.set_now_playing(tab.media if tab is not None else None)
+
+    # ---- dangerous sites ----
+    def _dangerous(self, url):
+        if not browser_data.get_pref("safe_browsing", True):
+            return None
+        return safe_browsing.check(url)
+
+    def _set_safe_browsing(self, on):
+        browser_data.set_pref("safe_browsing", bool(on))
+        if on:
+            safe_browsing.start()
+
+    def _show_blocked(self, tab, url, hit):
+        """In place of a listed page: what it is, why it was stopped, and the
+        way back -- with "continue anyway" for a list that's wrong."""
+        kind, list_name = hit
+        host = urllib.parse.urlparse(url).hostname or url
+        what = {"phishing": "a phishing site -- a page made to look like another one, to take passwords "
+                            "or card details",
+                "malware": "a site that spreads malware -- software that harms your PC or steals from it",
+                "scam": "a scam site"}.get(kind, "a dangerous site")
+        tab.url = url
+        tab.title = "Blocked: %s" % host
+        tab.pill.set_title(tab.title)
+        if tab is self._cur:
+            self._sync_toolbar()
+        tab.view.core.NavigateToString(_BLOCKED_PAGE % {
+            "host": html.escape(host), "what": html.escape(what), "list": html.escape(list_name),
+            "url": json.dumps(url)})
+        show_toast(self.pages, "Stopped %s: it's on a list of %s sites." % (host, kind), kind="warning")
+
+    # ---- picture in picture ----
+    def _sync_pip_button(self, tab):
+        page = tab is not None and not tab.on_home
+        self.pip_btn.setEnabled(bool(page and (tab.has_video or tab.media or tab.pip)))
+        self.pip_btn.tint = self._t["brand"] if page and tab.pip else None
+        self.pip_btn.set_tip("Close picture in picture (Alt+P)" if page and tab.pip
+                             else "Picture in picture (Alt+P)")
+        self.pip_btn.update()
+
+    def toggle_pip(self, tab=None):
+        """Puts the page's video in a picture-in-picture window, or brings it
+        back. Run as a click in the page: Chromium allows PiP only from one."""
+        tab = tab or self._current()
+        if tab is None or tab.on_home or tab.view is None:
+            return
+
+        def done(result):
+            if result == "none":
+                show_toast(self.pages, "There's no video on this page to pop out. "
+                           "For a video inside a frame, use the button on the video itself.", kind="info")
+            elif isinstance(result, str) and result.startswith("refused"):
+                logger.info("Picture in picture refused: %s", result)
+                show_toast(self.pages, "This video can't play in picture in picture.", kind="warning")
+        tab.view.evaluate("window.__awdPip ? window.__awdPip.toggle() : 'none'", done, gesture=True)
 
     def _with_media_tab(self, fn):
         tab = getattr(self, "_media_source", None)
@@ -1557,7 +1704,8 @@ class BrowserTab(QWidget):
         popup.saved.connect(save)
         popup.removed.connect(remove)
         popup.show_all.connect(lambda: QTimer.singleShot(0, lambda: self._show_bookmarks_panel(self.bookmarks_btn)))
-        popup.open_under(self.bookmarks_btn)
+        star = self.address.star_btn
+        popup.open_under(star if star.isVisible() else self.bookmarks_btn)
 
     def _remove_bookmark(self, url):
         browser_data.remove_bookmark(url)
@@ -1810,6 +1958,15 @@ class BrowserTab(QWidget):
         restore.setCheckable(True)
         restore.setChecked(bool(browser_data.get_pref("restore_tabs", True)))
         restore.triggered.connect(lambda on: browser_data.set_pref("restore_tabs", bool(on)))
+        sites, updated = safe_browsing.status()
+        guard = menu.addAction("Block dangerous sites")
+        guard.setCheckable(True)
+        guard.setChecked(bool(browser_data.get_pref("safe_browsing", True)))
+        guard.setToolTip("Phishing, malware and scam sites from open lists (URLhaus, The Block List "
+                         "Project): %s sites, updated %s" % (
+                             "{:,}".format(sites) if sites else "no",
+                             time.strftime("%d %b %H:%M", time.localtime(updated)) if updated else "not yet"))
+        guard.triggered.connect(self._set_safe_browsing)
         menu.addAction(icon("trash", muted), "Clear browsing data...").triggered.connect(self._clear_data_dialog)
         menu.addSeparator()
 
@@ -1962,6 +2119,8 @@ class BrowserTab(QWidget):
         if cur is not None and cur.view is not None:
             cur.view.set_active(True)
         self.services.start()
+        if browser_data.get_pref("safe_browsing", True):
+            safe_browsing.start()
         tab = self._current()
         if tab is not None and tab.pending_url:
             self._load_in(tab, tab.pending_url)

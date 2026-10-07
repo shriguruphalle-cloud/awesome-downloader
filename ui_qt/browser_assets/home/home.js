@@ -1032,6 +1032,8 @@ void main() {
     } else if (msg.type === 'active') {
       windowActive = !!msg.on;
       if (live) { if (animateOn()) startLive(); else if (liveRaf) { cancelAnimationFrame(liveRaf); liveRaf = 0; } }
+    } else if (msg.type === 'np') {
+      renderPlayer(msg.media || null);
     } else if (msg.type === 'replay' && !still) {
       // Shown again (a new tab): the column rises in once more.
       body.classList.remove('ready');
@@ -1039,6 +1041,65 @@ void main() {
       body.classList.add('ready');
     }
   });
+
+  // ---- the mini player ----
+  const player = $('#player');
+  let np = null, npAt = 0, npTick = 0;
+  function npProgress() {
+    if (!np || !(np.duration > 1)) { $('#np-bar').style.width = '0'; return; }
+    const pos = np.position + (np.playing ? (performance.now() - npAt) / 1000 : 0);
+    $('#np-bar').style.width = Math.min(100, 100 * pos / np.duration) + '%';
+  }
+  function renderPlayer(m) {
+    np = m && m.present ? m : null;
+    npAt = performance.now();
+    clearInterval(npTick);
+    if (!np) { player.classList.remove('on'); body.classList.remove('player-raised'); return; }
+    $('#np-title').textContent = np.title || 'Playing';
+    $('#np-artist').textContent = np.artist || '';
+    const art = $('#np-art');
+    if (np.artwork) { art.src = np.artwork; art.classList.remove('none'); }
+    else { art.removeAttribute('src'); art.classList.add('none'); }
+    player.classList.toggle('paused', !np.playing);
+    player.classList.toggle('noskip', !np.canSkip);
+    $('#np-toggle').setAttribute('aria-label', np.playing ? 'Pause' : 'Play');
+    npProgress();
+    if (np.playing) npTick = setInterval(npProgress, 1000);
+    player.classList.add('on');
+    placePlayer();
+  }
+  // In the gap between the links at the left and Customize at the right --
+  // centred on the page when it fits there, else centred in the gap -- and a
+  // row higher when the gap is too narrow, so it never covers either.
+  function placePlayer() {
+    const vw = innerWidth, gap = 14, MAX = 460, MIN = 320;
+    const links = $('#links'), cust = $('#customize');
+    const lr = links && getComputedStyle(links).display !== 'none' ? links.getBoundingClientRect().right : 0;
+    const cl = cust && getComputedStyle(cust).display !== 'none' ? cust.getBoundingClientRect().left : vw;
+    const room = cl - lr - 2 * gap;
+    let w, left, raised;
+    if (room >= MIN) {
+      w = Math.min(MAX, room);
+      left = (vw - w) / 2;
+      if (left < lr + gap || left + w > cl - gap) left = lr + gap + (room - w) / 2;
+      raised = false;
+    } else {
+      w = Math.min(MAX, vw - 32);
+      left = (vw - w) / 2;
+      raised = true;
+    }
+    player.style.width = w + 'px';
+    player.style.left = Math.round(left) + 'px';
+    player.style.bottom = raised ? '64px' : '11px';
+    body.classList.toggle('player-raised', raised && player.classList.contains('on'));
+  }
+  addEventListener('resize', placePlayer);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(placePlayer);
+  $('#np-prev').addEventListener('click', () => post({ type: 'np-cmd', cmd: 'prev' }));
+  $('#np-next').addEventListener('click', () => post({ type: 'np-cmd', cmd: 'next' }));
+  $('#np-toggle').addEventListener('click', () => post({ type: 'np-cmd', cmd: 'toggle' }));
+  $('#np-meta').addEventListener('click', () => post({ type: 'np-cmd', cmd: 'goto' }));
+  $('#np-meta').addEventListener('keydown', (e) => { if (e.key === 'Enter') post({ type: 'np-cmd', cmd: 'goto' }); });
 
   let resizeTimer = 0;
   addEventListener('resize', () => {
@@ -1051,6 +1112,14 @@ void main() {
     state: () => state,
     layers: () => layers.map(l => ({ depth: l.depth, transform: l.el.style.transform })),
     live: () => ({ name: live ? wallpaperName() : null, running: !!liveRaf, clock: liveClock }),
+    player: () => {
+      const r = player.getBoundingClientRect(), l = $('#links').getBoundingClientRect(),
+            c = $('#customize').getBoundingClientRect();
+      return { on: player.classList.contains('on'), title: $('#np-title').textContent,
+               paused: player.classList.contains('paused'),
+               rect: [r.left, r.top, r.right, r.bottom], links: [l.left, l.top, l.right, l.bottom],
+               customize: [c.left, c.top, c.right, c.bottom] };
+    },
     click: (i, button = 0) => {
       const t = document.querySelectorAll('#tiles .tile')[i];
       if (!t) return false;

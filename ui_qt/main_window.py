@@ -7,14 +7,15 @@ import math
 import os
 import sys
 import threading
+import time
 
 from PySide6.QtCore import (
     QEasingCurve, QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
     QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QCursor, QFont, QFontMetricsF, QIcon, QLinearGradient, QPainter,
-    QPainterPath, QPen, QPixmap, QPolygonF, QRadialGradient,
+    QBrush, QColor, QCursor, QFont, QFontMetricsF, QIcon, QKeySequence, QLinearGradient, QPainter,
+    QPainterPath, QPen, QPixmap, QPolygonF, QRadialGradient, QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QTabWidget,
@@ -1367,6 +1368,17 @@ class MainWindow(FramelessMainWindow):
         donate_layout.addWidget(self.donate_btn)
         topbar_layout.addWidget(self._donate_capsule)
 
+        # Full screen: the whole app, borderless, filling the screen (F11) --
+        # beside the caption dots, the other way of sizing the window.
+        self._fullscreen_capsule = _GlassCapsule()
+        self._fullscreen_capsule.setFixedSize(_NAV_H, _NAV_H)
+        fs_layout = QHBoxLayout(self._fullscreen_capsule)
+        fs_layout.setContentsMargins(3, 3, 3, 3)
+        self.fullscreen_btn = _IconButton("Full screen (F11)")
+        self.fullscreen_btn.clicked.connect(self.toggle_app_fullscreen)
+        fs_layout.addWidget(self.fullscreen_btn)
+        topbar_layout.addWidget(self._fullscreen_capsule)
+
         # Left margin matches the content's, so the logo starts on the same
         # vertical line as the panels below it. The right margin is the
         # caption capsule's footprint: it is positioned by hand (see
@@ -1382,6 +1394,16 @@ class MainWindow(FramelessMainWindow):
         # QMainWindow's central-widget plumbing can restack siblings; the
         # title bar has to stay on top to keep receiving clicks.
         self.titleBar.raise_()
+
+        self._app_fullscreen = False
+        self._edge_shown = False
+        self._edge_left_at = None
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(90)
+        self._edge_timer.timeout.connect(self._watch_top_edge)
+        f11 = QShortcut(QKeySequence(Qt.Key.Key_F11), self)
+        f11.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        f11.activated.connect(self.toggle_app_fullscreen)
 
         theme.load_custom_fonts()
         app = QApplication.instance()
@@ -1447,6 +1469,14 @@ class MainWindow(FramelessMainWindow):
         self._apply_page_margins(self.tabs.currentIndex())
 
     def _apply_page_margins(self, index):
+        if getattr(self, "_app_fullscreen", False):
+            page = self.tabs.widget(index)
+            if page in self._full_bleed_pages:
+                self._content_layout.setContentsMargins(0, 0, 0, 0)
+            else:
+                left, _top, right, bottom = self._PADDED_MARGINS
+                self._content_layout.setContentsMargins(left, self._TOP_GAP + 8, right, bottom)
+            return
         if getattr(self, "_video_fullscreen", False):
             # A page's video fills the whole screen: no room kept for the
             # hidden title bar (that was the dead band along the top).
@@ -1640,10 +1670,13 @@ class MainWindow(FramelessMainWindow):
         self.about_btn.setIcon(_about_glyph_icon(muted))
         from .browser_chrome import icon as line_icon
         self.donate_btn.setIcon(line_icon("coffee", muted, 16))
+        self.fullscreen_btn.setIcon(line_icon("shrink" if getattr(self, "_app_fullscreen", False) else "expand",
+                                              muted, 16))
         tip = "Switch to light theme" if self.dark_mode else "Switch to dark theme"
         self.theme_btn.setToolTip(tip)
         self.theme_btn.setAccessibleName(tip)
-        for w in (self._island, self._action_tray, self._donate_capsule, self.update_pill, *self._tab_buttons):
+        for w in (self._island, self._action_tray, self._donate_capsule, self._fullscreen_capsule, self.update_pill,
+                  *self._tab_buttons):
             w.update()
         self.titleBar.refresh_caption(getattr(self, "_nc_hover_btn", None))
 
@@ -1696,6 +1729,79 @@ class MainWindow(FramelessMainWindow):
     # Kept for callers from before the Settings panel existed.
 
     # --------------------------------------------------- window states ---
+    def toggle_app_fullscreen(self):
+        self.set_app_fullscreen(not getattr(self, "_app_fullscreen", False))
+
+    def set_app_fullscreen(self, on):
+        """F11, or the full-screen button: the whole app fills the screen,
+        borderless. Its title bar steps away; touching the screen's top edge
+        brings it back (to switch tabs, or to leave), and Esc or F11 leaves."""
+        on = bool(on)
+        if on == getattr(self, "_app_fullscreen", False) or getattr(self, "_video_fullscreen", False):
+            return
+        self._app_fullscreen = on
+        if on:
+            self._pre_fullscreen_maximized = self.isMaximized()
+            self.titleBar.hide()
+            self.topbar.hide()
+            self._apply_page_margins(self.tabs.currentIndex())
+            self.showFullScreen()
+            self._edge_timer.start()
+        else:
+            self._edge_timer.stop()
+            self._edge_shown = False
+            self.titleBar.show()
+            self.topbar.show()
+            self._apply_page_margins(self.tabs.currentIndex())
+            if getattr(self, "_pre_fullscreen_maximized", False):
+                self.showMaximized()
+            else:
+                self.showNormal()
+            self._ensure_native_caption_buttons()
+            QTimer.singleShot(80, self._on_dpi_or_scale_changed)
+        tip = "Leave full screen (F11 or Esc)" if on else "Full screen (F11)"
+        self.fullscreen_btn.setToolTip(tip)
+        self.fullscreen_btn.setAccessibleName(tip)
+        self._restyle_chrome()
+
+    def leave_fullscreen(self):
+        """Esc: out of whichever full screen the window is in."""
+        if getattr(self, "_app_fullscreen", False):
+            self.set_app_fullscreen(False)
+        elif getattr(self, "_video_fullscreen", False):
+            self.set_video_fullscreen(False)
+
+    def _watch_top_edge(self):
+        """In full screen, the title bar slides back over the page while the
+        pointer is at the top edge (or on the bar), and steps away after."""
+        if not getattr(self, "_app_fullscreen", False):
+            return
+        pos = self.mapFromGlobal(QCursor.pos())
+        inside = 0 <= pos.x() < self.width()
+        bar_h = self.titleBar.height()
+        if not self._edge_shown and inside and 0 <= pos.y() <= 2:
+            self._edge_shown = True
+            self.titleBar.show()
+            self.topbar.show()
+            self.titleBar.raise_()
+            self._edge_left_at = None
+        elif self._edge_shown:
+            if inside and 0 <= pos.y() <= bar_h + 24:
+                self._edge_left_at = None
+            elif self._edge_left_at is None:
+                self._edge_left_at = time.monotonic()
+            elif time.monotonic() - self._edge_left_at > 0.7:
+                self._edge_shown = False
+                self.titleBar.hide()
+                self.topbar.hide()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and (getattr(self, "_app_fullscreen", False)
+                                                 or getattr(self, "_video_fullscreen", False)):
+            self.leave_fullscreen()
+            return
+        super().keyPressEvent(event)
+
     def set_video_fullscreen(self, is_fullscreen):
         """Wired to BrowserTab.fullscreen_requested -- a page's own player
         asked to go fullscreen, which QtWebEngine grants only pixels for; the

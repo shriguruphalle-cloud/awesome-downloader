@@ -53,7 +53,8 @@ check(cards[1] not in vt._queue_strips and cards[2] not in vt._queue_strips,
       "a started download stayed in the queue")
 
 vt.save_state()
-saved = json.load(open(video_queue_state.STATE_PATH, encoding="utf-8"))
+from app.utils import secure_store  # noqa: E402
+saved = secure_store.read_json(video_queue_state.STATE_PATH)
 titles = [e["title"] for e in saved]
 print("saved:", titles)
 check("Never started" in titles, titles)

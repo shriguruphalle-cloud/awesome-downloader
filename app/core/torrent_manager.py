@@ -220,6 +220,18 @@ class TorrentManager:
             logger.exception("Failed to resume torrent")
             return False
 
+    def move(self, handle, save_path):
+        """Saves the torrent into `save_path` from now on, taking along what
+        it already wrote. A file of the same name already there is kept
+        (dont_replace): the torrent checks and uses it rather than
+        overwriting something that may be the person's own."""
+        try:
+            handle.move_storage(save_path, lt.move_flags_t.dont_replace)
+            return True
+        except Exception:
+            logger.exception("Failed to move torrent to %s", save_path)
+            return False
+
     def remove(self, handle, delete_files=False):
         self.forget_resume(handle)
         try:

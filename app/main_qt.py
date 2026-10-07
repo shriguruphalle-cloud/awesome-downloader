@@ -43,6 +43,16 @@ def main():
 
     settings = settings_store.load_settings()
 
+    # History, bookmarks and queues are encrypted on disk with Windows' own
+    # data protection (Settings > Your data); older plain files are encrypted
+    # now rather than at their next save.
+    from app.utils import secure_store
+    secure_store.ENCRYPT = bool(settings.get("encrypt_data", True))
+    try:
+        secure_store.migrate()
+    except Exception:   # noqa: BLE001 -- never a reason not to start
+        logger.exception("Couldn't encrypt saved data")
+
     app = QApplication(sys.argv)
     app.setApplicationName(config.APP_NAME)
 
@@ -56,6 +66,7 @@ def main():
     from ui_qt.history_tab import HistoryTab
     from ui_qt.images_tab import ImagesTab
     from ui_qt.main_window import MainWindow
+    from ui_qt.music_tab import MusicTab
     from ui_qt.torrent_tab import TorrentTab
     from ui_qt.video_tab import VideoTab
 
@@ -78,6 +89,12 @@ def main():
     win.add_tab(torrent_tab, "Torrent")
     images_tab = ImagesTab(settings=settings)
     win.add_tab(images_tab, "Images")
+    # An open music player: free music from open libraries, or YouTube
+    # Music, with no account (ui_qt/music_tab.py).
+    music_tab = MusicTab(settings=settings)
+    win.add_tab(music_tab, "Music")
+    # its pages are painted edge to edge in their album's colours
+    win.set_full_bleed(music_tab)
 
     browser_tab = BrowserTab(settings=settings, download_tab=download_tab)
     win.add_tab(browser_tab, "Browser")
@@ -87,6 +104,8 @@ def main():
         browser_tab.open_for_sign_in(url)
 
     images_tab.open_browser_requested.connect(_sign_in_at)
+    # signed in there for a link the Images tab needed it for: back here, and it fetches again
+    images_tab.signed_in_again.connect(lambda: win.tabs.setCurrentWidget(images_tab))
     video_tab.open_browser_requested.connect(_sign_in_at)
     # The browser renders a whole web page; app margins around it are just a
     # frame of dead chrome, so this tab runs edge to edge.
@@ -141,6 +160,12 @@ def main():
         lambda path: _to_torrent_tab(lambda: torrent_tab.add_torrent_path(path)))
     browser_tab.show_downloads_requested.connect(
         lambda: win.tabs.setCurrentIndex(win.tabs.indexOf(download_tab)))
+
+    # The paste boxes hand each other whatever isn't theirs: an image link
+    # pasted into Video opens in Images, a reel pasted into Images opens in
+    # Video, a magnet goes to Torrent (ui_qt/link_routing.py).
+    from ui_qt import link_routing
+    link_routing.wire(win, video_tab, images_tab, torrent_tab)
 
     history_tab = HistoryTab(settings=settings)
     win.add_tab(history_tab, "History")

@@ -332,6 +332,42 @@ body.private .kdot { background: var(--brand-2); box-shadow: 0 0 10px var(--bran
 /* ---- continue browsing --------------------------------------------------- */
 /* Above the corner pills (open source, Customize), never under them. */
 #dock { position: relative; z-index: 2; display: flex; justify-content: center; padding: 0 24px 72px; }
+
+/* The mini player: what's playing in any tab, at the foot of the page */
+/* Placed by home.js in the gap between the links (left) and Customize
+   (right); a row higher when that gap is too narrow. */
+.player {
+  position: fixed; left: calc(50% - 230px); bottom: 11px; z-index: 6;
+  width: 460px; height: 58px;
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 8px;
+  border-radius: 18px; overflow: hidden;
+  opacity: 0; visibility: hidden; transform: translateY(14px);
+  transition: opacity .25s ease, transform .35s cubic-bezier(.2, .9, .3, 1.1), visibility 0s .35s;
+}
+.player.on { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+body.player-raised #dock { padding-bottom: 140px; }
+.player .art { width: 42px; height: 42px; border-radius: 11px; object-fit: cover; flex: none;
+  background: var(--glass-hi); }
+.player .art.none { visibility: hidden; width: 0; margin-right: -8px; }
+.player .meta { min-width: 0; flex: 1; cursor: pointer; padding: 0 4px; outline: none; }
+.player .t { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.player .a { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-btn { width: 34px; height: 34px; flex: none; border: 0; border-radius: 50%; padding: 0; cursor: pointer;
+  display: grid; place-items: center; color: var(--text); background: transparent;
+  transition: background .15s, transform .15s; }
+.np-btn svg { width: 17px; height: 17px; }
+.np-btn:hover { background: var(--glass-hi); }
+.np-btn:active { transform: scale(.92); }
+.np-btn.pp { background: var(--brand); color: #04121f; }
+.np-btn.pp:hover { background: var(--brand-hi); }
+.np-btn.pp .i-play { display: none; }
+.player.paused .np-btn.pp .i-play { display: block; }
+.player.paused .np-btn.pp .i-pause { display: none; }
+.player.noskip #np-prev, .player.noskip #np-next { display: none; }
+.np-bar { position: absolute; left: 14px; right: 14px; bottom: 0; height: 2px; border-radius: 2px;
+  background: rgba(255, 255, 255, .08); }
+.np-bar i { display: block; height: 100%; width: 0; border-radius: 2px; background: var(--brand); }
+
 .recent { width: min(1000px, 100%); border-radius: 22px; padding: 13px 12px 12px; }
 .recent .label { margin: 0 8px 9px; }
 .recent-list { display: grid; grid-template-columns: repeat(var(--n, 4), minmax(0, 1fr)); gap: 4px; }

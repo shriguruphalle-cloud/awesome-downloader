@@ -331,6 +331,7 @@ class WebView2Widget(QWidget):
     windowCloseRequested = Signal()       # the page called window.close()
     loadProgress = Signal(int)            # 0-100, by navigation stage
     processFailed = Signal(str)
+    navigationBlocked = Signal(str, object)   # a page stopped by nav_guard: (address, why)
 
     def __init__(self, engine, private=False, parent=None, background=None):
         super().__init__(parent)
@@ -357,6 +358,10 @@ class WebView2Widget(QWidget):
         self._closed = False
         self._watch_window = None
         self.nav_uri = ""
+        # Called with each address the page is about to load; anything it
+        # returns (truthy) stops the load -- the Browser tab's dangerous-site
+        # check. Frames are stopped silently; a page says why.
+        self.nav_guard = None
         engine.create_controller(int(self.host_window.winId()), private, self._on_created, self._on_failed,
                                  background=self._background)
 
@@ -390,6 +395,7 @@ class WebView2Widget(QWidget):
         core.SourceChanged += lambda s, a: self._emit_url()
         core.DocumentTitleChanged += lambda s, a: self._emit_title()
         core.NavigationStarting += lambda s, a: self._navigation_starting(a)
+        core.FrameNavigationStarting += lambda s, a: self._frame_navigation_starting(a)
         core.ContentLoading += lambda s, a: self._stage(40)
         core.DOMContentLoaded += lambda s, a: self._stage(72)
         core.NavigationCompleted += lambda s, a: self._completed(bool(a.IsSuccess))
@@ -439,7 +445,23 @@ class WebView2Widget(QWidget):
             self.nav_uri = str(args.Uri or "")
         except Exception:   # noqa: BLE001
             self.nav_uri = ""
+        if self.nav_guard is not None and self.nav_uri:
+            hit = self.nav_guard(self.nav_uri)
+            if hit:
+                args.Cancel = True
+                self.navigationBlocked.emit(self.nav_uri, hit)
+                return
         self._stage(12, started=True)
+
+    def _frame_navigation_starting(self, args):
+        if self.nav_guard is None:
+            return
+        try:
+            uri = str(args.Uri or "")
+        except Exception:   # noqa: BLE001
+            return
+        if uri and self.nav_guard(uri):
+            args.Cancel = True
 
     def _stage(self, value, started=False):
         if started:
@@ -451,8 +473,10 @@ class WebView2Widget(QWidget):
         self.loadFinished.emit(ok)
 
     def _later(self, fn):
+        if self._closed:
+            return
         if self.core is not None:
-            fn()
+            self._guarded(fn)
         else:
             self._pending.append(fn)
 
@@ -467,8 +491,13 @@ class WebView2Widget(QWidget):
         ctl = self.controller
         if ctl is None:
             return False
+        return self._guarded(lambda: fn(ctl))
+
+    def _guarded(self, fn):
+        # The same for calls on the page itself: the home page was still sent
+        # "window inactive" as the window closed, after its page was disposed.
         try:
-            fn(ctl)
+            fn()
             return True
         except Exception as exc:   # noqa: BLE001
             if "disposed" in str(exc) or "InvalidOperation" in type(exc).__name__:
@@ -711,11 +740,14 @@ class WebView2Widget(QWidget):
                 then(task, lambda result: callback(json.loads(result) if result else None))
         self._later(go)
 
-    def evaluate(self, expression, callback):
+    def evaluate(self, expression, callback, gesture=False):
         """Like run_js, but waits for a promise to settle: callback(value)
-        with the JSON-able result, or None if it threw."""
+        with the JSON-able result, or None if it threw. gesture=True runs it
+        as if the person had just clicked in the page -- what calls such as
+        requestPictureInPicture() insist on."""
         def go():
-            params = json.dumps({"expression": expression, "awaitPromise": True, "returnByValue": True})
+            params = json.dumps({"expression": expression, "awaitPromise": True, "returnByValue": True,
+                                 "userGesture": bool(gesture)})
 
             def ok(raw):
                 try:
