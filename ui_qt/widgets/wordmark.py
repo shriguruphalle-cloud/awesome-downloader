@@ -156,3 +156,62 @@ class Wordmark(QWidget):
     def text_rect(self):
         """Where the letters are, without the glow margin."""
         return QRectF(self._x0, 0, self._w1 + self._gap + self._w2, self.height())
+
+
+class GradientLine(QWidget):
+    """A line in the name's own voice: Instrument Serif upright in the text
+    colour (as "Awesome"), with one part -- `name` -- italic in the gradient
+    of "Downloader" (the About dialog's credit)."""
+
+    def __init__(self, before, name, after, px=21, parent=None):
+        super().__init__(parent)
+        self._parts = (before, name, after)
+        self._up = QFont(FAMILY)
+        self._up.setPixelSize(px)
+        self._it = QFont(self._up)
+        self._it.setItalic(True)
+        fm = QFontMetricsF(self._up)
+        self.setFixedHeight(int(fm.height() + 6))
+        self.setMinimumWidth(int(sum(QFontMetricsF(f).horizontalAdvance(t) for f, t in
+                                     ((self._up, before), (self._it, name), (self._up, after))) + 10))
+        self._text = QColor("#eaf2ff")
+        self._brand = QColor("#38bdf8")
+        self._brand_2 = QColor("#818cf8")
+        self._dark = True
+
+    def set_colors(self, text, brand, dark, second=None):
+        self._text = QColor(text)
+        self._brand = QColor(brand)
+        self._dark = dark
+        if second is not None:
+            sec = QColor(*second) if isinstance(second, (tuple, list)) else QColor(second)
+            self._brand_2 = _mix(sec, QColor(255, 255, 255), 0.15) if dark else _mix(sec, QColor(20, 24, 40), 0.35)
+        else:
+            self._brand_2 = _mix(self._brand, QColor(129, 140, 248), 0.6)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        fm = QFontMetricsF(self._up)
+        base = (self.height() - fm.height()) / 2.0 + fm.ascent()
+        before, name, after = self._parts
+        x = 2.0
+        p.setFont(self._up)
+        p.setPen(self._text)
+        p.drawText(QPointF(x, base), before)
+        x += fm.horizontalAdvance(before)
+        w = QFontMetricsF(self._it).horizontalAdvance(name)
+        g = QLinearGradient(x, 0, x + w, self.height() * 0.35)
+        g.setColorAt(0.0, _mix(self._brand, QColor(255, 255, 255), 0.4 if self._dark else 0.12))
+        g.setColorAt(0.45, self._brand)
+        g.setColorAt(1.0, self._brand_2)
+        p.setFont(self._it)
+        p.setPen(QPen(QBrush(g), 1))
+        p.drawText(QPointF(x, base), name)
+        x += w + 2
+        p.setFont(self._up)
+        p.setPen(self._text)
+        p.drawText(QPointF(x, base), after)
+        p.end()

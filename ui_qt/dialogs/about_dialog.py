@@ -11,7 +11,6 @@ from .base import CinematicDialog, button_row
 from ..widgets.button import Button
 
 CREATOR_NAME = "Shriguru Phalle"
-CREATOR_NAME_COLOR = "#e5484d"  # red
 REPO_URL = "https://github.com/%s" % config.GITHUB_REPO
 ISSUES_URL = REPO_URL + "/issues"
 LICENCE = "GPL-3.0"
@@ -130,21 +129,13 @@ def show_about(parent=None, dark_mode=True):
     card_layout.addWidget(disclaimer_label)
     layout.addWidget(card)
 
-    credit_row = QHBoxLayout()
-    credit_row.setSpacing(0)
-    prefix_label = QLabel("Created by ")
-    prefix_label.setStyleSheet("font-weight: 600;")
-    credit_row.addWidget(prefix_label)
-    creator_label = QLabel(CREATOR_NAME)
-    creator_label.setStyleSheet(f"font-weight: 600; color: {CREATOR_NAME_COLOR};")
-    credit_row.addWidget(creator_label)
-    suffix_label = QLabel(" — By an editor, for editors.")
-    suffix_label.setStyleSheet("font-weight: 600;")
-    credit_row.addWidget(suffix_label)
-    credit_row.addStretch(1)
-    layout.addLayout(credit_row)
+    # the credit in the name's own voice: "Downloader"'s italic serif and gradient
+    from ..widgets.wordmark import GradientLine
+    credit = GradientLine("Created by ", CREATOR_NAME, " — By an artist, for an artist.", px=21)
+    credit.set_colors(t["text"], t["brand"], dark_mode, palettes.spec(dark_mode)["glows"][1][0])
+    layout.addWidget(credit)
 
-    tagline_label = QLabel("Editors don't lack creativity; we lack patience for tools that slow us down.")
+    tagline_label = QLabel("Artists don't lack creativity; we lack patience for tools that slow us down.")
     tagline_label.setObjectName("muted")
     tagline_label.setWordWrap(True)
     layout.addWidget(tagline_label)
