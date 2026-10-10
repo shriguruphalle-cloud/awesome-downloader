@@ -53,6 +53,9 @@ def draw_icon(p, kind, rect, color, weight=1.0):
     """Line icons drawn on a 24-unit grid and scaled into `rect`, so they
     stay crisp at any size and display scale (font glyphs didn't: several
     rendered as a few faint pixels in this font stack)."""
+    from . import music_icons
+    if music_icons.draw(p, kind, rect, color):
+        return
     s = min(rect.width(), rect.height())
     u = s / 24.0
     ox = rect.center().x() - 12 * u
@@ -168,6 +171,46 @@ def draw_icon(p, kind, rect, color, weight=1.0):
         poly((19.5, 4.5), (13.5, 10.5))
         poly((10, 19.5), (4.5, 19.5), (4.5, 14))
         poly((4.5, 19.5), (10.5, 13.5))
+    elif kind in ("heart", "heart_filled"):
+        path = QPainterPath(pt(12, 19.6))
+        path.cubicTo(pt(5.2, 15.2), pt(3.4, 11.6), pt(3.6, 8.9))
+        path.cubicTo(pt(3.8, 5.9), pt(6.2, 4.3), pt(8.4, 4.4))
+        path.cubicTo(pt(10.2, 4.5), pt(11.4, 5.6), pt(12, 6.9))
+        path.cubicTo(pt(12.6, 5.6), pt(13.8, 4.5), pt(15.6, 4.4))
+        path.cubicTo(pt(17.8, 4.3), pt(20.2, 5.9), pt(20.4, 8.9))
+        path.cubicTo(pt(20.6, 11.6), pt(18.8, 15.2), pt(12, 19.6))
+        if kind == "heart_filled":
+            p.save()
+            p.setBrush(c)
+            p.drawPath(path)
+            p.restore()
+        else:
+            p.drawPath(path)
+    elif kind in ("back10", "fwd10"):
+        # a circular arrow round "10"
+        fwd = kind == "fwd10"
+        arc(12, 12.6, 7.6, -60 if fwd else 60, 300 if fwd else -300)
+        a = math.radians(60 if fwd else 120)
+        ax, ay = 12 + 7.6 * math.cos(a), 12.6 - 7.6 * math.sin(a)
+        poly((ax + (-2.6 if fwd else 2.6), ay - 1.6), (ax, ay), (ax + (-1.2 if fwd else 1.2), ay + 2.8))
+        p.save()
+        f = QFont()
+        f.setPixelSize(max(6, int(7.2 * u)))
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(c)
+        p.drawText(QRectF(pt(6, 8.2), pt(18, 17.2)), int(Qt.AlignmentFlag.AlignCenter), "10")
+        p.restore()
+    elif kind == "dots":
+        for x in (5.6, 12, 18.4):
+            dot(x, 12, 1.75)
+    elif kind == "queue":
+        for y in (6.5, 11):
+            poly((4, y), (15, y))
+        poly((4, 15.5), (10, 15.5))
+        poly((17.5, 9.5), (17.5, 18))
+        dot(15.6, 18.2, 2.1)
+        poly((17.5, 9.5), (20.5, 10.8))
     elif kind == "shrink":
         poly((19.5, 10), (14, 10), (14, 4.5))
         poly((14, 10), (20, 4))

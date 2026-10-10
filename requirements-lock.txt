@@ -9,6 +9,7 @@
 
 # runtime
 yt-dlp==2026.8.19
+yt-dlp-ejs==0.8.0
 curl_cffi==0.15.0
 cffi==2.1.1
 pycparser==3.0

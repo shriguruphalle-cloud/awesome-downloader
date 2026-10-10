@@ -32,7 +32,7 @@ def _load():
         except (ValueError, OSError):
             logger.warning("Couldn't read the music library; starting a new one", exc_info=True)
             data = {}
-        _state = {k: list(data.get(k) or []) for k in KINDS + ("recent",)}
+        _state = {k: list(data.get(k) or []) for k in KINDS + ("recent", "playlists")}
     return _state
 
 
@@ -89,11 +89,53 @@ def recent():
     return [dict(x) for x in _load()["recent"]]
 
 
-def forget_recent():
-    _load()["recent"] = []
+# ---- playlists: made here, or imported from another app ----------------------------
+def playlists():
+    """[{"id", "title", "source", "tracks": [...], "created"}], newest first."""
+    return [dict(p) for p in _load().setdefault("playlists", [])]
+
+
+def playlist(pid):
+    return next((dict(p) for p in _load().setdefault("playlists", []) if p["id"] == pid), None)
+
+
+def create_playlist(title, tracks=(), source="", artwork=None):
+    import time
+    import uuid
+    pl = {"id": "pl:" + uuid.uuid4().hex[:12], "title": (title or "My playlist").strip()[:80], "source": source,
+          "artwork": artwork, "tracks": [slim(t) for t in tracks], "created": int(time.time())}
+    _load().setdefault("playlists", []).insert(0, pl)
     _save()
+    return dict(pl)
 
 
-def _reset_for_tests():
-    global _state
-    _state = None
+def add_to_playlist(pid, track):
+    """Adds `track`; False if it was already there."""
+    for p in _load().setdefault("playlists", []):
+        if p["id"] == pid:
+            if any(t["id"] == track["id"] for t in p["tracks"]):
+                return False
+            p["tracks"].append(slim(track))
+            _save()
+            return True
+    return False
+
+
+def remove_from_playlist(pid, track_id):
+    for p in _load().setdefault("playlists", []):
+        if p["id"] == pid:
+            p["tracks"] = [t for t in p["tracks"] if t["id"] != track_id]
+            _save()
+
+
+def rename_playlist(pid, title):
+    for p in _load().setdefault("playlists", []):
+        if p["id"] == pid:
+            p["title"] = title.strip()[:80] or p["title"]
+            _save()
+
+
+def delete_playlist(pid):
+    st = _load()
+    st["playlists"] = [p for p in st.setdefault("playlists", []) if p["id"] != pid]
+    _save()

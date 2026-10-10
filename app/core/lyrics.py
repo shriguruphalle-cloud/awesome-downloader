@@ -116,9 +116,7 @@ def find(track):
         return None
     result = None
     if rec is not None:
-        lines = parse_lrc(rec.get("syncedLyrics") or "")
-        result = {"lines": lines, "plain": rec.get("plainLyrics") or "", "synced": bool(lines),
-                  "name": "%s – %s" % (rec.get("artistName") or artist, rec.get("trackName") or song)}
+        result = _result(rec, artist, song, duration)
     _cache[key] = result
     return result
 
@@ -132,9 +130,15 @@ def script_of(text):
     return "hi" if deva / len(letters) >= 0.3 else "en"
 
 
-def _result(rec, artist, song):
+def _result(rec, artist, song, duration=0):
     lines = parse_lrc(rec.get("syncedLyrics") or "")
-    return {"lines": lines, "plain": rec.get("plainLyrics") or "", "synced": bool(lines),
+    plain = rec.get("plainLyrics") or ""
+    if lines and duration and lines[-1][0] > duration * 1000 + 1500:
+        # timed for another cut of the song (LRCLIB entries are sometimes
+        # labelled with the wrong length): the words, without the timing
+        plain = plain or "\n".join(t for _ms, t in lines)
+        lines = []
+    return {"lines": lines, "plain": plain, "synced": bool(lines),
             "name": "%s – %s" % (rec.get("artistName") or artist, rec.get("trackName") or song)}
 
 
@@ -165,8 +169,9 @@ def find_all(track):
             kind = script_of(text)
             have = found[kind]
             # synced beats plain; otherwise the first (the closest match) stays
-            if have is None or (not have["synced"] and rec.get("syncedLyrics")):
-                found[kind] = _result(rec, artist, song)
+            res = _result(rec, artist, song, duration)
+            if have is None or (not have["synced"] and res["synced"]):
+                found[kind] = res
     except Exception:   # noqa: BLE001 -- no lyrics is a fine answer
         logger.info("Lyrics lookup failed for %s", track.get("title"), exc_info=True)
     default = "hi" if found["hi"] else "en"
@@ -304,3 +309,266 @@ def current_line(lines, ms):
     end = lines[lo + 1][0] if lo + 1 < len(lines) else start + 4000
     span = max(1, end - start)
     return lo, min(1.0, max(0.0, (ms - start) / span))
+
+
+# ------------------------------------------------- every version, and translations --
+# Unicode blocks by script, for the lyrics' own fonts and the choice of version
+SCRIPTS = (("Deva", 0x0900, 0x097F), ("Beng", 0x0980, 0x09FF), ("Guru", 0x0A00, 0x0A7F), ("Gujr", 0x0A80, 0x0AFF),
+           ("Taml", 0x0B80, 0x0BFF), ("Telu", 0x0C00, 0x0C7F), ("Knda", 0x0C80, 0x0CFF), ("Mlym", 0x0D00, 0x0D7F),
+           ("Arab", 0x0600, 0x06FF), ("Hang", 0xAC00, 0xD7AF), ("Jpan", 0x3040, 0x30FF), ("Hani", 0x4E00, 0x9FFF),
+           ("Cyrl", 0x0400, 0x04FF), ("Grek", 0x0370, 0x03FF), ("Thai", 0x0E00, 0x0E7F))
+SCRIPT_NAMES = {"Latn": "English letters", "Deva": "Devanagari · हिन्दी", "Beng": "Bengali · বাংলা",
+                "Guru": "Gurmukhi · ਪੰਜਾਬੀ", "Gujr": "Gujarati · ગુજરાતી", "Taml": "Tamil · தமிழ்",
+                "Telu": "Telugu · తెలుగు", "Knda": "Kannada · ಕನ್ನಡ", "Mlym": "Malayalam · മലയാളം",
+                "Arab": "Urdu / Arabic · اردو", "Hang": "Korean · 한국어", "Jpan": "Japanese · 日本語",
+                "Hani": "Chinese · 中文", "Cyrl": "Cyrillic", "Grek": "Greek", "Thai": "Thai · ไทย"}
+SCRIPT_LANG = {"Deva": "hi", "Beng": "bn", "Guru": "pa", "Gujr": "gu", "Taml": "ta", "Telu": "te", "Knda": "kn",
+               "Mlym": "ml", "Arab": "ur", "Hang": "ko", "Jpan": "ja", "Hani": "zh-CN", "Cyrl": "ru", "Grek": "el",
+               "Thai": "th"}
+TRANSLATE_TO = (("en", "English"), ("hi", "Hindi"), ("ur", "Urdu"), ("pa", "Punjabi"), ("bn", "Bengali"),
+                ("mr", "Marathi"), ("gu", "Gujarati"), ("ta", "Tamil"), ("te", "Telugu"), ("kn", "Kannada"),
+                ("ml", "Malayalam"), ("es", "Spanish"), ("fr", "French"), ("de", "German"), ("pt", "Portuguese"),
+                ("it", "Italian"), ("ru", "Russian"), ("ar", "Arabic"), ("tr", "Turkish"), ("id", "Indonesian"),
+                ("ja", "Japanese"), ("ko", "Korean"), ("zh-CN", "Chinese"))
+_TRANSLATE = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=%s&tl=%s&dt=t"
+_tr_cache = {}
+
+
+def script_code(text):
+    """The script most of `text`'s letters are in ("Latn" for Roman letters)."""
+    counts = {}
+    latin = 0
+    for ch in text or "":
+        if not ch.isalpha():
+            continue
+        o = ord(ch)
+        for code, lo, hi in SCRIPTS:
+            if lo <= o <= hi:
+                counts[code] = counts.get(code, 0) + 1
+                break
+        else:
+            latin += 1
+    if counts:
+        best = max(counts, key=counts.get)
+        if counts[best] >= 0.3 * (counts[best] + latin):
+            return best
+    return "Latn"
+
+
+# Google's input tools spell a language typed in English letters in its own script
+SPELL = {"hi": ("hi-t-i0-und", "Deva"), "mr": ("mr-t-i0-und", "Deva"), "pa": ("pa-t-i0-und", "Guru"),
+         "ur": ("ur-t-i0-und", "Arab"), "bn": ("bn-t-i0-und", "Beng"), "gu": ("gu-t-i0-und", "Gujr"),
+         "ta": ("ta-t-i0-und", "Taml"), "te": ("te-t-i0-und", "Telu"), "kn": ("kn-t-i0-und", "Knda"),
+         "ml": ("ml-t-i0-und", "Mlym")}
+SHORT = {"Latn": "English letters", "Deva": "देवनागरी", "Guru": "ਗੁਰਮੁਖੀ", "Arab": "اردو", "Beng": "বাংলা",
+         "Gujr": "ગુજરાતી", "Taml": "தமிழ்", "Telu": "తెలుగు", "Knda": "ಕನ್ನಡ", "Mlym": "മലയാളം",
+         "Hang": "한국어", "Jpan": "日本語", "Hani": "中文", "Cyrl": "Кириллица", "Grek": "Ελληνικά", "Thai": "ไทย"}
+
+
+def _spell_one(text, itc):
+    out = []
+    for piece in re.split(r"([^\w\s']+)", text):
+        if not piece.strip() or not re.search(r"[A-Za-z]", piece):
+            out.append(piece)
+            continue
+        q = urllib.parse.urlencode({"text": piece.strip(), "itc": itc, "num": 1, "cp": 0, "cs": 1, "ie": "utf-8",
+                                    "oe": "utf-8", "app": "demopage"})
+        req = urllib.request.Request("https://inputtools.google.com/request?" + q, headers={"User-Agent":
+                                                                                          "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            got = json.load(resp)
+        if got and got[0] == "SUCCESS" and got[1]:
+            words = " ".join(seg[1][0] for seg in got[1] if seg and len(seg) > 1 and seg[1])
+            lead = " " if piece[:1].isspace() else ""
+            trail = " " if piece[-1:].isspace() else ""
+            out.append(lead + words + trail)
+        else:
+            out.append(piece)
+    return "".join(out)
+
+
+def spell(texts, lang):
+    """Lines typed in English letters ("tum hi ho") in their language's own
+    script ("तुम ही हो"). [] if the language isn't one that can be spelt."""
+    if lang not in SPELL:
+        return []
+    itc = SPELL[lang][0]
+    key = (tuple(texts), itc)
+    if key in _tr_cache:
+        return _tr_cache[key]
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(t):
+        try:
+            return _spell_one(t, itc) if t.strip() else ""
+        except Exception:   # noqa: BLE001
+            return ""
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        out = list(pool.map(one, texts))
+    if not any(out):
+        return []
+    _tr_cache[key] = out
+    return out
+
+
+def find_versions(track, lang_hint=None):
+    """Every version of the song's words LRCLIB has -- one per script (the
+    Devanagari words, the same words in English letters, Gurmukhi, Urdu...)
+    -- with a Roman-letter version spelt out from Devanagari when there's
+    none. {"versions": {script: result}, "order": [script...], "lang": code,
+    "main": script, "sub": script or None, "spell": script or None -- the
+    script words found only in English letters can be spelt in
+    (`lang_hint`, the song's language as far as it's known)}. Blocking; cached."""
+    key = ("versions", track.get("id"), int(track.get("duration") or 0))
+    if key in _cache:
+        return _cache[key]
+    artist, song = clean_title(track.get("title", ""), track.get("artist", ""))
+    duration = int(track.get("duration") or 0)
+    found = {}
+    try:
+        cands = []
+        if artist and song:
+            params = {"artist_name": artist, "track_name": song}
+            if duration:
+                params["duration"] = duration
+            rec = _get("get", params)
+            if _usable(rec, duration):
+                cands.append(rec)
+        cands += [c for c in (_get("search", {"q": ("%s %s" % (artist, song)).strip()}) or [])
+                  if _usable(c, duration)]
+        if not cands and song:
+            cands += [c for c in (_get("search", {"track_name": song}) or []) if _usable(c, duration)]
+        for rec in cands:
+            text = rec.get("syncedLyrics") or rec.get("plainLyrics") or ""
+            code = script_code(text)
+            have = found.get(code)
+            res = _result(rec, artist, song, duration)
+            if have is None or (not have["synced"] and res["synced"]):
+                found[code] = res
+    except Exception:   # noqa: BLE001 -- no lyrics is a fine answer
+        logger.info("Lyrics lookup failed for %s", track.get("title"), exc_info=True)
+    if "Deva" in found and "Latn" not in found:
+        found["Latn"] = romanize_result(found["Deva"])
+    order = sorted(found, key=lambda c: (c != "Latn", c))
+    native = next((c for c in order if c != "Latn"), None)
+    lang = SCRIPT_LANG.get(native) if native else None
+    # as Apple Music shows a Hindi song: the words in English letters, the
+    # Devanagari under each line
+    if native and "Latn" in found and native == "Deva" and (found["Latn"]["synced"] or not found[native]["synced"]):
+        main, sub = "Latn", native
+    else:
+        main, sub = (native or "Latn"), None
+    spelt = None
+    if not native and "Latn" in found and lang_hint in SPELL:
+        lang, spelt = lang_hint, SPELL[lang_hint][1]
+        sub = spelt                                   # the Devanagari (spelt out) under each line
+    out = {"versions": found, "order": order, "lang": lang, "main": main if found else None, "sub": sub,
+           "spell": spelt}
+    _cache[key] = out
+    return out
+
+
+def align(lines, other):
+    """`other`'s words line for line with `lines` -- by position when they
+    match up, else by the nearest time (two LRCLIB entries rarely split a
+    song identically)."""
+    if not lines:
+        return []
+    if not other:
+        return [""] * len(lines)
+    if len(other) == len(lines):
+        return [t for _ms, t in other]
+    out, j = [], 0
+    for ms, _t in lines:
+        while j + 1 < len(other) and abs(other[j + 1][0] - ms) <= abs(other[j][0] - ms):
+            j += 1
+        out.append(other[j][1] if abs(other[j][0] - ms) <= 2500 else "")
+    return out
+
+
+def _gtx(texts, target, source="auto"):
+    data = urllib.parse.urlencode({"q": "\n".join(texts)}).encode("utf-8")
+    req = urllib.request.Request(_TRANSLATE % (source, urllib.parse.quote(target)), data=data,
+                                 headers={"User-Agent": "Mozilla/5.0", "Content-Type":
+                                          "application/x-www-form-urlencoded;charset=UTF-8"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        got = json.load(resp)
+    joined = "".join(seg[0] for seg in (got[0] or []) if seg and isinstance(seg[0], str))
+    return joined.split("\n")
+
+
+def translate(texts, target, source="auto"):
+    """Each line of `texts` in language `target` (Google Translate's free
+    web endpoint) -- [] if it can't be had. Blocking; cached."""
+    texts = [t or "" for t in texts]
+    key = (tuple(texts), target, source)
+    if key in _tr_cache:
+        return _tr_cache[key]
+    out = []
+    try:
+        chunk, size = [], 0
+        for t in texts:
+            if size + len(t) > 3500 and chunk:
+                out += _fit(chunk, _gtx(chunk, target, source), target, source)
+                chunk, size = [], 0
+            chunk.append(t)
+            size += len(t) + 1
+        if chunk:
+            out += _fit(chunk, _gtx(chunk, target, source), target, source)
+    except Exception:   # noqa: BLE001
+        logger.info("Translating lyrics failed", exc_info=True)
+        return []
+    _tr_cache[key] = out
+    return out
+
+
+def _fit(src, got, target, source):
+    """The translated lines back in place (blank lines stay blank)."""
+    got = [g.strip() for g in got]
+    if len(got) == len(src):
+        return [g if s.strip() else "" for s, g in zip(src, got)]
+    # the service merged or split a line: one at a time instead
+    out = []
+    for s in src:
+        if not s.strip():
+            out.append("")
+            continue
+        try:
+            out.append(" ".join(x.strip() for x in _gtx([s], target, source) if x.strip()))
+        except Exception:   # noqa: BLE001
+            out.append("")
+    return out
+
+
+
+def pronounce(texts, script):
+    """Each line in Roman letters -- how it's said. Devanagari is spelt out
+    here; another script asks Google Translate for its romanisation."""
+    if script == "Deva":
+        return [romanize(t) for t in texts]
+    key = (tuple(texts), "rm")
+    if key in _tr_cache:
+        return _tr_cache[key]
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(t):
+        if not t.strip():
+            return ""
+        try:
+            req = urllib.request.Request(
+                "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=rm",
+                data=urllib.parse.urlencode({"q": t}).encode("utf-8"),
+                headers={"User-Agent": "Mozilla/5.0",
+                         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                got = json.load(resp)
+            for seg in got[0] or []:
+                if seg and len(seg) > 3 and isinstance(seg[3], str) and seg[3].strip():
+                    return seg[3].strip()
+        except Exception:   # noqa: BLE001
+            pass
+        return ""
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        out = list(pool.map(one, texts))
+    _tr_cache[key] = out
+    return out

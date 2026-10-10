@@ -22,7 +22,7 @@
 ; the wizard. MyAppName stays for the install folder and Start menu group, so
 ; an upgrade lands in the same place as every earlier version.
 #define MyAppDisplayName "Awesome Downloader"
-#define MyAppVersion "2.5.1"
+#define MyAppVersion "3.0.0"
 #define MyAppPublisher "Shriguru Phalle"
 #define MyAppExeName "Awesome Downloader.exe"
 #define MyAppURL "https://awesome-downloader.pages.dev"

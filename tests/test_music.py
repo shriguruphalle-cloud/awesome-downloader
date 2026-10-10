@@ -208,8 +208,11 @@ print("one search fills every section; an empty one steps aside, a failed one sa
 
 mt.results.rows[0].play.emit(tones[0])        # a click on the first song's number
 check(wait(lambda: playing() and mt.player.position() > 0), "the song didn't start playing")
-check(mt.bar.title.text() == "Tone 0" and mt.index == 0 and len(mt.queue) == 3,
-      "the player didn't take the list as its queue: %r" % [t["title"] for t in mt.queue])
+# a song picked from search plays on its own (its radio follows) -- not the other results
+check(mt.bar.title.text() == "Tone 0" and mt.index == 0 and len(mt.queue) == 1,
+      "a search result brought the other results into the queue: %r" % [t["title"] for t in mt.queue])
+mt.queue += tones[1:]                      # as an album or playlist would have them
+mt._render_queue()
 check(mt.results.rows[0]._current, "the playing song isn't marked in the list")
 mt.next()
 check(wait(lambda: mt.index == 1 and playing()), "Next didn't move on")
@@ -275,6 +278,10 @@ check(mt._pages["album"].hero.title == "Fake Album", "the album's header")
 lists = [w for w in mt._live_lists() if mt._pages["album"].isAncestorOf(w)]
 check(lists and [r.track["title"] for r in lists[0].rows] == ["Album track 1", "Album track 2"],
       "the album's tracks aren't listed")
+# while a song plays, every page (an artist's aside) wears the playing song's cover; stopped, its own
+mt.player.stop()
+mt.queue, mt.index = [], -1
+mt.go("album", fake_album)
 check(wait(lambda: abs(mt.stage.pal["base"].hslHueF() - QColor(230, 150, 20).hslHueF()) < 0.05, 4000),
       "the album's page isn't in its cover's colours: %s" % mt.stage.pal["base"].name())
 mt.back()
@@ -290,7 +297,7 @@ print("an album opens into its tracks and plays")
 
 # ---- saving to Your music -------------------------------------------------------------------
 check(mt.toggle_saved(album_tracks[0]) and music_library.is_saved(album_tracks[0]), "saving a song didn't save it")
-check(mt.bar.save_btn.kind == "star_filled", "the player's star doesn't show the song is saved")
+check(mt.bar.save_btn.kind == "heart_filled", "the player's star doesn't show the song is saved")
 mt.go("songs")
 saved_lists = [w for w in mt._live_lists() if mt._pages["songs"].isAncestorOf(w)]
 check(saved_lists and [r.track["title"] for r in saved_lists[0].rows] == ["Album track 1"],
@@ -434,4 +441,16 @@ print("as a search is typed, suggestions drop down; a suggested search or artist
 mt.player.stop()
 win.close()
 settle(500)
+
+# ---- a song's own cover: the same recording, not just the same title ----------------------------------------
+same = {"title": "Gali Gali (From \"Test Film\")", "artist": "Test Singer, Test Composer", "duration": 175}
+other = {"title": "Gali Gali", "artist": "Someone Else", "duration": 222}
+check(ms.cover_match("Gali Gali", "Test Singer", 175, same) > 0, "the song's own record wasn't matched")
+check(ms.cover_match("Gali Gali", "Test Singer", 175, other) == 0, "another song with the same title was taken")
+check(ms.cover_match("Gali Gali", "Test Label Channel", 176, {"title": "Gali Gali", "artist": "X", "duration": 175}) > 0,
+      "a video by a label's channel wasn't matched by its length")
+check(ms.cover_match("Gali Gali", "Test Label Channel", 175, other) == 0, "a label's video took a stranger's cover")
+check(ms.cover_match("Paisa", "Test Duo, Test Singer", 191, {"title": "Paisa Yeh Paisa", "artist": "Test Singer",
+                                                            "duration": 191}) == 0, "a different title was matched")
+print("a cover is taken only from the same recording: same title and a singer in common (or the same length)")
 print("\nMUSIC OK")

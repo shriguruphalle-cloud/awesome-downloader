@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+    QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QFrame, QHBoxLayout, QLabel, QLineEdit, QScrollArea, QSizePolicy, QSlider, QVBoxLayout,
@@ -107,6 +107,12 @@ class ArtLoader(QObject):
                 img = QImage(url)
             if img.isNull():
                 img = None
+            elif "i.ytimg.com" in url and img.width() * 3 == img.height() * 4:
+                # a video's 4:3 picture is 16:9 with black bars: the bars go,
+                # and the frame is cut square from its middle
+                h = img.width() * 9 // 16
+                frame = img.copy(0, (img.height() - h) // 2, img.width(), h)
+                img = frame.copy((frame.width() - h) // 2, 0, h, h)
         except Exception:   # noqa: BLE001 -- a placeholder stays
             logger.debug("No picture from %s", url, exc_info=True)
         self._done.emit(url, img)
@@ -176,21 +182,30 @@ class Pill(QAbstractButton):
         self.setText(text)
         self.kind = kind
         self.style = style
+        self.accent = QColor("#f4a47a")
+        self.height_px = None        # a taller pill where it's the main control of a row
+        self.ui_scale = 1.0          # its words and icon, smaller or larger (a card sized to its window)
         self._hover = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
     def _font(self):
+        k = self.ui_scale
         if self.style == "outline":
-            return look.label_font(10.5)
-        return look.font(12.5, QFont.Weight.Bold, spacing=0.6)
+            return look.label_font(10.5 * k)
+        if self.style in ("tab", "tab_on"):
+            return look.font(13 * k, QFont.Weight.DemiBold)
+        return look.font(12.5 * k, QFont.Weight.Bold, spacing=0.6)
 
     def sizeHint(self):
         fm = QFontMetricsF(self._font())
         text = self.text().upper() if self.style == "outline" else self.text()
         w = fm.horizontalAdvance(text) + (34 if self.style != "outline" else 24) + (22 if self.kind else 0)
-        return QSize(int(w), 30 if self.style == "outline" else 38)
+        h = self.height_px or (30 if self.style == "outline" else 38)
+        if self.height_px:
+            w += h * 0.5
+        return QSize(int(w), int(h))
 
     def enterEvent(self, e):
         self._hover = True
@@ -209,6 +224,34 @@ class Pill(QAbstractButton):
             p.setBrush(QColor(255, 255, 255) if not self._hover else QColor(236, 238, 244))
             p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
             fg = QColor(10, 11, 16)
+        elif self.style in ("tab", "tab_on"):
+            on = self.style == "tab_on"
+            p.setPen(QPen(QColor(255, 255, 255, 40), 1) if on else Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 34 if on else (14 if self._hover else 0)))
+            p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+            fg = look.TEXT if on else look.with_alpha(look.TEXT, 0.68 if not self._hover else 0.9)
+        elif self.style == "glow":
+            # the accent, lit: a warm fill with a soft halo (Lyrics, when on)
+            a = QColor(self.accent)
+            halo = QRadialGradient(r.center(), r.width() * 0.62)
+            halo.setColorAt(0, look.with_alpha(a, 0.30))
+            halo.setColorAt(1, look.with_alpha(a, 0.0))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(halo)
+            p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+            g = QLinearGradient(0, r.top(), 0, r.bottom())
+            g.setColorAt(0, look.with_alpha(a.lighter(118), 0.42 + (0.08 if self._hover else 0)))
+            g.setColorAt(1, look.with_alpha(a, 0.22 + (0.08 if self._hover else 0)))
+            p.setBrush(g)
+            p.setPen(QPen(look.with_alpha(a.lighter(135), 0.85), 1.2))
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), (r.height() - 2) / 2, (r.height() - 2) / 2)
+            fg = look.TEXT
+        elif self.style == "ghost":
+            # a quiet frame on the glass (Lyrics, off; the player's worded buttons)
+            p.setPen(QPen(look.with_alpha(look.TEXT, 0.22 if self._hover else 0.14), 1))
+            p.setBrush(look.with_alpha(look.TEXT, 0.10 if self._hover else 0.045))
+            p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+            fg = look.TEXT
         elif self.style == "outline":
             p.setPen(QPen(look.with_alpha(look.TEXT, 0.85 if self._hover else 0.55), 1))
             p.setBrush(look.with_alpha(look.TEXT, 0.10) if self._hover else Qt.BrushStyle.NoBrush)
@@ -224,11 +267,13 @@ class Pill(QAbstractButton):
         text = self.text().upper() if self.style == "outline" else self.text()
         f = self._font()
         fm = QFontMetricsF(f)
-        tw = fm.horizontalAdvance(text) + (22 if self.kind else 0)
+        isz = (20 if (self.height_px or 0) >= 46 * self.ui_scale else 16) * self.ui_scale
+        gap = 8 * self.ui_scale
+        tw = fm.horizontalAdvance(text) + ((isz + gap) if self.kind else 0)
         x = (self.width() - tw) / 2
         if self.kind:
-            draw_icon(p, self.kind, QRectF(x, self.height() / 2 - 8, 16, 16), fg)
-            x += 22
+            draw_icon(p, self.kind, QRectF(x, self.height() / 2 - isz / 2, isz, isz), fg)
+            x += isz + gap
         p.setFont(f)
         p.setPen(fg)
         p.drawText(QRectF(x, 0, self.width() - x, self.height()),
@@ -280,10 +325,6 @@ class SectionHeader(QWidget):
         if self.link:
             lay.addWidget(self.link)
         self.note = ""
-
-    def set_note(self, text):
-        self.note = text
-        self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -484,13 +525,14 @@ class TrackRow(QWidget):
                    a_text)
         self._hits = {"artist": a_rect}
         if self.show_album and self.width() >= 680:
-            album = t.get("album") or t.get("license") or ""
+            album = t.get("reason") or t.get("album") or t.get("license") or ""
             al_w = x_dur - 16 - x_album
             al_text = _elide(album, af, al_w)
-            p.setPen(look.TEXT_2 if t.get("album") else look.TEXT_3)
+            p.setPen(look.TEXT_3 if (t.get("reason") or not t.get("album")) else look.TEXT_2)
             p.drawText(QRectF(x_album, 0, al_w, h), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                        al_text)
-            self._hits["album"] = QRectF(x_album, h / 2 - 9, QFontMetricsF(af).horizontalAdvance(al_text), 18)
+            if not t.get("reason"):
+                self._hits["album"] = QRectF(x_album, h / 2 - 9, QFontMetricsF(af).horizontalAdvance(al_text), 18)
         if t.get("duration"):
             p.setFont(look.font(12, QFont.Weight.Medium))
             p.setPen(look.TEXT_3)
@@ -686,6 +728,19 @@ class Tile(QWidget):
                 p.setBrush(look.with_alpha(QColor(255, 255, 255), self._hover))
                 p.drawEllipse(pr)
                 draw_icon(p, "play", pr.adjusted(12, 12, -11, -12), look.with_alpha(QColor(10, 11, 16), self._hover))
+        if getattr(self, "picked", False):
+            # chosen (the taste setup's artists): a white ring and a check
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255), 3))
+            if circle:
+                p.drawEllipse(cover.adjusted(1.5, 1.5, -1.5, -1.5))
+            else:
+                p.drawRoundedRect(cover.adjusted(1.5, 1.5, -1.5, -1.5), 6, 6)
+            badge = QRectF(cover.right() - 30, cover.top() + 2, 28, 28)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255))
+            p.drawEllipse(badge)
+            draw_icon(p, "check", badge.adjusted(6, 6, -6, -6), QColor(10, 11, 16))
         tf = look.font(13, QFont.Weight.DemiBold)
         sf = look.font(11.5)
         align = Qt.AlignmentFlag.AlignHCenter if circle else Qt.AlignmentFlag.AlignLeft
@@ -705,6 +760,8 @@ class Tile(QWidget):
             return it.get("subtitle") or "Artist"
         if self.mode == "track":
             return it.get("artist") or ""
+        if it.get("kind") == "mix":
+            return it.get("subtitle") or ""
         kind = it.get("type") or ("Live show" if it.get("source") == "archive" else "Album")
         bits = [kind if it.get("source") != "archive" else "", it.get("year") or "", it.get("artist") or ""]
         if it.get("source") == "archive":
@@ -1041,28 +1098,54 @@ class Hero(QWidget):
 
 # ----------------------------------------------------------------- rail -----
 class NavItem(QAbstractButton):
-    def __init__(self, key, text, parent=None):
+    """A place in the rail: an icon and a name -- or a small cover, a name
+    and a second line (a mix, a playlist) -- on a soft glass highlight while
+    it's open, with the accent's bar at its edge."""
+
+    def __init__(self, key, text, parent=None, sub="", art_url=None, icon=None):
         super().__init__(parent)
         self.key = key
         self.setText(text)
+        self.sub = sub
+        self.icon = icon
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setFixedHeight(32)
+        self.has_art = bool(art_url) or (bool(sub) and not icon)
+        self.setFixedHeight(50 if (self.has_art or sub) else 36)
         self.count = ""
         self.accent = QColor("#7dd3fc")
-        self._hover = False
+        self._hover = 0.0
+        self._over = False
+        self._pix = None
+        self._fade = QTimer(self)
+        self._fade.setInterval(16)
+        self._fade.timeout.connect(self._step)
+        if art_url:
+            art().want(thumb_url(art_url, 120), self._got)
+
+    def _got(self, pm):
+        self._pix = look.rounded(pm, 36, 36, 7)
+        self.update()
 
     def set_count(self, n):
         self.count = str(n) if n else ""
         self.update()
 
     def enterEvent(self, e):
-        self._hover = True
-        self.update()
+        self._over = True
+        self._fade.start()
 
     def leaveEvent(self, e):
-        self._hover = False
+        self._over = False
+        self._fade.start()
+
+    def _step(self):
+        target = 1.0 if self._over else 0.0
+        self._hover += (target - self._hover) * 0.3
+        if abs(target - self._hover) < 0.02:
+            self._hover = target
+            self._fade.stop()
         self.update()
 
     def paintEvent(self, event):
@@ -1070,67 +1153,249 @@ class NavItem(QAbstractButton):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect())
         on = self.isChecked()
+        box = r.adjusted(0, 1, 0, -1)
         if on or self._hover:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(255, 255, 255, 13 if on else 8))
-            p.drawRoundedRect(r.adjusted(10, 1, -10, -1), 7, 7)
+            p.setPen(QPen(QColor(255, 255, 255, 22), 1) if on else Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, int(24 if on else 12 * self._hover)))
+            p.drawRoundedRect(box, 11, 11)
         if on:
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(self.accent)
-            p.drawRoundedRect(QRectF(0, r.height() / 2 - 8, 3, 16), 1.5, 1.5)
+            p.drawRoundedRect(QRectF(5, r.height() / 2 - 8, 3, 16), 1.5, 1.5)
+        x = 14.0
+        colour = look.RAIL_TEXT if (on or self._over) else look.with_alpha(look.RAIL_TEXT, 0.80)
+        if self.has_art:
+            ar = QRectF(x, (r.height() - 36) / 2, 36, 36)
+            if self._pix is not None:
+                p.drawPixmap(ar.topLeft(), self._pix)
+            else:
+                look.placeholder(p, ar, look.DEFAULT, 7)
+            x += 46
+        elif self.icon and self.sub:
+            # an action among the playlists: its icon on a tile of the accent
+            ar = QRectF(x, (r.height() - 36) / 2, 36, 36)
+            g = QLinearGradient(ar.topLeft(), ar.bottomRight())
+            g.setColorAt(0, look.with_alpha(self.accent, 0.55 + 0.15 * self._hover))
+            g.setColorAt(1, look.with_alpha(self.accent.darker(150), 0.45 + 0.15 * self._hover))
+            p.setPen(QPen(look.with_alpha(self.accent.lighter(140), 0.6), 1))
+            p.setBrush(g)
+            p.drawRoundedRect(ar.adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
+            draw_icon(p, self.icon, ar.adjusted(8, 8, -8, -8), look.TEXT)
+            x += 46
+        elif self.icon:
+            draw_icon(p, self.icon, QRectF(x, (r.height() - 20) / 2, 20, 20), colour)
+            x += 32
         f = look.font(13.5, QFont.Weight.DemiBold if on else QFont.Weight.Medium)
-        p.setFont(f)
-        p.setPen(look.RAIL_TEXT if (on or self._hover) else look.RAIL_MUTED)
-        p.drawText(r.adjusted(22, 0, -40, 0), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-                   self.text())
+        right = 34 if self.count else 10
+        if self.sub:
+            p.setFont(f)
+            p.setPen(colour)
+            p.drawText(QRectF(x, 6, r.width() - x - right, 20), int(Qt.AlignmentFlag.AlignVCenter),
+                       _elide(self.text(), f, r.width() - x - right))
+            sf = look.font(11.5)
+            p.setFont(sf)
+            p.setPen(look.with_alpha(look.RAIL_TEXT, 0.55 if on else 0.45))
+            p.drawText(QRectF(x, 26, r.width() - x - right, 17), int(Qt.AlignmentFlag.AlignVCenter),
+                       _elide(self.sub, sf, r.width() - x - right))
+        else:
+            p.setFont(f)
+            p.setPen(colour)
+            p.drawText(r.adjusted(x, 0, -right, 0), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                       _elide(self.text(), f, r.width() - x - right))
         if self.count:
-            p.setFont(look.font(11, QFont.Weight.DemiBold))
-            p.setPen(look.RAIL_LABEL if not on else look.RAIL_MUTED)
-            p.drawText(r.adjusted(0, 0, -22, 0), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
+            p.setFont(look.font(11.5, QFont.Weight.DemiBold))
+            p.setPen(look.with_alpha(look.RAIL_TEXT, 0.55))
+            p.drawText(r.adjusted(0, 0, -12, 0), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
                        self.count)
         p.end()
 
 
 class _RailLabel(QWidget):
+    """A section's name in small capitals, with room for buttons on its right."""
+
     def __init__(self, text, parent=None):
         super().__init__(parent)
         self.text = text
-        self.setFixedHeight(34)
+        self.setFixedHeight(32)
+        self.row = QHBoxLayout(self)
+        self.row.setContentsMargins(0, 6, 0, 0)
+        self.row.setSpacing(2)
+        self.row.addStretch(1)
+
+    def add_button(self, btn):
+        self.row.addWidget(btn)
+        return btn
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setFont(look.label_font(10))
-        p.setPen(look.RAIL_LABEL)
-        p.drawText(QRectF(22, 12, self.width() - 22, 20), int(Qt.AlignmentFlag.AlignVCenter), self.text.upper())
+        p.setPen(look.with_alpha(look.RAIL_TEXT, 0.48))
+        p.drawText(QRectF(14, 8, self.width() - 14, 22), int(Qt.AlignmentFlag.AlignVCenter), self.text.upper())
         p.end()
 
 
-class _Mark(QWidget):
-    """The Music tab's mark: a note on the logo's sky-to-violet."""
+class _RailCard(QWidget):
+    """A pane of glass in the rail, holding a group of its places."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(30, 30)
+        self.col = QVBoxLayout(self)
+        self.col.setContentsMargins(8, 10, 8, 10)
+        self.col.setSpacing(2)
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        g = QLinearGradient(0, 0, 30, 30)
-        g.setColorAt(0, QColor("#7dd3fc"))
-        g.setColorAt(0.5, QColor("#38bdf8"))
-        g.setColorAt(1, QColor("#818cf8"))
-        p.setPen(Qt.PenStyle.NoPen)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        g = QLinearGradient(r.topLeft(), r.bottomLeft())
+        g.setColorAt(0, QColor(255, 255, 255, 20))
+        g.setColorAt(1, QColor(255, 255, 255, 9))
         p.setBrush(g)
-        p.drawRoundedRect(QRectF(0, 0, 30, 30), 8, 8)
-        draw_icon(p, "music", QRectF(6, 6, 18, 18), QColor(8, 14, 32))
+        p.setPen(QPen(QColor(255, 255, 255, 24), 1))
+        p.drawRoundedRect(r, 18, 18)
+        p.end()
+
+
+class _FoldHeader(QAbstractButton):
+    """A section's heading that opens and closes it ("Made for you  ›")."""
+
+    def __init__(self, text, icon, parent=None):
+        super().__init__(parent)
+        self.setText(text)
+        self.icon = icon
+        self.open = True
+        self._turn = 1.0
+        self.setFixedHeight(38)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._anim = QTimer(self)
+        self._anim.setInterval(16)
+        self._anim.timeout.connect(self._step)
+
+    def set_open(self, on):
+        self.open = on
+        self._anim.start()
+
+    def _step(self):
+        want = 1.0 if self.open else 0.0
+        self._turn += (want - self._turn) * 0.28
+        if abs(want - self._turn) < 0.02:
+            self._turn = want
+            self._anim.stop()
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect())
+        draw_icon(p, self.icon, QRectF(14, (r.height() - 20) / 2, 20, 20), look.RAIL_TEXT)
+        p.setFont(look.font(13.5, QFont.Weight.DemiBold))
+        p.setPen(look.RAIL_TEXT)
+        p.drawText(r.adjusted(46, 0, -40, 0), int(Qt.AlignmentFlag.AlignVCenter), self.text())
+        p.save()
+        c = QPointF(r.width() - 22, r.height() / 2)
+        p.translate(c)
+        p.rotate(90 * self._turn)
+        draw_icon(p, "chevron", QRectF(-8, -8, 16, 16), look.with_alpha(look.RAIL_TEXT, 0.7))
+        p.restore()
+        p.end()
+
+
+class _Mark(QWidget):
+    """The app's own mark -- the lightning in its ring -- on a disc of the accent."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(36, 36)
+        self.accent = QColor("#38bdf8")
+        import os
+        from app import config
+        path = os.path.join(getattr(config, "_ASSET_DIR", config.BASE_DIR), "app_icon.png")
+        if not os.path.exists(path):
+            path = os.path.join(config.BASE_DIR, "app_icon.png")
+        self._pix = QPixmap(path) if os.path.exists(path) else None
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        r = QRectF(self.rect())
+        halo = QRadialGradient(r.center(), r.width() / 2)
+        halo.setColorAt(0.55, look.with_alpha(self.accent, 0.55))
+        halo.setColorAt(1, look.with_alpha(self.accent, 0.0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(halo)
+        p.drawEllipse(r)
+        if self._pix is not None and not self._pix.isNull():
+            p.drawPixmap(r.adjusted(3, 3, -3, -3), self._pix, QRectF(self._pix.rect()))
+        else:
+            draw_icon(p, "note", r.adjusted(8, 8, -8, -8), QColor("#ffffff"))
+        p.end()
+
+
+class SearchField(QWidget):
+    """The rail's search: a pill of glass, its edge lit while you type, and a
+    clear button once there's something in it."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(40)
+        self.edit = QLineEdit(self)
+        self.edit.setObjectName("railSearch")
+        self.edit.setPlaceholderText("Search songs, artists…")
+        self.edit.setFont(look.font(13))
+        self.edit.setFrame(False)
+        self.edit.setStyleSheet("QLineEdit#railSearch { background: transparent; border: none; color: #ffffff;"
+                                " selection-background-color: rgba(125,211,252,110); }")
+        self.clear_btn = icon_button("close", "Clear", 26, 11, self)
+        self.clear_btn.clicked.connect(lambda: (self.edit.clear(), self.edit.setFocus()))
+        self.clear_btn.hide()
+        self.edit.textChanged.connect(lambda t: self.clear_btn.setVisible(bool(t)))
+        self.edit.installEventFilter(self)
+        self.accent = QColor("#7dd3fc")
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        if event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            self.update()
+        return False
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.edit.setGeometry(38, 0, self.width() - 38 - 52, self.height())
+        self.clear_btn.move(self.width() - 32, (self.height() - 26) // 2)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        focus = self.edit.hasFocus()
+        if focus:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(look.with_alpha(self.accent, 0.16))
+            p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), r.height() / 2 + 1, r.height() / 2 + 1)
+        p.setBrush(QColor(0, 0, 0, 60) if not focus else QColor(0, 0, 0, 80))
+        p.setPen(QPen(look.with_alpha(self.accent, 0.75) if focus else QColor(255, 255, 255, 30), 1.1))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        draw_icon(p, "search", QRectF(13, (self.height() - 17) / 2, 17, 17),
+                  look.RAIL_TEXT if focus else look.RAIL_MUTED)
+        if not self.edit.text() and not focus:
+            p.setFont(look.font(10.5, QFont.Weight.DemiBold))
+            p.setPen(look.with_alpha(look.RAIL_TEXT, 0.40))
+            p.drawText(r.adjusted(0, 0, -14, 0), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
+                       "Ctrl F")
         p.end()
 
 
 class Rail(QWidget):
-    """The quiet dark column on the left: search, then the library, then
-    moods to start from."""
+    """The column on the left, in the playing cover's colours: on glass at
+    the top, the mark, search, Home and Explore (charts & trending); then
+    your library, your playlists, and -- at the bottom, folding away --
+    what's made for you from your listening."""
     navigate = Signal(str)
     searched = Signal(str)
     mood = Signal(str)
+    menu_requested = Signal(QPoint)
 
     MOODS = (("chill", "Chill", 0.52), ("focus", "Focus", 0.60), ("workout", "Workout", 0.02),
              ("lofi", "Lo-fi beats", 0.78), ("party", "Party", 0.90), ("classical", "Classical", 0.10),
@@ -1138,118 +1403,205 @@ class Rail(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(look.RAIL_W)
+        from .widgets.wordmark import GradientLine
+        self.setFixedWidth(look.RAIL_W + 36)
+        self._pal = look.DEFAULT
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(8, 2, 8, 4)
         outer.setSpacing(0)
-        head = QHBoxLayout()
-        head.setContentsMargins(20, 18, 16, 12)
-        head.setSpacing(10)
-        head.addWidget(_Mark())
-        name = QLabel("Music")
-        name.setFont(look.font(17, QFont.Weight.Bold))
-        name.setStyleSheet("color: #ffffff; background: transparent;")
-        head.addWidget(name)
-        head.addStretch(1)
-        outer.addLayout(head)
-
-        self.search = QLineEdit()
-        self.search.setObjectName("railSearch")
-        self.search.setPlaceholderText("Songs, artists, albums")
-        self.search.setFixedHeight(38)
-        self.search.setTextMargins(26, 0, 0, 0)
-        self.search.setFont(look.font(13))
-        self.search.setStyleSheet(
-            "QLineEdit#railSearch { background: %s; border: 1px solid rgba(255,255,255,16); border-radius: 10px;"
-            " color: #ffffff; padding: 0 10px; selection-background-color: rgba(125,211,252,110); }"
-            "QLineEdit#railSearch:focus { border: 1px solid rgba(255,255,255,70); }" % look.RAIL_FIELD.name())
-        self.search.returnPressed.connect(lambda: self.searched.emit(self.search.text()))
-        self._glass = _SearchGlyph(self.search)
-        wrap = QHBoxLayout()
-        wrap.setContentsMargins(14, 0, 14, 6)
-        wrap.addWidget(self.search)
-        outer.addLayout(wrap)
-
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { background: transparent; } QScrollArea > QWidget > QWidget"
-                             " { background: transparent; }")
+                             " { background: transparent; } QScrollBar:vertical { width: 6px; background:"
+                             " transparent; } QScrollBar::handle:vertical { background: rgba(255,255,255,40);"
+                             " border-radius: 3px; min-height: 30px; } QScrollBar::add-line, QScrollBar::sub-line"
+                             " { height: 0; }")
         body = QWidget()
-        col = QVBoxLayout(body)
-        col.setContentsMargins(0, 0, 0, 12)
-        col.setSpacing(0)
+        self.col = QVBoxLayout(body)
+        self.col.setContentsMargins(10, 10, 6, 14)
+        self.col.setSpacing(0)
         self.items = {}
-        groups = (("Discover", (("home", "Home"), ("search", "Search results"))),
-                  ("Your music", (("songs", "Songs"), ("artists", "Artists"), ("albums", "Albums"),
-                                  ("local", "On this PC"), ("queue", "Queue"))))
-        for label, entries in groups:
-            col.addWidget(_RailLabel(label))
-            for key, text in entries:
-                item = NavItem(key, text)
-                item.clicked.connect(lambda _c=False, k=key: self.navigate.emit(k))
-                col.addWidget(item)
-                self.items[key] = item
-        col.addWidget(_RailLabel("Moods"))
-        for key, text, _hue in self.MOODS:
-            item = NavItem("mood:" + key, text)
-            item.setCheckable(False)
-            item.clicked.connect(lambda _c=False, t=text: self.mood.emit(t))
-            col.addWidget(item)
-        col.addStretch(1)
+        self._dynamic = {"made": [], "playlists": []}
+
+        # on glass: the mark, search, Home, Explore
+        top = _RailCard()
+        head = QHBoxLayout()
+        head.setContentsMargins(6, 0, 0, 6)
+        head.setSpacing(10)
+        self.mark = _Mark()
+        head.addWidget(self.mark)
+        self.brand = GradientLine("", "Music", "", px=26)
+        self.brand.set_colors("#ffffff", "#7dd3fc", True, "#a5b4fc")
+        head.addWidget(self.brand)
+        head.addStretch(1)
+        self.menu_btn = icon_button("dots", "Music settings and import", 32, 18, self)
+        self.menu_btn.clicked.connect(
+            lambda: self.menu_requested.emit(self.menu_btn.mapToGlobal(QPoint(0, self.menu_btn.height()))))
+        head.addWidget(self.menu_btn)
+        top.col.addLayout(head)
+        self.search_box = SearchField()
+        self.search = self.search_box.edit
+        self.search.returnPressed.connect(lambda: self.searched.emit(self.search.text()))
+        top.col.addWidget(self.search_box)
+        top.col.addSpacing(6)
+        for key, text, icon in (("home", "Home", "home"), ("explore", "Explore", "trend"),
+                                ("search", "Search results", "search")):
+            top.col.addWidget(self._item(key, text, icon))
+        self.items["search"].hide()
+        self.col.addWidget(top)
+        self.col.addSpacing(12)
+
+        # your library
+        self.col.addWidget(_RailLabel("Your library"))
+        for key, text, icon in (("songs", "Liked songs", "heart"), ("artists", "Artists", "person"),
+                                ("albums", "Albums", "disc"), ("local", "On this PC", "folder"),
+                                ("queue", "Queue", "queue"), ("taste", "Your taste", "target")):
+            self.col.addWidget(self._item(key, text, icon))
+        self.col.addSpacing(10)
+
+        # playlists, with new and import on the heading
+        pl = _RailLabel("Playlists")
+        new = pl.add_button(icon_button("plus", "New playlist", 28, 16))
+        new.clicked.connect(lambda: self.navigate.emit("newplaylist"))
+        self.col.addWidget(pl)
+        self._pl_box = QVBoxLayout()
+        self._pl_box.setSpacing(2)
+        self.col.addLayout(self._pl_box)
+        # first in the section, always: bring playlists over from other apps
+        self.import_item = NavItem("import", "Import a playlist", sub="Spotify, Apple Music, YouTube",
+                                   icon="playlist_import")
+        self.import_item.setCheckable(False)
+        self.import_item.setToolTip("Bring a playlist over from Spotify, Apple Music, YouTube Music or YouTube "
+                                    "-- or a list of songs")
+        self.import_item.clicked.connect(lambda: self.navigate.emit("import"))
+        self._pl_box.addWidget(self.import_item)
+        self.col.addSpacing(12)
+
+        # made for you, at the bottom: it folds away
+        self.made_card = _RailCard()
+        self.made_head = _FoldHeader("Made for you", "sparkle")
+        self.made_head.clicked.connect(self._toggle_made)
+        self.made_card.col.addWidget(self.made_head)
+        self._made_box = QVBoxLayout()
+        self._made_box.setSpacing(2)
+        self.made_card.col.addLayout(self._made_box)
+        self.made_card.hide()
+        self.col.addWidget(self.made_card)
+        self.col.addStretch(1)
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
+
+    def _item(self, key, text, icon):
+        item = NavItem(key, text, icon=icon)
+        item.clicked.connect(lambda _c=False, k=key: self.navigate.emit(k))
+        self.items[key] = item
+        return item
+
+    def _toggle_made(self):
+        on = not self.made_head.open
+        self.made_head.set_open(on)
+        for w in self._dynamic["made"]:
+            w.setVisible(on)
+
+    def _set_dynamic(self, which, box, entries):
+        for w in self._dynamic[which]:
+            self.items.pop(w.key, None)
+            w.setParent(None)
+            w.deleteLater()
+        self._dynamic[which] = []
+        for key, title, sub, art_url in entries:
+            item = NavItem(key, title, sub=sub, art_url=art_url)
+            item.accent = self.items["home"].accent
+            item.clicked.connect(lambda _c=False, k=key: self.navigate.emit(k))
+            box.addWidget(item)
+            self.items[key] = item
+            self._dynamic[which].append(item)
+
+    def set_made_for_you(self, entries):
+        """[(key, title, second line, cover url)] -- the algorithm's picks."""
+        self._set_dynamic("made", self._made_box, entries)
+        self.made_card.setVisible(bool(entries))
+        for w in self._dynamic["made"]:
+            w.setVisible(self.made_head.open)
+
+    def set_playlists(self, entries):
+        self._set_dynamic("playlists", self._pl_box, entries)
 
     def select(self, key):
         for k, item in self.items.items():
             item.setChecked(k == key)
+        if key == "search":
+            self.items["search"].show()
 
     def set_accent(self, colour):
+        self.search_box.accent = colour
+        self.mark.accent = QColor(colour)
+        self.mark.update()
+        self.import_item.accent = QColor(colour)
+        self.import_item.update()
         for item in self.items.values():
             item.accent = colour
             if item.isChecked():
                 item.update()
 
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.fillRect(self.rect(), look.RAIL_BG)
-        p.fillRect(QRectF(self.width() - 1, 0, 1, self.height()), QColor(255, 255, 255, 12))
-        p.end()
+    def set_palette(self, pal):
+        self._pal = pal
+        self.update()
 
-
-class _SearchGlyph(QWidget):
-    def __init__(self, field):
-        super().__init__(field)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setFixedSize(30, 38)
-        self.move(6, 0)
+    def _panel(self):
+        return QRectF(self.rect()).adjusted(8, 0, -8, 0)
 
     def paintEvent(self, event):
+        # a floating panel of its own, on the canvas, rounded like the page and the player
         p = QPainter(self)
-        draw_icon(p, "search", QRectF(7, 11, 16, 16), look.RAIL_MUTED)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), look.mix(self._pal["deep"], QColor(3, 4, 7), 0.80))
+        r = self._panel()
+        deep = self._pal["deep"]
+        g = QLinearGradient(0, r.top(), 0, r.bottom())
+        g.setColorAt(0, look.mix(deep, QColor(10, 12, 18), 0.42))
+        g.setColorAt(1, look.mix(deep, QColor(6, 7, 11), 0.62))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(g)
+        p.drawRoundedRect(r, 18, 18)
+        glow = QRadialGradient(QPointF(r.left() + r.width() * 0.3, r.top()), r.width() * 1.4)
+        glow.setColorAt(0, look.with_alpha(self._pal["accent"], 0.18))
+        glow.setColorAt(1, look.with_alpha(self._pal["accent"], 0.0))
+        p.setBrush(glow)
+        p.drawRoundedRect(r, 18, 18)
+        p.setPen(QPen(QColor(255, 255, 255, 20), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 18, 18)
         p.end()
 
 
 # ------------------------------------------------------------- the player ---
 class ThinSlider(QSlider):
-    """A hairline that thickens under the cursor, with a knob -- the song's
-    progress along the top of the player (`top`), or the volume."""
+    """A thin line with the accent running along it and a soft knob -- the
+    song's progress, and the volume. Under the cursor the line thickens a
+    little; `knob` keeps the knob showing (the player's own lines)."""
 
-    def __init__(self, top=False, parent=None):
+    def __init__(self, top=False, parent=None, knob=True):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.top = top
+        self.knob = knob
         self._hover = False
-        self.accent = look.TEXT
+        self.accent = QColor("#f4a47a")
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(14 if top else 18)
+        self.setFixedHeight(14 if top else 20)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def _pad(self):
+        return 7.0
 
     def _value_at(self, x):
         if self.maximum() <= self.minimum():
             return self.minimum()
-        f = max(0.0, min(1.0, x / max(1.0, self.width())))
+        pad = self._pad()
+        f = max(0.0, min(1.0, (x - pad) / max(1.0, self.width() - 2 * pad)))
         return int(round(self.minimum() + f * (self.maximum() - self.minimum())))
 
     def mousePressEvent(self, e):
@@ -1280,146 +1632,498 @@ class ThinSlider(QSlider):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w = self.width()
-        thick = 5.0 if (self._hover or self.isSliderDown()) else 3.0
-        y = (thick / 2 + 1) if self.top else self.height() / 2
+        pad = self._pad()
+        w = self.width() - 2 * pad
+        active = self._hover or self.isSliderDown()
+        thick = 5.0 if active else 4.0
+        y = self.height() / 2
         span = self.maximum() - self.minimum()
         f = (self.value() - self.minimum()) / span if span > 0 else 0.0
+        x = pad + w * f
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 46))
-        p.drawRoundedRect(QRectF(0, y - thick / 2, w, thick), thick / 2, thick / 2)
-        p.setBrush(self.accent)
-        p.drawRoundedRect(QRectF(0, y - thick / 2, w * f, thick), thick / 2, thick / 2)
-        if self._hover or self.isSliderDown():
-            p.setBrush(QColor(255, 255, 255))
-            p.drawEllipse(QPointF(max(6.0, min(w - 6.0, w * f)), y), 6, 6)
+        p.setBrush(QColor(255, 255, 255, 40))
+        p.drawRoundedRect(QRectF(pad, y - thick / 2, w, thick), thick / 2, thick / 2)
+        if f > 0:
+            g = QLinearGradient(pad, 0, max(pad + 1, x), 0)
+            g.setColorAt(0, look.with_alpha(self.accent.lighter(125), 0.95))
+            g.setColorAt(1, self.accent)
+            p.setBrush(g)
+            p.drawRoundedRect(QRectF(pad, y - thick / 2, x - pad, thick), thick / 2, thick / 2)
+        if self.knob or active:
+            r = 6.5 if active else 5.6
+            halo = QRadialGradient(QPointF(x, y), r * 2.4)
+            halo.setColorAt(0, look.with_alpha(self.accent, 0.45))
+            halo.setColorAt(1, look.with_alpha(self.accent, 0.0))
+            p.setBrush(halo)
+            p.drawEllipse(QPointF(x, y), r * 2.4, r * 2.4)
+            p.setBrush(self.accent.lighter(150))
+            p.setPen(QPen(QColor(255, 255, 255, 200), 1.0))
+            p.drawEllipse(QPointF(x, y), r, r)
         p.end()
 
 
+class VolumeControl(QWidget):
+    """Speaker, line and number in one: the player's volume."""
+
+    def __init__(self, width=110, pill=False, parent=None):
+        super().__init__(parent)
+        self.pill = pill
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14 if pill else 0, 0, 18 if pill else 0, 0)
+        row.setSpacing(8)
+        self.icon = icon_button("speaker", "Mute", 34, 19)
+        self.slider = ThinSlider()
+        self.slider.setRange(0, 100)
+        self.slider.setFixedWidth(width)
+        self.slider.setToolTip("Volume")
+        self.label = QLabel("80")
+        self.label.setFont(look.font(13, QFont.Weight.DemiBold))
+        self.label.setStyleSheet("color: rgba(255,255,255,200); background: transparent;")
+        self.label.setFixedWidth(28)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.slider.valueChanged.connect(lambda v: self.label.setText(str(v)))
+        for w in (self.icon, self.slider, self.label):
+            row.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._row = row
+        if pill:
+            self.setFixedHeight(58)
+
+    def fit(self, width, k=1.0):
+        """The whole control `width` wide: the line takes what's left. `k`
+        sizes the speaker and the margins with a smaller card."""
+        k = max(0.4, min(1.0, k))
+        if self.pill:
+            self._row.setContentsMargins(int(14 * k), 0, int(18 * k), 0)
+        self._row.setSpacing(max(3, int(8 * k)))
+        n = max(20, int(round(34 * k)))
+        self.icon.setFixedSize(n, n)
+        self.icon.icon_size = max(10, int(round(19 * k)))
+        m = self._row.contentsMargins()
+        fixed = m.left() + m.right() + self.icon.width() + 2 * self._row.spacing()
+        self.label.setVisible(width - fixed - self.label.width() >= 70)
+        if self.label.isVisible():
+            fixed += self.label.width()
+        else:
+            fixed -= self._row.spacing()
+        self.slider.setFixedWidth(max(16, int(width - fixed)))
+        self.setFixedWidth(int(width))
+
+    def paintEvent(self, event):
+        if not self.pill:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(look.with_alpha(look.TEXT, 0.14), 1))
+        p.setBrush(look.with_alpha(look.TEXT, 0.045))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        p.end()
+
+
+class TileButton(QAbstractButton):
+    """An icon over its word, in a soft rounded frame (the full-screen
+    player's Queue and EQ). Lit in the accent while its panel is open."""
+
+    def __init__(self, kind, text, parent=None):
+        super().__init__(parent)
+        self.kind = kind
+        self.setText(text)
+        self.lit = False
+        self.accent = QColor("#f4a47a")
+        self._hover = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedSize(92, 58)
+
+    def set_lit(self, on):
+        self.lit = on
+        self.update()
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        rad = min(18.0, r.height() / 2.6)
+        if self.lit:
+            p.setPen(QPen(look.with_alpha(self.accent.lighter(130), 0.8), 1.2))
+            p.setBrush(look.with_alpha(self.accent, 0.26))
+        else:
+            p.setPen(QPen(look.with_alpha(look.TEXT, 0.22 if self._hover else 0.14), 1))
+            p.setBrush(look.with_alpha(look.TEXT, 0.10 if self._hover else 0.045))
+        p.drawRoundedRect(r, rad, rad)
+        k = min(1.0, r.height() / 58.0)          # icon and word in proportion to the tile
+        if r.height() < 40:                      # too short for both: the icon alone (its tip names it)
+            isz = r.height() * 0.5
+            draw_icon(p, self.kind, QRectF(r.center().x() - isz / 2, r.center().y() - isz / 2, isz, isz),
+                      look.TEXT)
+            p.end()
+            return
+        isz = 19.0 * k
+        f = look.font(11 * k, QFont.Weight.DemiBold)
+        th = QFontMetricsF(f).height()
+        top = r.top() + (r.height() - isz - 3 - th) / 2
+        draw_icon(p, self.kind, QRectF(r.center().x() - isz / 2, top, isz, isz), look.TEXT)
+        p.setFont(f)
+        p.setPen(look.TEXT)
+        p.drawText(QRectF(r.left(), top + isz + 3, r.width(), th), int(Qt.AlignmentFlag.AlignCenter), self.text())
+        p.end()
+
+
+class Divider(QWidget):
+    """A hairline between groups of controls."""
+
+    def __init__(self, height=28, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(1, height)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        g = QLinearGradient(0, 0, 0, self.height())
+        g.setColorAt(0, QColor(255, 255, 255, 0))
+        g.setColorAt(0.5, QColor(255, 255, 255, 52))
+        g.setColorAt(1, QColor(255, 255, 255, 0))
+        p.fillRect(self.rect(), g)
+        p.end()
+
+
+class LinkText(QLabel):
+    """A title or a name that opens something: underlined under the cursor."""
+    clicked = Signal(QPoint)
+
+    def __init__(self, text="", px=13.5, weight=QFont.Weight.DemiBold, alpha=255, parent=None):
+        super().__init__(text, parent)
+        self._full = text
+        self._f = look.font(px, weight)
+        self.setFont(self._f)
+        self._alpha = alpha
+        self._style(False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text):   # noqa: N802 -- QLabel's name
+        self._full = text or ""
+        self.setToolTip(self._full if len(self._full) > 28 else "")
+        self._fit()
+
+    def text(self):
+        return self._full
+
+    def setFont(self, f):   # noqa: N802
+        super().setFont(f)
+        self._fit()
+
+    def _fit(self):
+        full = getattr(self, "_full", "")
+        w = max(10, self.width())
+        super().setText(QFontMetricsF(self.font()).elidedText(full, Qt.TextElideMode.ElideRight, w - 2)
+                        if full else "")
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+    def _style(self, hover):
+        self.setStyleSheet("color: rgba(255,255,255,%d); background: transparent;%s"
+                           % (255 if hover else self._alpha, " text-decoration: underline;" if hover else ""))
+
+    def enterEvent(self, e):
+        self._style(True)
+
+    def leaveEvent(self, e):
+        self._style(False)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(e.globalPosition().toPoint())
+
+
+class PlayButton(RingButton):
+    """The big round play button: a ring in the cover's accent over a warm
+    glass fill, a soft halo around it that breathes while the song plays.
+    Its circle sits in the middle of the widget (the halo has room all
+    round), so it lines up with the buttons beside it."""
+
+    def __init__(self, size=56, icon_size=20, parent=None):
+        super().__init__("play", "Play", size=size, icon_size=icon_size, ring=0.9, parent=parent)
+        self.accent = QColor("#f4a47a")
+        self.playing = False
+        self._phase = 0.0
+        self._breathe = QTimer(self)
+        self._breathe.setInterval(50)
+        self._breathe.timeout.connect(self._tick)
+
+    def set_playing(self, on):
+        self.playing = on
+        if on:
+            self._breathe.start()
+        else:
+            self._breathe.stop()
+        self.update()
+
+    def _tick(self):
+        self._phase += 0.05
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        full = QRectF(self.rect())
+        m = full.width() * 0.13
+        r = full.adjusted(m, m, -m, -m)
+        c = full.center()
+        a = QColor(self.accent)
+        k = (0.5 + 0.5 * math.sin(self._phase * 2.0)) if self.playing else 0.0
+        halo = QRadialGradient(c, full.width() / 2)
+        halo.setColorAt(r.width() / full.width() * 0.92, look.with_alpha(a, 0.30 + 0.14 * k + 0.08 * self._hover.value))
+        halo.setColorAt(1, look.with_alpha(a, 0.0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(halo)
+        p.drawEllipse(full)
+        fill = QRadialGradient(QPointF(c.x(), c.y() - r.height() * 0.25), r.width() * 0.75)
+        fill.setColorAt(0, look.with_alpha(a.lighter(120), 0.30 + 0.10 * self._hover.value))
+        fill.setColorAt(1, look.with_alpha(a.darker(160), 0.22))
+        p.setBrush(fill)
+        p.setPen(QPen(a.lighter(118), max(2.0, r.width() * 0.045)))
+        p.drawEllipse(r)
+        ir = QRectF(0, 0, self.icon_size, self.icon_size)
+        ir.moveCenter(c)
+        if self.kind == "play":
+            ir.translate(self.icon_size * 0.07, 0)        # a triangle looks centred a touch to the right
+        if self.isDown():
+            ir.translate(0, 0.6)
+        draw_icon(p, self.kind, ir, look.TEXT)
+        p.end()
+
+
+class HeartButton(ChromeButton):
+    """Like: a heart that fills (red) and pops when a song is liked."""
+
+    def __init__(self, size=34, parent=None):
+        super().__init__("heart", "Like", size=size, icon_size=max(18, int(size * 0.42)), parent=parent)
+        self.apply_theme(look.ON_COLOUR)
+        self._base = self.icon_size
+        self.ringed = False
+        self.liked = False
+        self._pop = 0.0
+        self._anim = QTimer(self)
+        self._anim.setInterval(16)
+        self._anim.timeout.connect(self._step)
+
+    def set_liked(self, on, animate=False):
+        self.liked = on
+        self.set_kind("heart_filled" if on else "heart")
+        self.tint = "#ff4d6d" if on else None
+        self.set_tip("Liked — click to remove" if on else "Like (add to Liked songs)")
+        if animate and on:
+            self._pop = 1.0
+            self._anim.start()
+        self.update()
+
+    def _step(self):
+        self._pop = max(0.0, self._pop - 0.07)
+        if not self._pop:
+            self._anim.stop()
+        self.icon_size = int(self._base + 7 * math.sin(self._pop * math.pi))
+        self.update()
+
+    def paintEvent(self, event):
+        if self.ringed:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(QPen(look.with_alpha(look.TEXT, 0.30 + 0.25 * self._hover.value), 1.3))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5))
+            p.end()
+        super().paintEvent(event)
+
+
 class PlayerBar(QWidget):
-    """The player along the bottom, the reference's way: the song on the
-    left, the controls in the middle, time and volume on the right, its
-    progress a line along its top -- all over the playing cover's colours."""
+    """The player along the bottom, on floating glass in the cover's colours:
+    the song (its title opens a menu, its artist their page), like, add,
+    more | shuffle, previous, back 10 s, play, forward 10 s, next, repeat --
+    every button on one centre line -- over a thin progress line | volume,
+    Lyrics, queue, equalizer, details, download, full screen."""
+    H = 116
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(look.BAR_H)
-        # never what holds the window wide: it folds its extras away instead (resizeEvent)
+        self.setFixedHeight(self.H)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._pal = look.DEFAULT
         self._frost = None
-        self.seek = ThinSlider(top=True, parent=self)
-        self.seek.setRange(0, 0)
-
+        self.accent = QColor("#f4a47a")
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(16, 14, 18, 10)
-        lay.setSpacing(12)
+        lay.setContentsMargins(26, 12, 28, 14)
+        lay.setSpacing(18)
+        V = Qt.AlignmentFlag.AlignVCenter
+
         left = self.left = QWidget()
-        left.setFixedWidth(look.RAIL_W + 70)
+        left.setFixedWidth(look.RAIL_W + 130)
         ll = QHBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
-        ll.setSpacing(12)
-        self.art = _CoverButton(50)
-        ll.addWidget(self.art)
+        ll.setSpacing(14)
+        self.art = _CoverButton(64)
+        ll.addWidget(self.art, 0, V)
         col = QVBoxLayout()
-        col.setSpacing(1)
-        self.title = QLabel("Nothing playing")
-        self.title.setFont(look.font(13.5, QFont.Weight.DemiBold))
-        self.title.setStyleSheet("color: #ffffff; background: transparent;")
-        self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.artist = QLabel("Search for a song to start")
-        self.artist.setFont(look.font(12))
-        self.artist.setStyleSheet("color: rgba(255,255,255,190); background: transparent;")
-        self.artist.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        col.setSpacing(3)
+        self.title = LinkText("Nothing playing", 15, QFont.Weight.DemiBold)
+        self.artist = LinkText("Search for a song to start", 12.5, QFont.Weight.Medium, 185)
         self.credit = QLabel("")
-        self.credit.setFont(look.font(10.5))
-        self.credit.setStyleSheet("color: rgba(255,255,255,130); background: transparent;")
-        self.credit.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.credit.hide()
+        from .music_panels import QualityBadge
+        self.quality = QualityBadge(small=True)
         col.addStretch(1)
         col.addWidget(self.title)
         col.addWidget(self.artist)
-        col.addWidget(self.credit)
+        col.addSpacing(2)
+        col.addWidget(self.quality, 0, Qt.AlignmentFlag.AlignLeft)
         col.addStretch(1)
         ll.addLayout(col, 1)
-        self.save_btn = icon_button("star", "Save to Your music", 32, 16)
-        ll.addWidget(self.save_btn)
-        lay.addWidget(left)
+        self.save_btn = HeartButton(36)
+        self.add_btn = icon_button("plus", "Add to a playlist", 36, 19)
+        self.more_btn = icon_button("dots", "More", 36, 19)
+        for w in (self.save_btn, self.add_btn, self.more_btn):
+            ll.addWidget(w, 0, V)
+        lay.addWidget(left, 0, V)
+        self.sep_l = Divider(40)
+        lay.addWidget(self.sep_l, 0, V)
 
-        lay.addStretch(1)
-        self.shuffle_btn = icon_button("shuffle", "Shuffle", 34, 16)
-        self.prev_btn = icon_button("prev", "Previous", 36, 17)
-        self.play_btn = RingButton("play", "Play", size=46, icon_size=18, ring=0.75)
-        self.next_btn = icon_button("next", "Next", 36, 17)
-        self.repeat_btn = icon_button("repeat", "Repeat: off", 34, 16)
-        for b in (self.shuffle_btn, self.prev_btn, self.play_btn, self.next_btn, self.repeat_btn):
-            lay.addWidget(b)
-        lay.addStretch(1)
-
-        right = QHBoxLayout()
-        right.setSpacing(4)
+        mid = QVBoxLayout()
+        mid.setSpacing(0)
+        mid.setContentsMargins(0, 0, 0, 0)
+        ctl = QHBoxLayout()
+        ctl.setSpacing(14)
+        ctl.addStretch(1)
+        self.shuffle_btn = icon_button("shuffle", "Shuffle", 36, 19)
+        self.prev_btn = icon_button("prev", "Previous", 38, 19)
+        self.back10_btn = icon_button("back10", "Back 10 seconds", 38, 24)
+        self.play_btn = PlayButton(62, 19)
+        self.fwd10_btn = icon_button("fwd10", "Forward 10 seconds", 38, 24)
+        self.next_btn = icon_button("next", "Next", 38, 19)
+        self.repeat_btn = icon_button("repeat", "Repeat: off", 36, 19)
+        for b in (self.shuffle_btn, self.prev_btn, self.back10_btn, self.play_btn, self.fwd10_btn, self.next_btn,
+                  self.repeat_btn):
+            ctl.addWidget(b, 0, V)
+        ctl.addStretch(1)
+        mid.addLayout(ctl)
+        seek_row = QHBoxLayout()
+        seek_row.setSpacing(10)
         self.pos_label = QLabel("0:00")
         self.len_label = QLabel("0:00")
         for lab in (self.pos_label, self.len_label):
             lab.setFont(look.font(12, QFont.Weight.Medium))
             lab.setStyleSheet("color: rgba(255,255,255,170); background: transparent;")
-        slash = self.slash = QLabel("/")
-        slash.setFont(look.font(12))
-        slash.setStyleSheet("color: rgba(255,255,255,90); background: transparent;")
-        right.addWidget(self.pos_label)
-        right.addWidget(slash)
-        right.addWidget(self.len_label)
-        right.addSpacing(12)
-        self.queue_btn = icon_button("list", "Queue", 34, 16)
-        self.lyrics_btn = icon_button("mic", "Lyrics (karaoke)", 34, 16)
-        self.keep_btn = icon_button("download", "Download this song", 34, 16)
-        self.vol_icon = icon_button("speaker", "Mute", 34, 16)
-        self.volume = ThinSlider()
-        self.volume.setRange(0, 100)
-        self.volume.setFixedWidth(96)
-        self.volume.setToolTip("Volume")
-        self.full_btn = icon_button("expand", "Full screen", 34, 15)
-        for w in (self.queue_btn, self.lyrics_btn, self.keep_btn, self.vol_icon, self.volume, self.full_btn):
-            right.addWidget(w)
+            lab.setFixedWidth(44)
+        self.len_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.pos_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.seek = ThinSlider()
+        self.seek.setRange(0, 0)
+        self.seek.setMaximumWidth(620)
+        seek_row.addStretch(1)
+        seek_row.addWidget(self.pos_label, 0, V)
+        seek_row.addWidget(self.seek, 8, V)
+        seek_row.addWidget(self.len_label, 0, V)
+        seek_row.addStretch(1)
+        mid.addLayout(seek_row)
+        lay.addLayout(mid, 1)
+
+        self.sep_r = Divider(40)
+        lay.addWidget(self.sep_r, 0, V)
+        right = QHBoxLayout()
+        right.setSpacing(6)
+        self.vol = VolumeControl(104)
+        self.vol_icon, self.volume, self.vol_label = self.vol.icon, self.vol.slider, self.vol.label
+        self.lyrics_btn = Pill("Lyrics", "mic", style="ghost")
+        self.lyrics_btn.setToolTip("Lyrics")
+        self.queue_btn = icon_button("queue", "Queue", 38, 20)
+        self.eq_btn = icon_button("sliders", "Equalizer & effects", 38, 20)
+        self.info_btn = icon_button("info", "Song info", 38, 20)
+        self.keep_btn = icon_button("download", "Download this song", 38, 20)
+        self.full_btn = icon_button("expand", "Full screen player", 38, 18)
+        right.addWidget(self.vol, 0, V)
+        right.addSpacing(8)
+        for w in (self.lyrics_btn, self.queue_btn, self.eq_btn, self.info_btn, self.keep_btn, self.full_btn):
+            right.addWidget(w, 0, V)
         lay.addLayout(right)
 
     def set_palette(self, pal, frost=None):
         self._pal = pal
         self._frost = frost
-        self.seek.accent = look.TEXT
+        self.set_accent(pal["accent"])
         self.update()
 
+    def set_accent(self, colour):
+        self.accent = QColor(colour)
+        for w in (self.play_btn, self.seek, self.volume, self.lyrics_btn):
+            w.accent = self.accent
+            w.update()
+
     # (narrower than, what folds away) -- the least needed first
-    _FOLD = ((1200, "volume"), (1090, "times"), (1000, "queue_btn"), (1000, "full_btn"), (930, "save_btn"),
-             (880, "lyrics_btn"), (820, "shuffle_btn"), (820, "repeat_btn"))
+    _FOLD = ((1480, "keep_btn"), (1400, "info_btn"), (1330, "vol_label"), (1290, "volume"), (1220, "lyrics_btn"),
+             (1150, "eq_btn"), (1060, "back10_btn"), (1060, "fwd10_btn"), (1000, "add_btn"), (940, "more_btn"),
+             (900, "shuffle_btn"), (900, "repeat_btn"), (860, "queue_btn"))
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self.seek.setGeometry(0, 0, self.width(), 14)
-        self.seek.raise_()
         w = self.width()
         for limit, name in self._FOLD:
-            show = w >= limit
-            parts = (self.pos_label, self.slash, self.len_label) if name == "times" else (getattr(self, name),)
-            for part in parts:
-                part.setVisible(show)
-        self.left.setFixedWidth(look.RAIL_W + 70 if w >= 1000 else max(150, int(w * 0.27)))
+            getattr(self, name).setVisible(w >= limit)
+        self.sep_l.setVisible(w >= 1100)
+        self.sep_r.setVisible(w >= 1100)
+        self.left.setFixedWidth(look.RAIL_W + 130 if w >= 1250 else max(200, int(w * 0.26)))
+
+    def glass_rect(self):
+        return QRectF(self.rect()).adjusted(8, 8, -8, -8)
 
     def paintEvent(self, event):
         p = QPainter(self)
-        r = QRectF(self.rect())
-        p.fillRect(r, look.mix(self._pal["deep"], QColor(0, 0, 0), 0.35))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = self.glass_rect()
+        rad = 18.0
+        shape = QPainterPath()
+        shape.addRoundedRect(r, rad, rad)
+        p.save()
+        p.setClipPath(shape)
+        deep = self._pal["deep"]
+        p.fillRect(r, look.mix(deep, QColor(0, 0, 0), 0.42))
         if self._frost is not None:
-            p.setOpacity(0.55)
+            p.setOpacity(0.42)
             p.drawPixmap(r, self._frost, QRectF(self._frost.rect()))
             p.setOpacity(1.0)
-        g = QLinearGradient(0, 0, r.width(), 0)
-        g.setColorAt(0, look.with_alpha(self._pal["deep"], 0.80))
-        g.setColorAt(0.5, look.with_alpha(self._pal["deep"], 0.55))
-        g.setColorAt(1, look.with_alpha(self._pal["deep"], 0.80))
+        a = self.accent
+        # the cover's warmth: a glow behind the cover, and a softer one behind play
+        g = QRadialGradient(QPointF(r.left() + 70, r.center().y()), r.height() * 3.2)
+        g.setColorAt(0, look.with_alpha(a, 0.34))
+        g.setColorAt(1, look.with_alpha(a, 0.0))
         p.fillRect(r, g)
-        look.paint_grain(p, r, 0.6)
-        p.fillRect(QRectF(0, 0, r.width(), 1), QColor(255, 255, 255, 18))
+        pc = self.play_btn.geometry().center()
+        g2 = QRadialGradient(QPointF(pc.x(), r.top()), r.height() * 2.6)
+        g2.setColorAt(0, look.with_alpha(a, 0.20))
+        g2.setColorAt(1, look.with_alpha(a, 0.0))
+        p.fillRect(r, g2)
+        shade = QLinearGradient(0, r.top(), 0, r.bottom())
+        shade.setColorAt(0, QColor(255, 255, 255, 10))
+        shade.setColorAt(1, QColor(0, 0, 0, 70))
+        p.fillRect(r, shade)
+        look.paint_grain(p, r, 0.45)
+        p.restore()
+        p.setPen(QPen(QColor(255, 255, 255, 26), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
+        top = QLinearGradient(r.left(), 0, r.right(), 0)
+        top.setColorAt(0, look.with_alpha(a, 0.0))
+        top.setColorAt(0.5, look.with_alpha(a.lighter(130), 0.50))
+        top.setColorAt(1, look.with_alpha(a, 0.0))
+        p.setPen(QPen(top, 1.2))
+        p.drawLine(QPointF(r.left() + rad, r.top() + 0.6), QPointF(r.right() - rad, r.top() + 0.6))
         p.end()
 
 
@@ -1435,7 +2139,7 @@ class _CoverButton(QAbstractButton):
         self.setToolTip("Now playing")
 
     def set_pixmap(self, pm):
-        self._pix = look.rounded(pm, self.width(), self.height(), 5) if pm is not None else None
+        self._pix = look.rounded(pm, self.width(), self.height(), 10) if pm is not None else None
         self.update()
 
     def paintEvent(self, event):

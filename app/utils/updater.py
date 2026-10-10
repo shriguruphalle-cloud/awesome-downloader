@@ -323,7 +323,7 @@ INSTALL_ARGS = "/SILENT /SP- /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RE
 # The first version that encrypts saved data (app/utils/secure_store.py).
 # One before it reads only plain files, and finding encrypted ones it would
 # show an empty history -- and then save over it.
-ENCRYPTION_SINCE = "2.5.1"
+ENCRYPTION_SINCE = "3.0.0"
 
 
 def install(path, from_version, to_version, rollback=False, launch=None):

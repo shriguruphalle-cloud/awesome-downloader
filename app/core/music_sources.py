@@ -24,12 +24,16 @@ import glob
 import html
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from concurrent.futures import ThreadPoolExecutor
 
 from .. import config
 from ..logging_setup import get_logger
@@ -49,7 +53,7 @@ PARTS = ("music", "free", "live")
 # Songs fetched to play when a stream won't open directly (cache_audio), kept
 # to this many before the oldest go.
 CACHE_DIR = os.path.join(config.APPDATA_DIR, "music-cache")
-CACHE_KEEP = 40
+CACHE_KEEP = 60
 
 
 class MusicError(Exception):
@@ -272,6 +276,36 @@ def _anonymous(downloader, url):
     return opts
 
 
+# YouTube's stream links are made on request (about a second and a half, with
+# yt-dlp) and last a few hours. They're asked for ahead -- the next songs in
+# the queue, the first songs of a search -- and kept, so a click plays at once.
+_streams = {}                 # video id -> (url, good until)
+_streams_lock = threading.Lock()
+_warming = set()
+_warm_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="music-warm")
+
+
+def _good_until(url):
+    try:
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        expire = int((q.get("expire") or [0])[0])
+    except (ValueError, TypeError):
+        expire = 0
+    # a quarter of an hour's margin: a song started near the end still plays through
+    return (expire - 900) if expire else time.time() + 3 * 3600
+
+
+def known_stream(track):
+    """A stream link for `track` asked for earlier and still good, or None."""
+    if not track or track.get("source") != "youtube":
+        return None
+    with _streams_lock:
+        got = _streams.get(_video_id(track))
+    if got and got[1] > time.time():
+        return got[0]
+    return None
+
+
 def resolve_stream(track):
     """A playable address for `track` (blocking for YouTube, whose stream
     links are made on request and last a few hours)."""
@@ -282,15 +316,79 @@ def resolve_stream(track):
         cached = _cached(track)
         if cached:
             return cached
+        known = known_stream(track)
+        if known:
+            return known
         opts = _anonymous(downloader, track["page_url"])
-        opts.update({"skip_download": True, "format": "bestaudio[ext=m4a]/bestaudio/best"})
+        opts.update({"skip_download": True, "format": "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/best"})
         info = downloader._run(opts, track["page_url"],
                                lambda ydl: ydl.extract_info(track["page_url"], download=False))
         url = info.get("url") or next((f["url"] for f in reversed(info.get("requested_formats") or [])), None)
         if not url:
             raise MusicError("YouTube didn't give an audio stream for this song.")
+        with _streams_lock:
+            _streams[_video_id(track)] = (url, _good_until(url))
+            if len(_streams) > 400:
+                for k in list(_streams)[:100]:
+                    del _streams[k]
         return url
     raise MusicError("This track has nothing to play.")
+
+
+def warm(tracks, done=None):
+    """Asks for the stream links of `tracks` ahead (in the background), so
+    they play the moment they're clicked. done(track) when one is ready."""
+    for t in tracks or ():
+        if not t or t.get("source") != "youtube" or t.get("kind", "track") != "track":
+            continue
+        vid = _video_id(t)
+        if vid in _warming or known_stream(t) or _cached(t):
+            continue
+        _warming.add(vid)
+
+        def work(t=t, vid=vid):
+            try:
+                resolve_stream(t)
+                if done is not None:
+                    done(t)
+            except Exception as e:   # noqa: BLE001 -- asked for again when it's played
+                logger.info("Couldn't look %s up ahead: %s", vid, _short(e))
+            finally:
+                _warming.discard(vid)
+        _warm_pool.submit(work)
+
+
+# the loudness each song was measured at (EBU R128, LUFS), for "Level the volume"
+_LOUDNESS_PATH = os.path.join(config.APPDATA_DIR, "music-loudness.json")
+_loudness = None
+_loudness_lock = threading.Lock()
+
+
+def loudness_of(track):
+    global _loudness
+    with _loudness_lock:
+        if _loudness is None:
+            try:
+                with open(_LOUDNESS_PATH, encoding="utf-8") as f:
+                    _loudness = json.load(f)
+            except (OSError, ValueError):
+                _loudness = {}
+        return _loudness.get(track.get("id"))
+
+
+def note_loudness(track, lufs):
+    loudness_of(track)
+    with _loudness_lock:
+        _loudness[track["id"]] = round(float(lufs), 2)
+        if len(_loudness) > 5000:
+            for k in list(_loudness)[:1000]:
+                del _loudness[k]
+        try:
+            os.makedirs(os.path.dirname(_LOUDNESS_PATH), exist_ok=True)
+            with open(_LOUDNESS_PATH, "w", encoding="utf-8") as f:
+                json.dump(_loudness, f)
+        except OSError:
+            pass
 
 
 def _video_id(track):
@@ -334,7 +432,7 @@ def cache_audio(track, progress=None, cookies=False):
         def hook(d):
             if progress and d.get("status") == "downloading":
                 progress(d.get("downloaded_bytes") or 0, d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
-        opts.update({"format": "bestaudio[ext=m4a]/bestaudio/best", "noplaylist": True, "noprogress": True,
+        opts.update({"format": "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/best", "noplaylist": True, "noprogress": True,
                      "outtmpl": os.path.join(CACHE_DIR, "%(id)s.%(ext)s"), "progress_hooks": [hook],
                      "overwrites": True, "continuedl": False})
         try:
@@ -542,3 +640,100 @@ def library(folder):
         out.append(_track(id="local:" + path, title=title, artist=artist, source="local", stream=path,
                           ext=os.path.splitext(path)[1].lstrip(".").lower(), page_url=path))
     return out
+
+
+# ------------------------------------------------------------- covers ------
+# A music video's picture is a frame of the video (with black bars), not the
+# record's cover. The cover is found on YouTube Music -- from the song's
+# album when it's known, else from the best match for its title and artist
+# -- and kept, so a song shows its own artwork everywhere it appears.
+_art_found = {}
+_art_lock = threading.Lock()
+
+
+def is_cover(url):
+    """A proper square cover (YouTube Music's, Apple's) rather than a video frame."""
+    return bool(url) and ("googleusercontent.com" in url or "ggpht.com" in url or "mzstatic.com" in url)
+
+
+_BRACKETS = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
+_SPLIT_ARTISTS = re.compile(r"\s*(?:,|&|\band\b|\bx\b|\bfeat\.?|\bft\.?|\bwith\b|/)\s*", re.I)
+
+
+def _plain_title(title):
+    """A title without its brackets ("(From 'KGF')", "(Remix)"...), lower case, letters only."""
+    t = _BRACKETS.sub("", title or "").lower()
+    return re.sub(r"[^\w]+", " ", t).strip()
+
+
+def _artist_set(artists):
+    return {re.sub(r"[^\w]+", " ", a).strip().lower() for a in _SPLIT_ARTISTS.split(artists or "") if a.strip()}
+
+
+def cover_match(want_title, want_artists, want_secs, cand):
+    """How well `cand` (a YouTube Music song) is the same recording as the
+    one wanted -- 0 when it isn't. The title must be the same (brackets
+    aside); then it needs a singer in common, or failing that (a video's
+    "artist" is often only the label's channel) the same length to within
+    a few seconds."""
+    import difflib
+    a, b = _plain_title(want_title), _plain_title(cand.get("title"))
+    if not a or not b:
+        return 0.0
+    same = a == b or difflib.SequenceMatcher(None, a, b).ratio() >= 0.88
+    if not same:
+        return 0.0
+    ours, theirs = _artist_set(want_artists), _artist_set(cand.get("artist"))
+    shared = bool(ours & theirs) or any(x in y or y in x for x in ours for y in theirs if min(len(x), len(y)) >= 4)
+    secs = int(cand.get("duration") or 0)
+    gap = abs(secs - want_secs) if secs and want_secs else None
+    if shared:
+        return 2.0 + (1.0 if gap is not None and gap <= 8 else 0.0) + (0.5 if a == b else 0.0)
+    if gap is not None and gap <= 4 and a == b:
+        return 1.0
+    return 0.0
+
+
+def original_art(track):
+    """The record's own cover for `track` (a URL), or None. Blocking; kept
+    (a lookup that failed -- no connection, a busy server -- isn't, so it's
+    tried again later)."""
+    if not track or track.get("kind", "track") != "track":
+        return None
+    if is_cover(track.get("artwork")):
+        return track["artwork"]
+    key = track.get("id")
+    with _art_lock:
+        if key in _art_found:
+            return _art_found[key]
+    from . import lyrics, ytmusic
+    url = None
+    try:
+        if track.get("album_browse"):
+            url = (ytmusic.album(track["album_browse"]) or {}).get("artwork")
+        if not url:
+            artist, song = lyrics.clean_title(track.get("title", ""), track.get("artist", ""))
+            artists = track.get("artist") or artist or ""
+            if artist and artist.lower() not in artists.lower():
+                artists = "%s, %s" % (artists, artist)     # "Singer - Song" in a video's title
+            first = (artist or "").split(",")[0].split("&")[0].strip()
+            secs = int(track.get("duration") or 0)
+            found = ytmusic.search(("%s %s" % (_BRACKETS.sub("", song), first)).strip())["songs"][:8]
+            scored = [(cover_match(song, artists, secs, s), i, s) for i, s in enumerate(found)
+                      if is_cover(s.get("artwork"))]
+            scored = [x for x in scored if x[0] > 0]
+            if scored:
+                best = max(scored, key=lambda x: (x[0], -x[1]))[2]
+                url = best["artwork"]
+    except Exception as e:   # noqa: BLE001 -- the picture it has will do, for now
+        logger.info("No cover found for %s: %s", key, _short(e))
+        return None
+    with _art_lock:
+        _art_found[key] = url
+    return url
+
+
+def cover_settled(track_id):
+    """True once a cover lookup for the song has had its answer (found or not)."""
+    with _art_lock:
+        return track_id in _art_found

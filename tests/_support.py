@@ -207,7 +207,11 @@ def build_window(tabs=("video", "torrent", "images", "browser", "download", "his
             win.add_tab(made[name], "Images")
         elif name == "music":
             from ui_qt.music_tab import MusicTab
+            MusicTab.SHOW_ONBOARDING = False     # a test opens the taste setup itself, if it wants it
+            MusicTab.RESUME_ON_START = False     # nor plays last time's song
+            MusicTab.MINI_PLAYER = False         # nor floats a mini player over the test screen
             made[name] = MusicTab(settings=st)
+            made[name].taste.state["prefs"]["autoplay"] = False     # no radio fetched from a test
             win.add_tab(made[name], "Music")
             win.set_full_bleed(made[name])
         elif name == "browser":

@@ -18,6 +18,7 @@ account can be read, and reading faster than a person scrolls risks being
 cut off (or, signed in, the account being challenged).
 """
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -68,7 +69,7 @@ def _permalink(code, reel):
 
 
 # ------------------------------------------------------------------ parsing
-def media_from_feed_item(item, username=""):
+def media_from_feed_item(item, username="", direct=False):
     """One post from the v1 feed API -> (videos, images).
 
     videos: [{"url", "title", "duration", "uploader", "thumbnail_url"}] --
@@ -96,8 +97,10 @@ def media_from_feed_item(item, username=""):
             elif thumb:
                 images.append({"title": slide_title, "url": thumb, "is_video": False})
     elif kind == 2:                                 # one video or reel
-        if code:
-            videos.append({"url": _permalink(code, reel), "title": title,
+        # signed out, yt-dlp can't open a post's page -- its file is queued directly
+        file_url = _best(item.get("video_versions")) if direct else None
+        if file_url or code:
+            videos.append({"url": file_url or _permalink(code, reel), "title": title,
                            "duration": int(item.get("video_duration") or 0), "uploader": username,
                            "thumbnail_url": _best((item.get("image_versions2") or {}).get("candidates"))})
     else:                                           # one photo
@@ -133,6 +136,101 @@ def media_from_graph_node(node, username=""):
     elif node.get("display_url"):
         images.append({"title": title, "url": node["display_url"], "is_video": False})
     return videos, images
+
+
+# ------------------------------------------------------------- pages, signed out
+# Instagram's own pages still carry what they show, signed out: a post's or
+# reel's page has the post itself (every slide, every video file) in its
+# embedded data, and an account's page its id -- with which the account's
+# feed can be read. (Its web_profile_info API stopped answering anyone.)
+_SCRIPTS = re.compile(r'<script type="application/json"[^>]*>(.*?)</script>', re.S)
+
+
+def _page(url, timeout=20):
+    try:
+        from curl_cffi import requests as creq
+        resp = creq.get(url, impersonate="chrome", timeout=timeout)
+        status, text, final = resp.status_code, resp.text, str(resp.url)
+    except ImportError:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                                                 "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                                                 "Chrome/140.0.0.0 Safari/537.36"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status, text, final = resp.status, resp.read().decode("utf-8", "replace"), resp.geturl()
+    if status == 404:
+        raise InstagramError("not found")
+    if status >= 400 or "/accounts/login" in final:
+        raise InstagramError("login required")
+    return text
+
+
+def _walk(o):
+    if isinstance(o, dict):
+        yield o
+        for v in o.values():
+            yield from _walk(v)
+    elif isinstance(o, list):
+        for v in o:
+            yield from _walk(v)
+
+
+def shortcode(url):
+    segs = [s for s in urllib.parse.urlparse(url).path.split("/") if s]
+    for i, s in enumerate(segs[:-1]):
+        if s in ("p", "reel", "reels", "tv"):
+            return segs[i + 1]
+    return ""
+
+
+def post_from_page(url):
+    """A post or reel, signed out, from its own page: {"title", "username",
+    "videos", "images"} -- videos as files to queue directly. None if the
+    page doesn't carry it."""
+    code = shortcode(url)
+    if not code:
+        return None
+    html = _page(url)
+    item = None
+    for block in _SCRIPTS.findall(html):
+        if code not in block:
+            continue
+        try:
+            data = json.loads(block)
+        except ValueError:
+            continue
+        item = next((d for d in _walk(data) if d.get("code") == code and d.get("media_type")), None)
+        if item:
+            break
+    if not item:
+        return None
+    username = (item.get("user") or {}).get("username") or ""
+    videos, images = media_from_feed_item(item, username, direct=True)
+    caption = (item.get("caption") or {}).get("text") if isinstance(item.get("caption"), dict) else ""
+    return {"title": _caption_title(caption, "Instagram post %s" % code), "username": username,
+            "videos": videos, "images": images}
+
+
+def _profile_from_page(username):
+    """(user id, name, post count) from an account's own page, signed out."""
+    html = _page("https://www.instagram.com/%s/" % urllib.parse.quote(username))
+    m = re.search(r'"profile_id":"(\d+)"', html) or re.search(r'"owner_id":"(\d+)"', html) \
+        or re.search(r'"user_id":"(\d+)"', html)
+    if not m:
+        if "isPrivate\":true" in html or '"is_private":true' in html:
+            raise InstagramError("%s is a private account. Sign in to Instagram in the Browser tab with an account "
+                                 "that follows it to download it." % username)
+        raise InstagramError("There's no Instagram account called %s." % username)
+    title = username
+    og = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+    if og:
+        import html as html_mod
+        title = html_mod.unescape(og.group(1)).split(" (@")[0].strip() or username
+    total = 0
+    d = re.search(r'([\d.,]+)([KkMm]?) Posts', html)
+    if d:
+        n = float(d.group(1).replace(",", ""))
+        total = int(n * {"k": 1000, "m": 1000000}.get(d.group(2).lower(), 1))
+    return m.group(1), title, total
 
 
 # ------------------------------------------------------------------ fetching
@@ -207,13 +305,15 @@ def profile_media_signed_out(username, limit=POST_LIMIT, progress=None, cancelle
     """profile_media(), signed out, through Instagram's app API."""
     try:
         info = _app_get("%s/users/web_profile_info/?username=%s" % (APP_API, urllib.parse.quote(username)))
+        user = ((info or {}).get("data") or {}).get("user")
     except InstagramError as e:
         if str(e) == "not found":
             raise InstagramError("There's no Instagram account called %s." % username)
-        raise
-    user = ((info or {}).get("data") or {}).get("user")
+        user = None
     if not user or not user.get("id"):
-        raise InstagramError("There's no Instagram account called %s." % username)
+        # that API stopped answering: the account's own page has its id
+        uid, name, count = _profile_from_page(username)
+        user = {"id": uid, "full_name": name, "edge_owner_to_timeline_media": {"count": count}}
     title = user.get("full_name") or username
     timeline = user.get("edge_owner_to_timeline_media") or {}
     total = int(timeline.get("count") or 0)
@@ -227,7 +327,7 @@ def profile_media_signed_out(username, limit=POST_LIMIT, progress=None, cancelle
                 if posts >= limit or item.get("pk") in seen:
                     continue
                 seen.add(item.get("pk"))
-                v, i = media_from_feed_item(item, username)
+                v, i = media_from_feed_item(item, username, direct=True)
                 videos += v
                 images += i
                 posts += 1
@@ -255,7 +355,7 @@ def post_media_signed_out(user_id, code, username="", pages=4):
     for items in _feed_pages(user_id, pages * 12, pause=PAGE_PAUSE_S / 2):
         for item in items:
             if item.get("code") == code:
-                return media_from_feed_item(item, username)
+                return media_from_feed_item(item, username, direct=True)
     return None
 
 

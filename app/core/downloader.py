@@ -7,6 +7,9 @@ back via root.after(...).
 import glob
 import io
 import os
+import shutil
+import subprocess
+import tempfile
 import urllib.parse
 import urllib.request
 
@@ -120,7 +123,32 @@ def _drop_browser_cookies(opts, url, exc):
                 logger.exception("cookie fallback listener failed")
 
 
+_SIGN_IN_WORDS = ("sign in", "age", "private", "members", "login", "confirm you")
+
+
+def _is_youtube(url):
+    host = (urllib.parse.urlparse(url or "").hostname or "").lower()
+    return host == "youtu.be" or host.endswith("youtube.com")
+
+
 def _run(opts, url, work):
+    """work(ydl), with YouTube asked signed out first: signed in (the
+    Browser tab's session), YouTube now often answers with a bot check and
+    no video at all ("Only images are available"), where the same video
+    signed out comes with every format. The sign-in is used only when
+    YouTube asks for one -- an age-restricted, private or members' video."""
+    if _is_youtube(url) and opts.get("cookiefile") and not opts.get("cookiesfrombrowser"):
+        anon = {k: v for k, v in opts.items() if k != "cookiefile"}
+        try:
+            return _run_once(anon, url, work)
+        except Exception as e:   # noqa: BLE001
+            if not any(w in str(e).lower() for w in _SIGN_IN_WORDS):
+                raise
+            logger.info("YouTube wants a sign-in for %s; using the Browser tab's", url)
+    return _run_once(opts, url, work)
+
+
+def _run_once(opts, url, work):
     """work(ydl) with a YoutubeDL built from `opts`. If the chosen browser's
     cookie store can't be read -- when YoutubeDL starts, or on its first
     request -- the browser's cookies are dropped (see _drop_browser_cookies)
@@ -144,6 +172,22 @@ def _run(opts, url, work):
 # still downloaded in 4K. The fetch uses the same order, so the size shown
 # for each resolution is the size of what will actually be downloaded.
 VIDEO_FORMAT_SORT = ["res", "fps", "vcodec:h264", "acodec:aac"]
+
+
+_JS = None
+
+
+def _js_runtimes():
+    """The JavaScript runtimes installed here (Deno, Node), for yt-dlp."""
+    global _JS
+    if _JS is None:
+        import shutil
+        _JS = {}
+        for name in ("deno", "node"):
+            path = shutil.which(name)
+            if path:
+                _JS[name] = {"path": path}
+    return dict(_JS)
 
 
 def base_ydl_opts(cookies_from_browser=None, url=None):
@@ -199,6 +243,11 @@ def base_ydl_opts(cookies_from_browser=None, url=None):
     }
     if IMPERSONATE_TARGET is not None:
         opts["impersonate"] = IMPERSONATE_TARGET
+    runtimes = _js_runtimes()
+    if runtimes:
+        # YouTube's players set a JavaScript challenge; without a runtime to
+        # solve it, some of its clients give no video at all
+        opts["js_runtimes"] = runtimes
     if cookies_from_browser and cookies_from_browser not in _UNREADABLE_BROWSERS:
         opts["cookiesfrombrowser"] = (cookies_from_browser,)
     else:
@@ -247,6 +296,41 @@ def _selected_size(ydl, formats, fmt_spec):
     return total
 
 
+class _YdlLog:
+    """yt-dlp's warnings into the app's log (quiet on screen), so a failure
+    can be traced afterwards."""
+
+    def __init__(self, url):
+        self.url = url
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        logger.info("yt-dlp (%s): %s", self.url[:120], str(msg)[:400])
+
+    def error(self, msg):
+        logger.info("yt-dlp error (%s): %s", self.url[:120], str(msg)[:400])
+
+
+_VIDEO_EXTRACTORS = ("youtube", "vimeo", "dailymotion", "twitch", "tiktok", "bilibili", "rumble", "streamable")
+
+
+def _video_site_without_video(info):
+    """A video from a video site that came back with no video formats (only
+    its storyboard pictures or thumbnail): a fetch that failed, not a picture."""
+    if not info or is_playlist(info):
+        return False
+    formats = info.get("formats") or []
+    if any(_is_video_format(f) or f.get("acodec") not in (None, "none") for f in formats):
+        return False            # a video -- or a song (audio is downloadable too)
+    key = (info.get("extractor_key") or info.get("extractor") or "").lower()
+    return any(k in key for k in _VIDEO_EXTRACTORS) or bool(info.get("duration"))
+
+
 def fetch_info_with_sizes(url, cookies_from_browser=None):
     """Blocking. Returns (info_dict, height_sizes) where height_sizes[h] is the
     *combined* video+audio byte total yt-dlp's own selector would pick for
@@ -290,8 +374,29 @@ def fetch_info_with_sizes(url, cookies_from_browser=None):
         }
         return info, height_sizes
 
+    opts["logger"] = _YdlLog(url)
     try:
-        return _run(opts, url, work)
+        info, sizes = _run(opts, url, work)
+        if _video_site_without_video(info):
+            # YouTube held the video's formats back (a bot check, a player it
+            # couldn't read) and left only its preview pictures: asked again,
+            # as other YouTube clients and without anyone's sign-in, before
+            # the link is given up on -- never passed off as a picture
+            logger.info("No video formats for %s on the first try; asking again", url)
+            retry = {**opts, "extractor_args": {"youtube": {"player_client": ["tv", "web_safari", "android_vr",
+                                                                               "default"]}}}
+            retry.pop("cookiefile", None)
+            retry.pop("cookiesfrombrowser", None)
+            try:
+                again, again_sizes = _run(retry, url, work)
+                if not _video_site_without_video(again):
+                    return again, again_sizes
+            except Exception:   # noqa: BLE001 -- the first answer's error stands
+                logger.info("The second try for %s failed too", url, exc_info=True)
+            raise yt_dlp.utils.DownloadError(
+                "YouTube didn't hand over this video just now (it sometimes holds videos back while it checks "
+                "for bots). Try again in a minute -- or sign in to YouTube in the Browser tab.")
+        return info, sizes
     finally:
         release_opts(opts)
 
@@ -480,8 +585,21 @@ def split_media(url, cookies_from_browser=None, progress=None, cancelled=None):
         return {"title": name, "videos": [], "images": [{"title": name, "url": url, "is_video": False}],
                 "note": ""}
 
+    if route.kind in ("ig_post", "ig_reel") and not cookies_from_browser and not _instagram_signed_in(url):
+        # signed out, Instagram's API wants a sign-in -- but the post's own page carries it all
+        try:
+            page = instagram.post_from_page(url)
+        except Exception:   # noqa: BLE001 -- yt-dlp below says what's wrong
+            logger.info("Couldn't read %s from its page", url, exc_info=True)
+            page = None
+        if page and (page["videos"] or page["images"]):
+            return {"title": page["title"], "videos": page["videos"], "images": page["images"], "note": ""}
+
     if "reddit.com" in url.lower():
-        title, items = fetch_reddit_gallery(url)
+        try:
+            title, items = fetch_reddit_gallery(url)
+        except Exception as e:   # noqa: BLE001
+            raise yt_dlp.utils.DownloadError(_reddit_blocked_message(e)) from e
         if items:
             return {"title": title, "videos": [], "images": items, "note": ""}
 
@@ -505,6 +623,12 @@ def split_media(url, cookies_from_browser=None, progress=None, cancelled=None):
     single = entries is None
     slides = [info] if single else [e for e in entries if e]
     videos, images = [], []
+    for e in slides:
+        if not (e.get("formats") or e.get("url")) and (e.get("duration") or _says_video(e)):
+            # a video the site wouldn't hand over (a sign-in wall): said so, rather than
+            # its thumbnail passed off as a picture and sent to the Images tab
+            raise yt_dlp.utils.DownloadError("This post's video needs a sign-in to download. Sign in to the site in the "
+                                "Browser tab, then try again.")
     for n, e in enumerate(slides, start=1):
         has_video = any(_is_video_format(f) for f in (e.get("formats") or []))
         thumb = best_thumbnail_url(e)
@@ -519,6 +643,21 @@ def split_media(url, cookies_from_browser=None, progress=None, cancelled=None):
         elif thumb:
             images.append({"title": name, "url": thumb, "is_video": False})
     return {"title": title, "videos": videos, "images": images, "note": ""}
+
+
+def _says_video(e):
+    """An entry the site itself calls a video (with or without its formats)."""
+    hint = " ".join(str(e.get(k) or "") for k in ("_type", "media_type", "ext", "vcodec")).lower()
+    return any(w in hint for w in ("video", "mp4", "webm", "clip")) and "image" not in hint
+
+
+def _reddit_blocked_message(exc):
+    text = str(exc)
+    if "403" in text or "Blocked" in text or "humanity" in text.lower() or "Expecting value" in text:
+        return ("Reddit is asking this connection to prove it's a person. Open the post in the Browser tab "
+                "(sign in to Reddit there if it asks), then press the Download button in the toolbar -- "
+                "the video is taken straight from the page.")
+    return text
 
 
 def _instagram_signed_in(url):
@@ -817,12 +956,25 @@ def run_with_client_fallback(opts, url):
     silently reporting success as if it had been.
     """
     last_error = None
+    if not opts.get("download_ranges"):
+        # YouTube's streamed (HLS) formats through yt-dlp's own downloader:
+        # handed to FFmpeg instead, the bundled one has crashed on them
+        # ("ffmpeg exited with code 3436169992")
+        opts = {**opts, "hls_prefer_native": True}
     for attempt in range(3):
         try:
             return _run(opts, url, lambda ydl: ydl.extract_info(url, download=True)), None
         except yt_dlp.utils.DownloadError as e:
             last_error = e
             msg = str(e)
+            if "ffmpeg exited with code" in msg.lower() and not opts.get("download_ranges") and attempt == 0:
+                # an FFmpeg failure fetching a stream: once more, from the direct web formats only
+                logger.info("FFmpeg failed fetching %s (%s); retrying with direct formats", url, msg[:120])
+                fmt = opts.get("format") or "bestvideo+bestaudio/best"
+                opts = {**opts, "format": "/".join("%s[protocol^=http]" % part if "+" not in part else
+                                                   "+".join(x + "[protocol^=http]" for x in part.split("+"))
+                                                   for part in fmt.split("/")) + "/" + fmt}
+                continue
             if "403" not in msg and "Forbidden" not in msg:
                 raise
             logger.info("403 on default client (attempt %d/3) for %s -- retrying "
@@ -838,6 +990,82 @@ def run_with_client_fallback(opts, url):
             logger.info("403 client-fallback '%s' also failed for %s", client, url)
             continue
     raise last_error
+
+
+def _ffmpeg_failed(e):
+    return "ffmpeg exited with code" in str(e).lower()
+
+
+def _ffmpeg_exe():
+    """The FFmpeg yt-dlp itself would use (its own search: the app's folder, then PATH)."""
+    try:
+        from yt_dlp.postprocessor.ffmpeg import FFmpegPostProcessor
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            exe = FFmpegPostProcessor(ydl).executable
+        if exe and (os.path.exists(exe) or shutil.which(exe)):
+            return exe
+    except Exception:   # noqa: BLE001
+        pass
+    from . import ffmpeg_utils
+    exe = ffmpeg_utils.ffmpeg_path()
+    if exe == "ffmpeg" and not shutil.which("ffmpeg"):
+        from .. import config
+        dev = os.path.join(config.BASE_DIR, "vendor", "ffmpeg.exe")     # running from source
+        if os.path.exists(dev):
+            return dev
+    return exe
+
+
+def cut_clip(src, dst, time_range, audio_bitrate=None):
+    """`src` cut down to `time_range` (start, end seconds) into `dst`, here on
+    this PC -- frame-accurate, so it's re-encoded (H.264 and AAC; MP3 at
+    `audio_bitrate` for an audio clip)."""
+    start, end = time_range
+    args = [_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-ss", "%.3f" % start, "-i", src,
+            "-t", "%.3f" % max(0.1, end - start), "-map", "0:v?", "-map", "0:a?"]
+    ext = os.path.splitext(dst)[1].lower()
+    if ext == ".mp3":
+        bitrate = str(audio_bitrate or "320").rstrip("kK")
+        args += ["-vn", "-c:a", "libmp3lame", "-b:a", bitrate + "k"]
+    else:
+        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
+        args += ["-c:a", "aac", "-b:a", "192k"]      # re-encoded too: copied, it starts at the keyframe before
+    args.append(dst)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    run = subprocess.run(args, capture_output=True, text=True, creationflags=flags, timeout=3600)
+    if run.returncode != 0 or not os.path.exists(dst):
+        raise yt_dlp.utils.DownloadError("Couldn't cut the clip: %s" % (run.stderr or "").strip()[-300:])
+    return dst
+
+
+def _clip_by_hand(opts, url, save_dir, time_range, ext, audio_bitrate=None):
+    """FFmpeg crashed cutting the clip straight from the stream (it has,
+    on YouTube's servers: "ffmpeg exited with code 3436169992"). So: the
+    whole thing through yt-dlp's own downloader, into a folder of its own
+    (so nothing already saved is touched), then cut here. Returns
+    (info, path, used_fallback_client)."""
+    work = tempfile.mkdtemp(prefix=".clip-", dir=save_dir)
+    try:
+        whole = {k: v for k, v in opts.items() if k not in ("download_ranges", "force_keyframes_at_cuts")}
+        whole["outtmpl"] = os.path.join(work, os.path.basename(opts.get("outtmpl") or "%(title)s.%(ext)s"))
+        info, used = run_with_client_fallback(whole, url)
+        src = _final_path(info, work, ext)
+        if not src or not os.path.exists(src):
+            raise yt_dlp.utils.DownloadError("The download finished but its file wasn't found")
+        name, src_ext = os.path.splitext(os.path.basename(src))
+        if ext == ".mp3":
+            out_ext = ".mp3"
+        else:
+            out_ext = src_ext if src_ext.lower() in (".mkv", ".mp4", ".mov") else ".mkv"
+        dst = os.path.join(save_dir, name + out_ext)
+        n = 2
+        while os.path.exists(dst):
+            dst = os.path.join(save_dir, "%s (%d)%s" % (name, n, out_ext))
+            n += 1
+        cut_clip(src, dst, time_range, audio_bitrate)
+        return info, dst, used
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def _outtmpl(save_dir, url, name):
@@ -864,7 +1092,14 @@ def download_audio(url, save_dir, bitrate, progress_hook, time_range=None, cooki
         ],
     }
     try:
-        info, used_fallback = run_with_client_fallback(opts, url)
+        try:
+            info, used_fallback = run_with_client_fallback(opts, url)
+        except yt_dlp.utils.DownloadError as e:
+            if not (time_range and _ffmpeg_failed(e)):
+                raise
+            logger.warning("FFmpeg failed cutting %s from the stream (%s); downloading it whole and cutting "
+                           "it here", url, str(e)[:160])
+            return _clip_by_hand(opts, url, save_dir, time_range, ".mp3", bitrate)
     finally:
         release_opts(opts)
     return info, _final_path(info, save_dir, ".mp3"), used_fallback
@@ -890,7 +1125,14 @@ def download_video(url, save_dir, height, progress_hook, time_range=None, cookie
         "merge_output_format": "mkv",  # always merge into mkv first: universally compatible
     }
     try:
-        info, used_fallback = run_with_client_fallback(opts, url)
+        try:
+            info, used_fallback = run_with_client_fallback(opts, url)
+        except yt_dlp.utils.DownloadError as e:
+            if not (time_range and _ffmpeg_failed(e)):
+                raise
+            logger.warning("FFmpeg failed cutting %s from the stream (%s); downloading it whole and cutting "
+                           "it here", url, str(e)[:160])
+            return _clip_by_hand(opts, url, save_dir, time_range, ".mkv")
     finally:
         release_opts(opts)
     return info, _final_path(info, save_dir, ".mkv"), used_fallback

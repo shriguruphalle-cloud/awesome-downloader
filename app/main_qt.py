@@ -75,6 +75,7 @@ def main():
     message.install()
 
     win = MainWindow(dark_mode=settings.get("theme", "dark") != "light", settings=settings)
+    win.quit_on_close = True
 
     # Constructed before Video/Browser -- both need this reference (every
     # download either one starts gets its progress card here, not in
@@ -144,6 +145,8 @@ def main():
     # own download interception) get their progress card from download_tab
     # directly -- no wiring needed here for those.
     browser_tab.open_in_video_tab.connect(_open_in_video_tab)
+    browser_tab.media_found.connect(
+        lambda title, entries: (win.tabs.setCurrentIndex(video_tab_index), video_tab.stack_found(title, entries)))
     browser_tab.fullscreen_requested.connect(win.set_video_fullscreen)
 
     # A magnet link opened in the browser, or a .torrent it downloaded, goes
@@ -192,6 +195,12 @@ def main():
     win.tabs.currentChanged.connect(
         lambda i: history_tab.refresh() if i == history_tab_index else None
     )
+    # The app opens on the tab it was closed on.
+    from app.utils import ui_state
+    labels = [win.tabs.tabText(i) for i in range(win.tabs.count())]
+    if ui_state.get("last_tab") in labels:
+        win.tabs.setCurrentIndex(labels.index(ui_state.get("last_tab")))
+    win.tabs.currentChanged.connect(lambda i: ui_state.put("last_tab", win.tabs.tabText(i)))
     win.show()
 
     # Flushes the torrent queue's current state to torrents.json before the
@@ -216,6 +225,13 @@ def main():
     app.aboutToQuit.connect(video_tab.save_state)
     # The Browser's open tabs come back next launch.
     app.aboutToQuit.connect(browser_tab.save_state)
+    # Installers downloaded for earlier updates (about 100 MB each) aren't
+    # needed once the app has started -- the update they were for is done.
+    # Cleared at start-up, before any new update could be downloading; one
+    # still held by a just-finished installer goes next time.
+    import threading
+    from app.utils import updater
+    threading.Thread(target=updater.cleanup, name="update-cleanup", daemon=True).start()
 
     # Magnet link from the command line (e.g. this build launched directly
     # with a magnet: URI as an argument) -- mirrors app/main.py's own

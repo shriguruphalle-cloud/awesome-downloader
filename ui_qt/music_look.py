@@ -196,8 +196,33 @@ def palette_from_image(img):
     second = max((w for w in colourful if _hue_gap(w["h"], key["h"]) > 0.07),
                  key=lambda w: w["pop"] * _chroma(w), default=None)
     v = vibrant or key
-    return make_palette(key["h"], key["s"], h2=(second or key)["h"], s2=(second or key)["s"],
-                        vh=v["h"], vs=v["s"])
+    pal = make_palette(key["h"], key["s"], h2=(second or key)["h"], s2=(second or key)["s"],
+                       vh=v["h"], vs=v["s"])
+    pal["cover"] = cover_colours(sw, key, second, v)
+    return pal
+
+
+def cover_colours(sw, key, second, vibrant):
+    """The cover's own colours, for the full-screen player's moving
+    background: its darkest substantial colour (the depth), its main colour,
+    a second one, and its brightest vivid one -- taken from the picture as
+    they are, only kept within a range where they read as light on dark."""
+    def keep(w, lmin, lmax, smax=1.0):
+        h, s, l = w["h"], min(w["s"], smax), min(lmax, max(lmin, w["l"]))
+        r, g, b = colorsys.hls_to_rgb(h, l, s)
+        return QColor(int(r * 255), int(g * 255), int(b * 255))
+    solid = [w for w in sw if w["pop"] >= 0.03] or sw
+    dark = min(solid, key=lambda w: w["l"])
+    colourful = [w for w in sw if _chroma(w) > 0.08 and w["pop"] >= 0.008]
+    # the second: the cover's other colour -- a red jacket on gold tiles -- even if it covers little
+    other = max((w for w in colourful if _hue_gap(w["h"], key["h"]) > 0.045),
+                key=lambda w: (w["pop"] ** 0.5) * _chroma(w), default=None) or second
+    if other is None:
+        h = (key["h"] + 0.06) % 1.0
+        other = dict(key, h=h, l=max(0.2, key["l"] - 0.12))
+    bright = max(colourful or sw, key=lambda w: _chroma(w) * (0.4 + w["l"]))
+    return {"deep": keep(dark, 0.05, 0.11), "main": keep(key, 0.30, 0.52),
+            "second": keep(other, 0.26, 0.50), "hot": keep(vibrant or bright, 0.58, 0.76)}
 
 
 def _hue_gap(a, b):
@@ -209,10 +234,6 @@ def mix(a, b, t):
     """Colour a -> b at t (0..1)."""
     return QColor(int(a.red() + (b.red() - a.red()) * t), int(a.green() + (b.green() - a.green()) * t),
                   int(a.blue() + (b.blue() - a.blue()) * t), int(a.alpha() + (b.alpha() - a.alpha()) * t))
-
-
-def mix_palette(a, b, t):
-    return {k: mix(a[k], b[k], t) for k in a}
 
 
 def with_alpha(c, a):
@@ -256,11 +277,21 @@ def _dust():
     return _DUST
 
 
+GRAIN = 0.9                 # the film grain everywhere, a tenth lighter than it was
+FULL_GRAIN = 0.8 / GRAIN    # the full-screen player's, a fifth lighter than it was (in all)
+
+
 def paint_grain(p, rect, opacity=1.0):
     p.save()
-    p.setOpacity(opacity)
-    p.drawTiledPixmap(rect, QPixmap.fromImage(grain_tile()))
+    p.setOpacity(opacity * GRAIN)
+    global _grain_pix
+    if _grain_pix is None:
+        _grain_pix = QPixmap.fromImage(grain_tile())
+    p.drawTiledPixmap(rect, _grain_pix)
     p.restore()
+
+
+_grain_pix = None
 
 
 def paint_backdrop(p, rect, pal, leaks=True):
@@ -343,8 +374,11 @@ def blend_art(pix, w, h, pal, wide=False, dpr=1.0):
     p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     pw, ph = pix.width(), pix.height()
+    if not wide:
+        p.end()
+        return _cover_card(pix, w, h, pal, dpr)
     if wide:
-        area = QRectF(w * 0.26, 0, w * 0.74, h)
+        area = QRectF(w * 0.44, 0, w * 0.56, h)
     else:
         side = min(h * 1.04, w * 0.62)
         area = QRectF(w - side * 0.94, -h * 0.02, side, side)
@@ -352,7 +386,7 @@ def blend_art(pix, w, h, pal, wide=False, dpr=1.0):
     scale = max(area.width() / pw, area.height() / ph)
     sw, sh = area.width() / scale, area.height() / scale
     # a wide banner's subject usually stands right of centre
-    src = QRectF((pw - sw) * (0.58 if wide else 0.5), (ph - sh) * (0.30 if wide else 0.5), sw, sh)
+    src = QRectF((pw - sw) * (0.55 if wide else 0.5), (ph - sh) * (0.30 if wide else 0.5), sw, sh)
     p.drawPixmap(area, pix, src)
     # warmed into the page: the page's colour, softly over the picture
     p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceAtop)
@@ -362,7 +396,7 @@ def blend_art(pix, w, h, pal, wide=False, dpr=1.0):
     p.fillRect(area, tint)
     # melt the edges: in from the left, out at the bottom, a little at the top
     p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-    fade_w = area.width() * (0.58 if wide else 0.52)
+    fade_w = area.width() * (0.46 if wide else 0.52)
     hg = QLinearGradient(QPointF(area.left(), 0), QPointF(area.left() + fade_w, 0))
     hg.setColorAt(0.0, QColor(0, 0, 0, 0))
     hg.setColorAt(0.55, QColor(0, 0, 0, 150))
@@ -381,6 +415,82 @@ def blend_art(pix, w, h, pal, wide=False, dpr=1.0):
     p.fillRect(QRectF(w - 28, 0, 28, h), rg)
     p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceAtop)
     p.drawTiledPixmap(QRectF(0, 0, w, h), QPixmap.fromImage(grain_tile()))
+    p.end()
+    return QPixmap.fromImage(out)
+
+
+def _cover_card(pix, w, h, pal, dpr):
+    """A cover on the right of a page, presented like a record in a shop
+    window: crisp and rounded, standing on a soft shadow, its reflection
+    fading on the floor below it, and a light in its own colour behind --
+    all of it fading out well inside the page's header, so nothing ends in
+    an edge."""
+    out = QImage(max(1, int(w * dpr)), max(1, int(h * dpr)), QImage.Format.Format_ARGB32_Premultiplied)
+    out.setDevicePixelRatio(dpr)
+    out.fill(Qt.GlobalColor.transparent)
+    side = max(150.0, min(h * 0.56, w * 0.27, 420.0))
+    card = QRectF(w - side - max(48.0, w * 0.055), max(52.0, h * 0.10), side, side)
+    radius = max(12.0, side * 0.045)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    # the light behind it, in the cover's own colour
+    glow = QRadialGradient(card.center(), side * 1.05)
+    glow.setColorAt(0.0, with_alpha(pal["glow"], 0.42))
+    glow.setColorAt(0.45, with_alpha(pal["glow"], 0.16))
+    glow.setColorAt(1.0, with_alpha(pal["glow"], 0.0))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(glow)
+    p.drawEllipse(card.center(), side * 1.05, side * 1.05)
+    # the cover, square-cut from the picture
+    pw, ph = pix.width(), pix.height()
+    scale = max(card.width() / pw, card.height() / ph)
+    sw, sh = card.width() / scale, card.height() / scale
+    src = QRectF((pw - sw) / 2, (ph - sh) / 2, sw, sh)
+    # its reflection: flipped, faint, gone within a quarter of its height
+    floor = card.bottom() + 6
+    depth = min(side * 0.30, h - floor - 8)
+    if depth > 12:
+        refl = QImage(int(side * dpr), int(side * dpr), QImage.Format.Format_ARGB32_Premultiplied)
+        refl.setDevicePixelRatio(dpr)
+        refl.fill(Qt.GlobalColor.transparent)
+        rp = QPainter(refl)
+        rp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        rp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rp.translate(0, side)
+        rp.scale(1, -1)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(0, 0, side, side), radius, radius)
+        rp.setClipPath(clip)
+        rp.drawPixmap(QRectF(0, 0, side, side), pix, src)
+        rp.resetTransform()
+        rp.setClipping(False)
+        rp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        fade = QLinearGradient(0, 0, 0, depth)
+        fade.setColorAt(0.0, QColor(0, 0, 0, 70))
+        fade.setColorAt(1.0, QColor(0, 0, 0, 0))
+        rp.fillRect(QRectF(0, 0, side, side), fade)
+        rp.end()
+        p.drawImage(QPointF(card.left(), floor), refl)
+    # the shadow it stands on: soft, short, all inside the header
+    for i in range(12):
+        k = i / 12.0
+        p.setBrush(QColor(0, 0, 0, int(22 * (1 - k) ** 1.6)))
+        grow = side * 0.06 * k
+        p.drawRoundedRect(card.adjusted(-grow, grow * 0.6, grow, grow * 1.6), radius + grow, radius + grow)
+    path = QPainterPath()
+    path.addRoundedRect(card, radius, radius)
+    p.save()
+    p.setClipPath(path)
+    p.drawPixmap(card, pix, src)
+    sheen = QLinearGradient(card.topLeft(), card.bottomLeft())
+    sheen.setColorAt(0.0, QColor(255, 255, 255, 30))
+    sheen.setColorAt(0.30, QColor(255, 255, 255, 0))
+    p.fillRect(card, sheen)
+    p.restore()
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(QColor(255, 255, 255, 50), 1))
+    p.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
     p.end()
     return QPixmap.fromImage(out)
 
@@ -474,4 +584,95 @@ def equalizer(p, rect, colour, phase, playing=True):
         k = (0.35 + 0.65 * abs(math.sin(phase * (1.3 + i * 0.47) + i * 1.7))) if playing else (0.35, 0.7, 0.5)[i]
         bh = rect.height() * k
         p.drawRoundedRect(QRectF(rect.left() + i * bw * 2, rect.bottom() - bh, bw, bh), bw / 2, bw / 2)
+    p.restore()
+
+
+# ---------------------------------------------------------------- glass -----
+GLASS_RADIUS = 32
+
+
+def blurred(pix, scale=0.18, radius=9):
+    """`pix`, softened -- what shows through frosted glass."""
+    if pix is None or pix.isNull():
+        return None
+    try:
+        from PIL import Image, ImageFilter
+        img = pix.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+        w, h = max(1, int(img.width() * scale)), max(1, int(img.height() * scale))
+        img = img.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        pil = Image.frombuffer("RGBA", (w, h), bytes(img.constBits()), "raw", "RGBA", img.bytesPerLine(), 1)
+        pil = pil.filter(ImageFilter.GaussianBlur(radius))
+        data = pil.tobytes("raw", "RGBA")
+        return QPixmap.fromImage(QImage(data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy())
+    except Exception:   # noqa: BLE001 -- plain glass then
+        return None
+
+
+def paint_glass(p, rect, radius=GLASS_RADIUS, backdrop=None, src=None, tint=None, strength=1.0):
+    """A pane of frosted glass: the (blurred) `backdrop` behind it -- its
+    `src` part -- a light tint, a bright rim and a highlight along the top."""
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    path = QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+    p.setClipPath(path)
+    if backdrop is not None:
+        p.drawPixmap(rect, backdrop, src if src is not None else QRectF(backdrop.rect()))
+    base = tint or QColor(16, 20, 32)
+    fill = QLinearGradient(rect.topLeft(), rect.bottomRight())
+    fill.setColorAt(0.0, with_alpha(mix(base, TEXT, 0.10), 0.52 * strength))
+    fill.setColorAt(1.0, with_alpha(base, 0.70 * strength))
+    p.fillRect(rect, fill)
+    sheen = QLinearGradient(rect.topLeft(), QPointF(rect.left(), rect.top() + rect.height() * 0.45))
+    sheen.setColorAt(0.0, QColor(255, 255, 255, 30))
+    sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+    p.fillRect(rect, sheen)
+    paint_grain(p, rect, 0.35)
+    p.setClipping(False)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    rim = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+    rim.setColorAt(0.0, QColor(255, 255, 255, 95))
+    rim.setColorAt(0.5, QColor(255, 255, 255, 34))
+    rim.setColorAt(1.0, QColor(255, 255, 255, 22))
+    p.setPen(QPen(rim, 1.2))
+    p.drawRoundedRect(rect.adjusted(0.6, 0.6, -0.6, -0.6), radius, radius)
+    p.restore()
+
+
+def paint_frost(p, widget, rect, radius):
+    """Under a glass card over the full-screen player's moving background:
+    the background where the card's corners are, and inside its rounded
+    shape the same background blurred -- frosted glass. True when it was
+    painted (the background is there to frost); the card then needn't be
+    redrawn every frame the background moves, only now and then."""
+    source = getattr(widget.parent(), "frost_source", None)
+    got = source(widget.geometry()) if source is not None else None
+    if got is None:
+        return False
+    sharp, frosted = got
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    full = QRectF(widget.rect())
+    p.drawImage(full, sharp)
+    paint_grain(p, full, 0.85 * FULL_GRAIN)   # the open background's grain, round the corners too
+    path = QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+    p.setClipPath(path)
+    p.drawImage(full, frosted)
+    p.restore()
+    return True
+
+
+def paint_shadow(p, rect, radius=GLASS_RADIUS, depth=22):
+    """A soft shadow under a floating pane."""
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    for i in range(8):
+        k = i / 8.0
+        p.setBrush(QColor(0, 0, 0, int(26 * (1 - k))))
+        grow = depth * k
+        p.drawRoundedRect(rect.adjusted(-grow * 0.5, -grow * 0.2, grow * 0.5, grow), radius + grow * 0.4,
+                          radius + grow * 0.4)
     p.restore()

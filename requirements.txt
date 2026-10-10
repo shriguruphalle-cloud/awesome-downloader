@@ -1,4 +1,7 @@
 yt-dlp>=2026.8.19
+# YouTube's JavaScript challenge solver for yt-dlp (its own companion package; it runs
+# under an installed Node.js or Deno). Without it YouTube withholds formats.
+yt-dlp-ejs>=0.8.0
 # TLS-fingerprint impersonation for yt-dlp -- confirmed directly (PornHub)
 # that Cloudflare's Bot Management fingerprints the raw TLS handshake, not
 # just headers: a fetch failing outright over plain urllib succeeds

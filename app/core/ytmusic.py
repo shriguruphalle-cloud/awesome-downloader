@@ -14,6 +14,8 @@ Everything here is blocking; the Music tab calls it from worker threads.
 """
 import json
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -47,7 +49,27 @@ class YTMusicError(Exception):
     pass
 
 
-def _post(endpoint, body, timeout=15):
+_gate = threading.BoundedSemaphore(4)
+_cool = {"until": 0.0}
+COOL_S = 20                  # after a 403 / 429, what can wait does
+
+
+def _post(endpoint, body, timeout=15, background=False):
+    """One InnerTube request. At most four at once; after YouTube Music
+    answers "too many" (403 / 429), `background` requests -- covers, tuned
+    radios, things looked up ahead -- wait it out instead of adding to it."""
+    if background and time.time() < _cool["until"]:
+        raise YTMusicError("YouTube Music asked for a pause")
+    with _gate:
+        try:
+            return _post_now(endpoint, body, timeout)
+        except YTMusicError as e:
+            if "403" in str(e) or "429" in str(e):
+                _cool["until"] = time.time() + COOL_S
+            raise
+
+
+def _post_now(endpoint, body, timeout):
     data = json.dumps({"context": {"client": CLIENT}, **body}).encode("utf-8")
     req = urllib.request.Request(API + endpoint + "?prettyPrint=false", data=data, headers=HEADERS,
                                  method="POST")
@@ -110,6 +132,9 @@ def _thumb(o):
 def sized(url, px, height=None):
     """The same Google-hosted picture at `px` wide (and `height`, square by
     default) -- covers come listed at 60-120 px."""
+    if url and "mzstatic.com" in url:
+        # Apple's covers: the size is in the name ("600x600bb.jpg")
+        return re.sub(r"/\d+x\d+(bb|cc|sr)?\.(jpg|png|webp)$", "/%dx%dbb.jpg" % (px, height or px), url)
     if not url or "googleusercontent.com" not in url and "ggpht.com" not in url:
         return url
     size = "w%d-h%d" % (px, height or px)
@@ -433,3 +458,150 @@ def album(browse_id):
             out["tracks"].append(t)
     out["length"] = sum(t["duration"] for t in out["tracks"])
     return out
+
+
+def _queue_tracks(data):
+    out = []
+    for r in _walk(data, "playlistPanelVideoRenderer"):
+        vid = r.get("videoId")
+        title = _text(r.get("title"))
+        if not vid or not title:
+            continue
+        m = _meta(_runs(r.get("longBylineText")))
+        length = _text(r.get("lengthText"))
+        out.append(_track(
+            id="yt:" + vid, title=title, artist=", ".join(m["artists"]), artist_browse=m["artist_id"],
+            album=m["album"], album_browse=m["album_id"], year=m["year"],
+            duration=_seconds(length) if _DURATION.match(length or "") else 0,
+            artwork=sized(_thumb(r.get("thumbnail")), 544), source="youtube",
+            page_url="https://www.youtube.com/watch?v=%s" % vid, ext="m4a"))
+    return out
+
+
+# the radio's own chips that aren't about the song
+_PLAIN_CHIPS = {"all", "save", "popular", "discover", "deep cuts", "familiar"}
+
+
+def radio_full(video_id, tune=None):
+    """YouTube Music's radio for a song -- about fifty songs like it, the
+    first the song itself -- and the chips the site tunes it with: the
+    song's own moods, languages and eras ("Romance", "Chill", "Hindi",
+    "2010s", "Upbeat"...), each with what asks for that tuned radio.
+    `tune`: one of those, to get that tuned radio instead."""
+    body = {"videoId": video_id, "playlistId": "RDAMVM" + video_id, "isAudioOnly": True}
+    if tune:
+        body["playlistId"] = tune["playlistId"]
+        if tune.get("params"):
+            body["params"] = tune["params"]
+    data = _post("next", body, background=bool(tune))
+    chips = {}
+    for c in _walk(data, "chipCloudChipRenderer"):
+        label = _text(c.get("text"))
+        we = _first(c.get("navigationEndpoint") or {}, "watchEndpoint")
+        if label and we and we.get("playlistId") and label.lower() not in _PLAIN_CHIPS:
+            chips[label] = {"playlistId": we["playlistId"], "params": we.get("params")}
+    return {"tracks": _queue_tracks(data), "chips": chips}
+
+
+def radio(video_id):
+    """YouTube Music's radio for a song: about fifty songs like it, the way
+    the site's "Start radio" plays them. The first is the song itself."""
+    return radio_full(video_id)["tracks"]
+
+
+# ------------------------------------------------------------- explore -----
+def playlist_item(browse_id, title, subtitle="", artwork=None):
+    return {"kind": "ytplaylist", "id": "ytm:pl:" + browse_id, "browse_id": browse_id, "title": title,
+            "subtitle": subtitle, "artist": subtitle, "artwork": artwork, "source": "youtube"}
+
+
+def _tile(r):
+    """A carousel's tile: an album, an artist -- or a playlist (a chart)."""
+    found = _two_row(r)
+    if found:
+        return found
+    nav = r.get("navigationEndpoint") or {}
+    title_runs = _runs(r.get("title"))
+    bid = _browse_id(nav) or (_browse_id(title_runs[0].get("navigationEndpoint")) if title_runs else "")
+    if bid.startswith(("VL", "RDCLAK", "PL")):
+        return playlist_item(bid if bid.startswith("VL") else "VL" + bid, _text(r.get("title")),
+                             _text(r.get("subtitle")), sized(_thumb(r.get("thumbnailRenderer")), 544))
+    return None
+
+
+def _shelves(data):
+    """Every carousel and grid on a browse page: [{"title", "items"}]."""
+    out = []
+    for sh in _walk(data, "musicCarouselShelfRenderer"):
+        head = _text(_first(sh.get("header") or {}, "title"))
+        items = []
+        for it in sh.get("contents") or []:
+            if it.get("musicTwoRowItemRenderer"):
+                x = _tile(it["musicTwoRowItemRenderer"])
+            elif it.get("musicResponsiveListItemRenderer"):
+                row = it["musicResponsiveListItemRenderer"]
+                x = _artist_from_row(row) or _song(row)
+            else:
+                x = None
+            if x:
+                items.append(x)
+        if items:
+            out.append({"title": head, "items": items})
+    for grid in _walk(data, "gridRenderer"):
+        head = _text(_first(grid.get("header") or {}, "title"))
+        items = [_tile(it["musicTwoRowItemRenderer"]) for it in grid.get("items") or []
+                 if it.get("musicTwoRowItemRenderer")]
+        items = [x for x in items if x]
+        if items:
+            out.append({"title": head, "items": items})
+    return out
+
+
+def charts(country="IN"):
+    """YouTube Music's charts for a country: trending and top songs (as
+    playlists), the charts by language, and the top artists."""
+    return _shelves(_post("browse", {"browseId": "FEmusic_charts", "formData": {"selectedValues": [country]}}))
+
+
+def moods():
+    """{name: browse endpoint} for every mood and genre the site lists --
+    "Romance", "Sad", "Party", "Hindi", "Indian indie", "Punjabi"..."""
+    data = _post("browse", {"browseId": "FEmusic_moods_and_genres"})
+    out = {}
+    for b in _walk(data, "musicNavigationButtonRenderer"):
+        name = _text(b.get("buttonText"))
+        ep = _first(b.get("clickCommand") or {}, "browseEndpoint")
+        if name and ep and ep.get("params"):
+            out[name] = {"browseId": ep.get("browseId"), "params": ep["params"]}
+    return out
+
+
+def category(endpoint):
+    """A mood's or genre's page: its shelves of playlists."""
+    return _shelves(_post("browse", {"browseId": endpoint["browseId"], "params": endpoint["params"]}))
+
+
+def new_releases():
+    """New albums and singles, as the site's "New releases" lists them."""
+    shelves = _shelves(_post("browse", {"browseId": "FEmusic_new_releases_albums"}))
+    return [x for sh in shelves for x in sh["items"] if x.get("kind") == "album"]
+
+
+def playlist(browse_id):
+    """A public playlist's name and songs (a chart, a mood's mix)."""
+    if not browse_id.startswith("VL"):
+        browse_id = "VL" + browse_id
+    data = _post("browse", {"browseId": browse_id})
+    h = _first(data, "musicResponsiveHeaderRenderer") or _first(data, "musicDetailHeaderRenderer") or {}
+    tracks = []
+    for key in ("musicPlaylistShelfRenderer", "musicShelfRenderer"):
+        for shelf in _walk(data, key):
+            for c in shelf.get("contents") or []:
+                item = c.get("musicResponsiveListItemRenderer")
+                t = _song(item) if item else None
+                if t and not any(x["id"] == t["id"] for x in tracks):
+                    tracks.append(t)
+        if tracks:
+            break
+    return {"title": _text(h.get("title")), "subtitle": _text(h.get("subtitle")),
+            "artwork": sized(_thumb(h.get("thumbnail")), 900), "tracks": tracks}

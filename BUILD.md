@@ -73,7 +73,7 @@ The PyInstaller invocation, if you prefer to run it directly:
   --add-data "vendor\adguard-dl\unpacked;adguard" --add-data "vendor\webview2;webview2" ^
   --version-file "version_info.txt" ^
   --collect-all libtorrent --collect-all PIL ^
-  --collect-all qframelesswindow --collect-all curl_cffi ^
+  --collect-all qframelesswindow --collect-all curl_cffi --collect-all yt_dlp_ejs ^
   --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick ^
   --exclude-module PySide6.QtQuickWidgets ^
   --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets ^
@@ -86,6 +86,10 @@ The PyInstaller invocation, if you prefer to run it directly:
 - The `--add-data` folders are required: the fonts, the logo, the donate
   QR, the Browser tab's assets, AdGuard and the WebView2 SDK are all loaded
   at runtime by path, so PyInstaller's import scanner cannot discover them.
+- `yt_dlp_ejs` is yt-dlp's solver for YouTube's JavaScript challenge: its
+  scripts are loaded as files, so they're collected whole. (With no
+  JavaScript runtime on the PC, yt-dlp falls back to YouTube clients that
+  don't need one.)
 - There is deliberately no `--collect-all PySide6`: PyInstaller's own Qt
   hooks collect exactly the Qt modules the app imports.
 - The Browser tab runs on Microsoft Edge WebView2 (part of Windows), so Qt

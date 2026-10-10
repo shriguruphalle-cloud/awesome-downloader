@@ -922,7 +922,8 @@ class VideoTab(QWidget):
         if route.tab in (link_router.IMAGES, link_router.TORRENT):
             self._hand_over(route, [url])
             return
-        if route.tab in (link_router.SPLIT, link_router.POST):
+        if route.tab in (link_router.SPLIT, link_router.POST) or route.kind == "ig_reel":
+            # a reel too: signed out, it's read from its own page (yt-dlp needs a sign-in)
             self._last_fetch_url = url
             self._start_split(url, route, "form")
             return
@@ -958,7 +959,9 @@ class VideoTab(QWidget):
             has_video = any(
                 f.get("vcodec") not in (None, "none") for f in (info.get("formats") or [])
             )
-            is_image = not has_video
+            # something with a running time or sound is a video (or a song), never a picture
+            is_image = not (has_video or duration or any(
+                f.get("acodec") not in (None, "none") for f in (info.get("formats") or [])))
             thumbnail_url = downloader.best_thumbnail_url(info)
             thumb_image = downloader.fetch_thumbnail_image(thumbnail_url)
             self._fetch_done_sig.emit(title, uploader, duration, height_sizes,
@@ -1355,7 +1358,7 @@ class VideoTab(QWidget):
             route = link_router.classify(url)
             if route.tab in (link_router.IMAGES, link_router.TORRENT):
                 elsewhere.setdefault(route.tab, []).append(url)
-            elif route.tab in (link_router.SPLIT, link_router.POST):
+            elif route.tab in (link_router.SPLIT, link_router.POST) or route.kind == "ig_reel":
                 self._start_split(url, route, "queue")
             else:
                 videos.append(url)
@@ -1405,6 +1408,13 @@ class VideoTab(QWidget):
             has_video = any(
                 f.get("vcodec") not in (None, "none") for f in (info.get("formats") or [])
             )
+            # something with a running time or sound is a video (or a song), never a picture --
+            # even when a site held its formats back (that's a failed fetch, said as one)
+            playable = has_video or bool(info.get("duration")) or any(
+                f.get("acodec") not in (None, "none") for f in (info.get("formats") or []))
+            if not playable and link_router.classify(url).tab == link_router.VIDEO and                     "youtube" in (info.get("extractor_key") or "").lower():
+                raise downloader.yt_dlp.utils.DownloadError("YouTube didn't hand over this video just now -- "
+                                                            "try again in a minute.")
             thumbnail_url = downloader.best_thumbnail_url(info)
             # The image is fetched here but NOT turned into a QPixmap: pixmaps
             # may only be built on the GUI thread, so the raw image rides the
@@ -1421,7 +1431,7 @@ class VideoTab(QWidget):
                 "heights": sorted(height_sizes.keys()) if height_sizes else [],
                 "height": max(height_sizes) if height_sizes else None,
                 "height_sizes": dict(height_sizes or {}),
-                "is_image": not has_video,
+                "is_image": not playable,
                 "thumbnail_url": thumbnail_url,
                 "thumb_image": thumb_image,
             }, "")
@@ -1781,7 +1791,10 @@ class VideoTab(QWidget):
         videos, images = res["videos"], res["images"]
         # One video and nothing else -- a reel posted as /p/, an X video --
         # opens in the form like any video, with its resolutions and sizes.
-        if how == "form" and route.tab == link_router.POST and len(videos) == 1 and not images:
+        # (one read from the page as its file -- Instagram signed out -- is queued as that file)
+        direct = any(x in videos[0]["url"] for x in ("cdninstagram.com", "fbcdn.net", "v.redd.it", ".m3u8",
+                                                      ".mp4")) if len(videos) == 1 else False
+        if how == "form" and len(videos) == 1 and not images and not direct:
             self._last_fetch_url = url
             self.status_label.setText("Fetching info...")
             self.fetch_btn.setEnabled(False)

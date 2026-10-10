@@ -294,7 +294,7 @@ def render_backdrop(width, height, dark=True, dpr=1.0, band=0):
         _ellipse_glow(p, w, h, color, alpha, centre, radii, fade_at)
     if rig.get("sheen"):
         _sheen(p, w, h, *rig["sheen"])
-    p.fillRect(0, 0, w, h, QBrush(_noise_tile(rig["dither"])))
+    p.fillRect(0, 0, w, h, QBrush(_noise_tile(max(1, int(round(rig["dither"] * 0.9))))))
     p.end()
 
     # The frost is taken before the grid goes on: 22px of blur erases a 1px

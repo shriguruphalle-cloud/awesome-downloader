@@ -1826,6 +1826,15 @@ class MainWindow(FramelessMainWindow):
             self._ensure_native_caption_buttons()
             QTimer.singleShot(80, self._on_dpi_or_scale_changed)
 
+    # Set by the app itself (not the tests): closing the window ends the app --
+    # music included -- even if some other little window is still up.
+    quit_on_close = False
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
+        if event.isAccepted() and self.quit_on_close:
+            QTimer.singleShot(0, QApplication.quit)
+
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() in (QEvent.ActivationChange, QEvent.WindowStateChange):

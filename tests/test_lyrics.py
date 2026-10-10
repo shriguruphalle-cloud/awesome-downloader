@@ -64,6 +64,14 @@ wrong = lyrics.find({"id": "t2", "title": "Some Artist - Some Song", "artist": "
 check(wrong is None, "lyrics for a song a minute longer were accepted -- the wrong song's words")
 print("a song is matched by artist, title and length; a wrong-length match is refused")
 
+# an entry labelled 160 s whose timings run to 4:44 (timed for the long cut): the words, untimed
+mislabelled = {"duration": 160.0, "artistName": "A", "trackName": "S",
+               "syncedLyrics": "[01:04.54] Line one\n[04:44.75] Line two", "plainLyrics": ""}
+r = lyrics._result(mislabelled, "A", "S", 160)
+check(not r["synced"] and "Line two" in r["plain"], "lyrics timed for another cut were shown in time: %r" % r)
+check(lyrics._result(mislabelled, "A", "S", 300)["synced"], "lyrics that fit the song lost their timing")
+print("lyrics timed past the song's end are shown as plain words, not out of sync")
+
 # ---- Hindi in two scripts ------------------------------------------------------------
 check(lyrics.script_of("मेरा दिल") == "hi" and lyrics.script_of("Mera dil") == "en", "scripts told apart wrong")
 spelt = {"मेरा दिल": "Mera dil", "समझना": "Samajhna", "ज़िंदगी": "Zindagi", "जानता है": "Jaanta hai",
@@ -114,7 +122,8 @@ mt.audio.setMuted(True)
 settle(600)
 made_up = {"lines": [(0, "Invented line one"), (2000, "Invented line two"), (4000, "Invented line three"),
                      (6000, "Invented line four")], "plain": "", "synced": True, "name": "Test"}
-lyrics.find_all = lambda track: {"en": made_up, "hi": None, "default": "en"}
+lyrics.find_versions = lambda track, hint=None: {"versions": {"Latn": made_up}, "order": ["Latn"], "lang": None,
+                                                 "main": "Latn", "sub": None, "spell": None}
 mt.queue = [ms._track(id="x:1", title="Test Song", artist="Test", source="openverse", stream="")]
 mt.index = 0
 mt.open_full(lyrics=True)
@@ -122,70 +131,72 @@ for _ in range(40):
     if mt.full.lyrics.state == "ok":
         break
     settle(50)
-check(mt.full.isVisible() and mt.full.lyrics.isVisible() and mt.full.lyrics.state == "ok",
-      "the karaoke view didn't open with its lyrics")
-mt.full.lyrics.set_position(3000)
-check(mt.full.lyrics.index == 1 and 0.2 < mt.full.lyrics.progress < 1.0,
-      "the karaoke view isn't on line 2, part-sung: %r" % ((mt.full.lyrics.index, mt.full.lyrics.progress),))
-settle(700)
 lv = mt.full.lyrics
+check(mt.full.isVisible() and lv.isVisible() and lv.state == "ok", "the lyrics didn't open with the words")
+lv.set_position(3000, playing=False)
+settle(900)
+check(lv.index == 1, "the lyrics aren't on line 2: %r" % lv.index)
+frac = lyrics.sung_fraction(lv.lines, 1, lv.now_ms())
+check(0.2 < frac < 1.0, "line 2 isn't part-sung: %.2f" % frac)
 
 
-def line_centre(i):
+def line_top(i):
     row = lv._layout()[i]
-    return row["y"] + row["h"] / 2 - lv._offset
+    return row["y"] - lv._row_scroll.get(i, 0)
 
 
-check(abs(line_centre(1) - lv.height() * lv.ANCHOR) < 8, "the lyrics didn't glide to the line being sung")
-check(lv._layout()[1]["font"].pixelSize() > lv._layout()[0]["font"].pixelSize(), "the sung line isn't the big one")
+check(abs(line_top(1) - lv.height() * lv.ANCHOR) < 8, "the lyrics didn't glide to the line being sung")
+check(lv._emph.get(1, 0) > 0.9 and lv._emph.get(0, 1) < 0.1, "the sung line isn't the lit one")
 from PySide6.QtCore import QPoint  # noqa: E402
 from PySide6.QtGui import QWheelEvent  # noqa: E402
 lv.BACK_AFTER_S = 0.3
-before = lv._offset
+before = line_top(1)
 app.sendEvent(lv, QWheelEvent(QPointF(50, 50), QPointF(50, 50), QPoint(0, 0), QPoint(0, -240),
                               Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
                               Qt.ScrollPhase.NoScrollPhase, False))
-settle(150)
-check(lv._manual != 0 and lv._offset != before, "the wheel didn't scroll the lyrics")
-settle(1600)
-check(lv._manual == 0 and abs(line_centre(1) - lv.height() * lv.ANCHOR) < 8,
+settle(300)
+check(lv._manual != 0 and line_top(1) != before, "the wheel didn't scroll the lyrics")
+settle(2200)
+check(lv._manual == 0 and abs(line_top(1) - lv.height() * lv.ANCHOR) < 8,
       "after scrolling, the lyrics didn't come back to the song")
-print("the lyrics scroll with the wheel and come back to the line being sung")
-mt.full.grab()                                        # paints every line, current and around it
+print("the lyrics glide to the line being sung, scroll with the wheel and come back")
+mt.full.grab()
 sought = []
-mt.full.lyrics.seek_requested.disconnect()
-mt.full.lyrics.seek_requested.connect(sought.append)
-rect, ms_at = next(h for h in mt.full.lyrics._hits if h[1] == 4000)
+lv.seek_requested.disconnect()
+lv.seek_requested.connect(sought.append)
+rect, ms_at = next(h for h in lv._hits if h[1] == 4000)
 from PySide6.QtGui import QMouseEvent  # noqa: E402
-app.sendEvent(mt.full.lyrics, QMouseEvent(QEvent.Type.MouseButtonPress, rect.center(), rect.center(),
-                                          Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
-                                          Qt.KeyboardModifier.NoModifier))
+app.sendEvent(lv, QMouseEvent(QEvent.Type.MouseButtonPress, rect.center(), rect.center(),
+                              Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
 check(sought == [4000], "clicking a line didn't seek there: %r" % sought)
-# a Hindi song: both versions offered, the choice remembered
+
+# a Hindi song: the words in English letters, the Devanagari under each line (as Apple Music shows it)
 hindi = {"lines": [(0, "बनाई हुई पहली पंक्ति"), (2000, "बनाई हुई दूसरी पंक्ति")], "plain": "", "synced": True,
          "name": "Test"}
-lyrics.find_all = lambda track: {"hi": hindi, "en": lyrics.romanize_result(hindi), "default": "hi"}
+roman = lyrics.romanize_result(hindi)
+lyrics.find_versions = lambda track, hint=None: {"versions": {"Deva": hindi, "Latn": roman}, "order": ["Latn", "Deva"],
+                                                 "lang": "hi", "main": "Latn", "sub": "Deva", "spell": None}
 mt._fetch_lyrics(mt.current())
 for _ in range(40):
-    if mt.full.lyrics.state == "ok":
+    if lv.state == "ok":
         break
     settle(50)
-check(mt.full.hi_btn.isVisible() and mt.full.en_btn.isVisible(), "no Hindi / English choice for a Hindi song")
-check(mt.full.lyrics.script == "hi" and mt.full.lyrics.lines[0][1] == hindi["lines"][0][1],
-      "a Hindi song didn't open in Devanagari")
-check(mt.full.lyrics._layout()[0]["font"].family() == "Nirmala UI", "Devanagari isn't set in a Hindi face")
-mt.full.en_btn.click()
-check(mt.full.lyrics.script == "en" and mt.full.lyrics.lines[0][1].startswith("Banaai")
-      and mt.settings.get("lyrics_script") == "en", "English didn't switch the words: %r" % mt.full.lyrics.lines[:1])
+check(lv.script == "Latn" and lv.lines[0][1].startswith("Banaai") and lv.subs[0] == hindi["lines"][0][1],
+      "a Hindi song isn't English letters over Devanagari: %r / %r" % (lv.lines[:1], lv.subs[:1]))
+check(mt.full.lang_btn.isVisible() and "देवनागरी" in mt.full.lang_btn.text(), "the language button: %r"
+      % mt.full.lang_btn.text())
+mt._set_lyrics_pref(main="Deva", sub="")
+check(lv.script == "Deva" and lv.lines[0][1] == hindi["lines"][0][1] and not any(lv.subs),
+      "choosing Devanagari didn't switch the words")
+check("Nirmala UI" in lv._layout()[0]["mf"].families(), "Devanagari isn't set in a Hindi face")
 mt.full.grab()
-mt.full.hi_btn.click()
-check(mt.full.lyrics.script == "hi", "Hindi didn't switch back")
-print("a Hindi song's words switch between Hindi and English, and the choice is remembered")
-mt.full.lyrics_btn.click()
-check(not mt.full.lyrics.isVisible(), "the lyrics button didn't hide the lyrics")
+mt._set_lyrics_pref(main="Latn", sub="auto")
+print("a Hindi song: English letters with Devanagari under each line; either can lead; the choice is kept")
+mt.full.lyrics_pill.click()
+check(not lv.isVisible(), "the lyrics button didn't hide the lyrics")
 mt.close_full()
 check(not mt.full.isVisible(), "the full-screen view didn't close")
-print("the karaoke view follows the song, glides, and seeks on a click")
+print("the lyrics view follows the song, glides, and seeks on a click")
 
 win.close()
 settle(400)

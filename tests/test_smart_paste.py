@@ -41,6 +41,9 @@ def fake_split(url, cookies=None, progress=None, cancelled=None):
         return PICTURE_POST
     if "/p/VID" in url:
         return VIDEO_POST
+    if "/reel/" in url:            # a reel: one video, by its own link (read first, like a post)
+        return {"title": "A reel", "note": "", "images": [],
+                "videos": [{"url": url, "title": "A reel", "duration": 7, "uploader": "", "thumbnail_url": None}]}
     return {"title": url, "note": "", "videos": [], "images": [{"title": "x", "url": url, "is_video": False}]}
 
 

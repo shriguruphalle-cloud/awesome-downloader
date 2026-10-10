@@ -3,7 +3,7 @@ import subprocess
 import sys
 
 APP_NAME = "AWESOME DOWNLOADER"
-APP_VERSION = "2.5.1"
+APP_VERSION = "3.0.0"
 APP_PUBLISHER = "Shriguru Phalle"  # kept in sync with installer.iss's MyAppPublisher by hand
 
 # Where releases are published -- the app asks GitHub's API for the latest

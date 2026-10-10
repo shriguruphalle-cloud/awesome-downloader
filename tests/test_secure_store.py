@@ -57,7 +57,7 @@ from app.utils import updater  # noqa: E402
 secure_store.ENCRYPT = True
 browser_data.add_bookmark("https://example.test/kept", "Kept across going back")
 check(secure_store.is_encrypted(browser_data.BOOKMARKS_PATH), "precondition: bookmarks encrypted")
-updater.install("C:/nowhere/setup.exe", "2.5.1", "2.5.0", rollback=True, launch=lambda p, a: True)
+updater.install("C:/nowhere/setup.exe", "3.0.0", "2.5.0", rollback=True, launch=lambda p, a: True)
 check(not secure_store.is_encrypted(browser_data.BOOKMARKS_PATH),
       "going back to 2.5.0 left the bookmarks encrypted, which 2.5.0 can't read")
 check(b"Kept across going back" in open(browser_data.BOOKMARKS_PATH, "rb").read(), "the bookmarks were lost")

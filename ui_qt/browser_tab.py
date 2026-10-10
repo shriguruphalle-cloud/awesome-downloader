@@ -438,6 +438,7 @@ class _NativeDownload(QObject):
 class BrowserTab(QWidget):
     # Page URL for the Video tab's own fetch and download.
     open_in_video_tab = Signal(str)
+    media_found = Signal(str, object)      # (title, [entries]): files the page itself is playing
     # A page's player went fullscreen: the window hides its own chrome.
     fullscreen_requested = Signal(bool)
     # A magnet link was opened; a downloaded .torrent was offered.
@@ -1487,10 +1488,42 @@ class BrowserTab(QWidget):
             show_toast(self.pages, "Downloaded %s" % os.path.basename(dl.path), action="Add to Torrent tab",
                        on_action=lambda p=dl.path: self.torrent_file_requested.emit(p), kind="success", ms=8000)
 
+    # what a Reddit post page is playing: its own player's stream (Reddit blocks the
+    # downloader's requests from many connections, but the page has already loaded it)
+    _REDDIT_MEDIA_JS = r"""(() => {
+      const out = [];
+      const add = (u) => { if (u && !u.startsWith('blob:') && !out.includes(u)) out.push(u); };
+      document.querySelectorAll('shreddit-player, shreddit-player-2').forEach(p => add(p.getAttribute('src')));
+      document.querySelectorAll('video').forEach(v => { add(v.getAttribute('src')); add(v.currentSrc); });
+      document.querySelectorAll('video source').forEach(s => add(s.getAttribute('src')));
+      if (!out.length) {
+        const m = document.documentElement.outerHTML.match(/https:\/\/v\.redd\.it\/[a-z0-9]+\/(HLSPlaylist|DASHPlaylist)[^"'\s<]*/i);
+        if (m) add(m[0].replace(/&amp;/g, '&'));
+      }
+      const post = document.querySelector('shreddit-post');
+      const title = (post && post.getAttribute('post-title')) || document.title;
+      return {title: title, urls: out.filter(u => /v\.redd\.it|\.m3u8|\.mpd|\.mp4/i.test(u))};
+    })()"""
+
     def _send_current_to_video_tab(self):
         tab = self._current()
-        if tab is not None and not tab.on_home and tab.url.startswith(("http://", "https://")):
-            self.open_in_video_tab.emit(tab.url)
+        if tab is None or tab.on_home or not tab.url.startswith(("http://", "https://")):
+            return
+        host = urllib.parse.urlparse(tab.url).hostname or ""
+        if (host == "reddit.com" or host.endswith(".reddit.com")) and tab.view is not None and                 hasattr(tab.view, "evaluate"):
+            url = tab.url
+
+            def got(found):
+                urls = (found or {}).get("urls") or []
+                if not urls:
+                    self.open_in_video_tab.emit(url)
+                    return
+                title = ((found or {}).get("title") or "Reddit video").strip()[:150]
+                self.media_found.emit(title, [{"url": urls[0], "title": title, "duration": 0, "uploader": "",
+                                               "thumbnail_url": None}])
+            tab.view.evaluate(self._REDDIT_MEDIA_JS, got)
+            return
+        self.open_in_video_tab.emit(tab.url)
 
     # ---------------------------------------------------- toolbar state ----
     def _sync_toolbar(self):
