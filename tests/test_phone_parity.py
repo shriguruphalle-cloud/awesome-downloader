@@ -160,4 +160,39 @@ mt._forget_search()
 settle(100)
 check(not mt.settings["music_recent_searches"], "not cleared")
 print("Recent searches")
+
+# the song menu has what the phone's has; the sleep timer
+from PySide6.QtWidgets import QMenu  # noqa: E402
+from ui_qt import music_more, music_tab  # noqa: E402
+shown = []
+
+
+class SeenMenu(QMenu):
+    def exec(self, *_a):
+        shown.append([x.text() for x in self.actions()])
+
+
+music_tab.QMenu = music_more.QMenu = SeenMenu
+mt._row_menu(dict(song, album="Made Up", artist_browse="UCx"), QPoint(0, 0))
+for want in ("Play next", "Like", "Add to a playlist…", "Start a radio from this song", "Go to artist", "Go to album",
+             "Share to a chat…", "Not for me", "Download", "Copy link"):
+    check(want in shown[-1], "the song menu has no %r: %s" % (want, shown[-1]))
+mt.queue, mt.index = [song], 0
+mt._song_menu()
+check("Sleep timer…" in shown[-1], "no sleep timer: %s" % shown[-1])
+mt.set_sleep(15)
+check(mt._sleep_timer.isActive() and mt._sleep_words().endswith("min left"), mt._sleep_words())
+mt.set_sleep(-1)
+check(not mt._sleep_timer.isActive() and mt._sleep_at_song_end() and not mt._sleep_at_song_end(), "end of song")
+mt.set_sleep(None)
+check(mt._sleep_words() == "Sleep timer…", mt._sleep_words())
+pl = music_library.playlist(p2["id"] if isinstance(p2, dict) else p2)
+mt._playlist_more(pl)
+for want in ("Add to the queue", "Download all", "Make private", "Rename", "Delete"):
+    check(want in shown[-1], "the playlist menu has no %r: %s" % (want, shown[-1]))
+mt._confirm_delete(pl)
+check("Delete it" in shown[-1] and music_library.playlist(pl["id"]), "deleting asks first")
+music_tab.QMenu = music_more.QMenu = QMenu
+mt.queue, mt.index = [], -1
+print("the song and playlist menus, the sleep timer")
 print("PHONE PARITY OK")

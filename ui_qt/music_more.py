@@ -9,7 +9,7 @@ import time
 
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QAbstractButton, QGridLayout, QHBoxLayout, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QGridLayout, QHBoxLayout, QMenu, QVBoxLayout, QWidget
 
 from app.core import mixer, music_sources
 from app.core import music_brain as brain
@@ -692,11 +692,92 @@ class MusicMore:
         if songs:
             menu.addAction("Play", lambda: self._play_list(songs))
             menu.addAction("Shuffle", lambda: self._play_list(songs, True))
+            menu.addAction("Add to the queue", lambda: [self.add_to_queue(t, quiet=True) for t in songs])
+            menu.addAction("Download all", lambda: [self.keep(t) for t in songs])
             menu.addSeparator()
-        menu.addAction("Unpin" if pl["id"] in self._pins() else "Pin to the top", lambda: self._toggle_pin(pl))
+        menu.addAction("Unpin from the top" if pl["id"] in self._pins() else "Pin to the top",
+                       lambda: self._toggle_pin(pl))
+        public = pl.get("public", True) is not False
+        menu.addAction("Make private" if public else "Show on your profile", lambda: self._set_on_profile(pl, not public))
         menu.addAction("Rename", lambda: self._rename_playlist(pl))
-        menu.addAction("Delete", lambda: self._delete_playlist(pl))
+        if songs:
+            menu.addAction("Copy the song list", lambda: QApplication.clipboard().setText(
+                "\n".join("%s - %s" % (t.get("artist", ""), t.get("title", "")) for t in songs)))
+        menu.addSeparator()
+        menu.addAction("Delete", lambda: self._confirm_delete(pl))
         menu.exec(QCursor.pos())
+
+    def _set_on_profile(self, pl, on):
+        brain.value(brain.set_playlist_public, pl["id"], on)
+        pl["public"] = on
+        self.status.setText("%s shows on your profile" % pl["title"] if on
+                            else "%s is private now — only you see it" % pl["title"])
+        if (self._here or (None,))[0] == "library":
+            QTimer.singleShot(0, self._build_library)
+
+    def _confirm_delete(self, pl):
+        menu = style_menu(QMenu(self), theme.tokens(True))
+        menu.addAction("Delete %s?" % pl["title"]).setEnabled(False)
+        menu.addAction("Delete it", lambda: self._delete_playlist(pl))
+        menu.addAction("Keep it")
+        menu.exec(QCursor.pos())
+
+    # ---- the sleep timer: the music fades out and stops when the time is up ----
+    def _sleep_words(self):
+        if getattr(self, "_sleep_end", False):
+            return "Sleep timer: end of this song"
+        at = getattr(self, "_sleep_due", None)
+        if at:
+            return "Sleep timer: %d min left" % max(1, round((at - time.monotonic()) / 60))
+        return "Sleep timer…"
+
+    def _sleep_menu(self):
+        menu = style_menu(QMenu(self), theme.tokens(True))
+        for words, minutes in (("15 minutes", 15), ("30 minutes", 30), ("45 minutes", 45), ("1 hour", 60),
+                               ("End of this song", -1)):
+            menu.addAction(words, lambda m=minutes: self.set_sleep(m))
+        if getattr(self, "_sleep_end", False) or getattr(self, "_sleep_due", None):
+            menu.addSeparator()
+            menu.addAction("Turn off", lambda: self.set_sleep(None))
+        menu.exec(QCursor.pos())
+
+    def set_sleep(self, minutes):
+        if not hasattr(self, "_sleep_timer"):
+            self._sleep_timer = QTimer(self)
+            self._sleep_timer.setSingleShot(True)
+            self._sleep_timer.timeout.connect(self._sleep_fade)
+        self._sleep_timer.stop()
+        self._sleep_end, self._sleep_due = minutes == -1, None
+        if minutes and minutes > 0:
+            self._sleep_due = time.monotonic() + minutes * 60
+            self._sleep_timer.start(minutes * 60000)
+        self.status.setText("Sleep timer off" if minutes is None else "Music stops at the end of this song"
+                            if minutes == -1 else "Music stops in %d minutes" % minutes)
+
+    def _sleep_at_song_end(self):
+        if not getattr(self, "_sleep_end", False):
+            return False
+        self._sleep_end = False
+        self.status.setText("Stopped by the sleep timer")
+        return True
+
+    def _sleep_fade(self):
+        self._sleep_due = None
+        full, steps = self.audio.volume(), [20]
+        fade = QTimer(self)
+        fade.setInterval(500)
+
+        def step():
+            steps[0] -= 1
+            self.audio.setVolume(full * steps[0] / 20)
+            if steps[0] <= 0:
+                fade.stop()
+                fade.deleteLater()
+                self.player.pause()
+                self.audio.setVolume(full)
+                self.status.setText("Stopped by the sleep timer")
+        fade.timeout.connect(step)
+        fade.start()
 
     # ---- what you looked for ----
     def _remember_search(self, q):

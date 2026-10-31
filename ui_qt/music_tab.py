@@ -1509,6 +1509,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         menu.addAction("Start a radio from this song", lambda: self._radio_from(track))
         self.social_song_actions(menu, track)
         menu.addSeparator()
+        menu.addAction(self._sleep_words(), self._sleep_menu)
         menu.addAction("Not for me", lambda: (self._not_for_me(track), self.next()))
         menu.exec(pos or QCursor.pos())
 
@@ -1703,7 +1704,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         if key == "playlist" and isinstance(pl, dict):
             h.add_action(self._profile_ring(pl))
             h.add_action(Pill("Rename", style="outline")).clicked.connect(lambda: self._rename_playlist(pl))
-            h.add_action(Pill("Delete", style="outline")).clicked.connect(lambda: self._delete_playlist(pl))
+            h.add_action(Pill("Delete", style="outline")).clicked.connect(lambda: self._confirm_delete(pl))
         h.set_trio(tracks[:3], "In this list")
         if key == "playlist" and len(tracks) > 1:
             page.add(self._sort_bar("playlist_songs", lambda: self._build_list_page(key, item)))
@@ -1729,7 +1730,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         music_library.delete_playlist(pl["id"])
         self._sync_rail()
         self.status.setText("Deleted %s" % pl["title"])
-        self.go("home")
+        self.go("library")
 
     # ---- the rail: what's made for you, your playlists, the ⋯ menu ----
     def _feed_items(self):
@@ -3169,28 +3170,29 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         menu = style_menu(QMenu(self), theme.tokens(True))
         menu.addAction("Play next", lambda: self.play_next(track))
         menu.addAction("Add to the queue", lambda: self.add_to_queue(track))
-        menu.addAction("Remove from Your music" if music_library.is_saved(track) else "Save to Your music",
+        menu.addAction("Remove from Liked songs" if music_library.is_saved(track) else "Like",
                        lambda: self.toggle_saved(track))
+        menu.addAction("Add to a playlist…", lambda: self._playlist_menu(track, QCursor.pos()))
+        self.social_song_actions(menu, track)
         if track.get("source") != "local":
             menu.addAction("Download", lambda: self.keep(track))
-        menu.addAction("Not for me", lambda: self._not_for_me(track))
-        if track.get("artist"):
-            menu.addAction("Don't suggest %s" % track["artist"].split(",")[0], lambda: self._block_artist(track))
-        menu.addAction("Add to a playlist…", lambda: self._playlist_menu(track, QCursor.pos()))
+        if str(track.get("id", "")).startswith("yt:"):
+            menu.addAction("Start a radio from this song", lambda: self._radio_from(track))
+        menu.addSeparator()
+        if track.get("artist_browse") or track.get("artist"):
+            menu.addAction("Go to artist", lambda: self.open_artist_of(track))
+        if track.get("album_browse") or track.get("album"):
+            menu.addAction("Go to album", lambda: self.open_album_of(track))
         here = self._here or (None, None)
         if here[0] == "playlist" and here[1]:
             menu.addAction("Remove from this playlist", lambda: self._remove_from_playlist(here[1], track))
+        menu.addSeparator()
+        menu.addAction("Not for me", lambda: self._not_for_me(track))
+        if track.get("artist"):
+            menu.addAction("Don't suggest %s" % track["artist"].split(",")[0], lambda: self._block_artist(track))
         if track.get("reason"):
             menu.addAction("Why: %s" % track["reason"]).setEnabled(False)
         menu.addSeparator()
-        if track.get("artist_browse"):
-            menu.addAction("Go to artist", lambda: self.go("artist", {"browse_id": track["artist_browse"],
-                                                                      "title": track.get("artist", "")}))
-        if track.get("album_browse"):
-            menu.addAction("Go to album", lambda: self.go("album", {"browse_id": track["album_browse"],
-                                                                    "title": track.get("album", ""),
-                                                                    "source": "youtube", "kind": "album"}))
-        self.social_song_actions(menu, track)
         menu.addAction("Share as a video…", lambda: self.sharer.open_for(track))
         if track.get("page_url") and track.get("source") != "local":
             menu.addAction("Copy link", lambda: QApplication.clipboard().setText(track["page_url"]))
@@ -3871,6 +3873,8 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
                 self._recover("the stream ended early")
                 return
             self._end_listen(natural=True)
+            if self._sleep_at_song_end():
+                return
             self.next(auto=True)
         elif status in (S.LoadedMedia, S.BufferedMedia) and self._pending_seek:
             at, self._pending_seek = self._pending_seek, None
