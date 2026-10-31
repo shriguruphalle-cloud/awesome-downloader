@@ -1084,6 +1084,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
     _suggest_sig = Signal(int, str, object)
     _feed_sig = Signal(object)
     _warm_sig = Signal(str)
+    _dj_pick_sig = Signal(str, str)
     _gain_sig = Signal(str, float)
     _found_sig = Signal(str, object)
     _upnext_sig = Signal(int, object)
@@ -1158,6 +1159,11 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         self._cover_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="music-covers")
         self.player.advanced.connect(self._on_advanced)
         self.player.set_blend(int(float((settings or {}).get("music_blend_s", self.BLEND_S)) * 1000))
+        self.player.set_smart_mix((settings or {}).get("music_smart_mix", True))
+        self.player.mix_window.connect(self._dj_choose_next)
+        self.player.mix_planned.connect(self._dj_show)
+        self._dj_chose_for = None   # the song the DJ last picked a follower for
+        self._dj_pick_sig.connect(self._dj_picked)
         self._armed = None          # (track id, from a file?) prepared to follow the song playing
         self._chosen = False        # the song starting was picked by hand (not by autoplay)
         self._shuffle_pick = None   # with shuffle on, the song chosen to come next
@@ -2038,6 +2044,11 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         self.set_pref("music_blend_s", int(seconds))
         self.player.set_blend(int(seconds) * 1000)
         self._arm_next()
+
+    def set_smart_mix(self, on):
+        self.set_pref("music_smart_mix", bool(on))
+        self.player.set_smart_mix(on)
+        self._dj_show()
 
     def set_autoplay(self, on):
         self.taste.state["prefs"]["autoplay"] = bool(on)
@@ -3472,7 +3483,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
     def _blend_ok(self, cur, nxt):
         """No blend between an album's songs played in order -- they're
         meant to run into each other as they are."""
-        if not cur or not nxt:
+        if not cur or not nxt or self.jam.active:      # a jam moves on together, song by song
             return False
         same_album = cur.get("album_browse") and cur.get("album_browse") == nxt.get("album_browse")
         return not (same_album and self._context != "search")

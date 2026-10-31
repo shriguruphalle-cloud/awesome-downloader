@@ -5,7 +5,7 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor, QFont
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QMessageBox, QScrollArea, QVBoxLayout, QWidget
 
 from app.core import lyrics as lyrics_db
 from app.core import music_sources
@@ -116,6 +116,10 @@ class MusicSettings(GlassSheet):
         self._row("Blend songs", "The end of one song fades into the next (not between an album's tracks, "
                                  "which are meant to run on as they are). Off: the next song follows with no gap.",
                   self.blend, self.blend_value)
+        self._row("Mix like a DJ", "Silence cut between songs, and on the beat where tempos match: the next song "
+                                   "comes in on the bar, at this one's tempo, and the bass changes over. Needs "
+                                   "Blend songs on.",
+                  self._switch(st.get("music_smart_mix", True), t.set_smart_mix))
         self._row("Resume where you left off", "When the app opens, the last song is back where it was, paused "
                                                "-- press play to carry on.",
                   self._switch(st.get("music_resume_play", True), lambda on: t.set_pref("music_resume_play", on)))
@@ -138,7 +142,14 @@ class MusicSettings(GlassSheet):
                                            "the beat, a mirror that opens outward on it (Crystal, Neon), rain "
                                            "that drives with it, a picture of your own -- or the cover itself, still. React, Trails, "
                                            "Glow, Symmetry and the frosted glass are in full screen's "
-                                           "background menu.", *self.bg_btns)
+                                           "background menu.")
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        grid.setContentsMargins(0, 0, 0, 8)
+        for i, b in enumerate(self.bg_btns):       # too many for the row: they'd push the whole sheet wider
+            grid.addWidget(b, i // 5, i % 5)
+        grid.setColumnStretch(5, 1)
+        self.col.addLayout(grid)
         self._section("Sound")
         self._row("Equalizer & effects", "Ten bands, presets, bass boost, virtual surround and mono — heard as "
                                          "you change them.", self._pill("Open", lambda: (self.hide(),

@@ -59,6 +59,7 @@ DEFAULTS = {
     "music_last": None,               # the queue, the song and where it was, to carry on from
     "music_resume_play": True,        # ... and whether it's brought back (paused) when the app opens
     "music_blend_s": 5,               # seconds of crossfade between songs (0: gapless)
+    "music_smart_mix": True,          # blends cut the silence, and go in step where the tempos match
     "music_backdrop": "aurora",       # the full-screen player's moving background
     "lyrics_main": None,              # the lyrics' script ("Latn", "Deva"...), None: the song's own
     "lyrics_sub": "auto",             # what's under each line: a version, "tr:en", "pron", "" or auto

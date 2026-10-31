@@ -17,7 +17,10 @@ joined sample-exactly with a 24 ms crossfade -- heard within half a second,
 without a gap or a click. The same join carries one song into the next:
 the next song is decoded before this one ends, and either follows it with
 no gap at all, or -- with "Blend songs" on -- the two are crossfaded by
-FFmpeg's acrossfade over the last seconds of the first.
+FFmpeg's acrossfade over the last seconds of the first. "Mix like a DJ" listens
+to both songs first (app/core/mixer.py): the silence between them is left out,
+and where the tempos agree one FFmpeg graph brings the next song in on the bar,
+at this one's tempo, with the bass changing over between them.
 
 A stream is opened with FFmpeg's reconnect options, so a dropped connection
 is picked up again instead of ending the song; one that does end early is
@@ -42,6 +45,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Qt, Signal, Slot
 from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices, QMediaPlayer
 
 from app.core import eq as eq_core
+from app.core import mixer
 from app.logging_setup import get_logger
 
 logger = get_logger("audio_engine")
@@ -55,6 +59,7 @@ WARMUP_MS = 400                              # decoded and thrown away, so new f
 EQ_LEAD_MS = 180                             # how far ahead of what's playing a new equalizer joins
 GAPLESS_PREP_MS = 12000                      # the next song is opened this long before the end
 BLEND_PREP_MS = 6000                         # ... or this long before a blend starts
+MIX_LISTEN_MS = 75000                        # both songs are listened to this long before the end
 _DURATION = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 _INPUT = re.compile(r"^Input #(\d+)")
 _STREAM = re.compile(r"Stream #(\d+):\d+.*?Audio:\s*([^,(\s]+)[^,]*,\s*(\d+)\s*Hz,\s*([^,]+)(?:,\s*([^,]+))?"
@@ -131,10 +136,12 @@ class _Song:
 
 class _Decode:
     """One FFmpeg run into memory: `inputs` is [(src, at_ms)] -- one song, or
-    two whose join is crossfaded over `blend_ms` (FFmpeg's acrossfade) --
-    through `af`; the first `warmup_ms` are thrown away."""
+    two whose join is crossfaded over `blend_ms` (FFmpeg's acrossfade), or
+    mixed by a `mix(norm)` graph that ends in [x]; `until_ms` ends the first
+    of two early, where its sound ends -- through `af`; the first `warmup_ms`
+    are thrown away."""
 
-    def __init__(self, inputs, af="", blend_ms=0, warmup_ms=0, on_info=None, spatial=""):
+    def __init__(self, inputs, af="", blend_ms=0, warmup_ms=0, on_info=None, spatial="", mix=None, until_ms=0):
         self.buf = bytearray()
         self.lock = threading.Lock()
         self.eof = False
@@ -145,16 +152,20 @@ class _Decode:
         self._skip = _bytes(warmup_ms)
         self._on_info = on_info
         cmd = [_ffmpeg(), "-nostdin", "-hide_banner", "-v", "info"]
-        for src, at in inputs:
+        for i, (src, at) in enumerate(inputs):
             if src.startswith(("http://", "https://")):
                 cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1",
                         "-reconnect_delay_max", "8"]
             if at > 0:
                 cmd += ["-ss", "%.3f" % (at / 1000.0)]
+            if until_ms and i == 0:
+                cmd += ["-t", "%.3f" % ((until_ms - at) / 1000.0)]
             cmd += ["-i", src]
         if len(inputs) == 2 or spatial:
             norm = "aresample=%d,aformat=channel_layouts=stereo" % RATE
-            if len(inputs) == 2:
+            if mix is not None:
+                fc = mix(norm)
+            elif len(inputs) == 2:
                 fc = "[0:a:0]%s[a];[1:a:0]%s[b];[a][b]acrossfade=d=%.3f:c1=qsin:c2=qsin[x]" % (
                     norm, norm, blend_ms / 1000.0)
             else:
@@ -260,13 +271,15 @@ class _Feed:
         self.dec = dec
         self.parts = parts
         self.taken = 0
+        self.mixed_until = 0          # its output is two songs together up to here: nothing may join in before it
 
     def locate(self, b):
-        fb, song, ms = self.parts[0]
+        """A part may carry a fourth value: how fast its song runs (in a mix, at the other's tempo)."""
+        at = self.parts[0]
         for part in self.parts[1:]:
             if part[0] <= b:
-                fb, song, ms = part
-        return song, ms + (b - fb) / BPMS
+                at = part
+        return at[1], at[2] + (b - at[0]) / BPMS * (at[3] if len(at) > 3 else 1.0)
 
     def last_song(self):
         return self.parts[-1][1]
@@ -398,7 +411,10 @@ class Engine(QObject):
     errorOccurred = Signal(object, str)
     infoChanged = Signal(object)
     advanced = Signal(str)            # the prepared next song (its key) is now the one heard
+    mix_window = Signal(str)          # about a minute left of this song (its key): what follows can still be chosen
+    mix_planned = Signal()            # the next song's way in is known (or gone)
     _info_sig = Signal(object, object)
+    _heard_sig = Signal(object, object, object, object)
 
     PlaybackState = State
     MediaStatus = Status
@@ -408,6 +424,10 @@ class Engine(QObject):
         self.audio = _Volume(self)
         self.eq = eq_core.settings(None)
         self.blend_ms = 0
+        self.smart_mix = False        # "Mix like a DJ"
+        self._plan = None             # how the next song comes in (app/core/mixer.py), once it's been heard
+        self._listening = None        # (this song's key, the next's) being listened to
+        self._no_plan = None          # ... or heard, with no way to plan: the plain blend, until the next seek
         self._lock = threading.RLock()
         self._song = None             # the song heard (or loaded)
         self._next = None             # the song to follow it
@@ -432,6 +452,7 @@ class Engine(QObject):
         self._lp = 0.0                # the bass filter's state
         self._lv = deque(maxlen=900)  # (sink byte, bass, loudness): what the music is doing, where
         self._info_sig.connect(self._on_info)
+        self._heard_sig.connect(self._on_heard)
         self._tick = QTimer(self)
         self._tick.setInterval(40)
         self._tick.timeout.connect(self._on_tick)
@@ -544,6 +565,15 @@ class Engine(QObject):
         """Seconds of crossfade between songs, in ms (0: gapless, no blend)."""
         self.blend_ms = max(0, min(12000, int(ms or 0)))
 
+    def set_smart_mix(self, on):
+        """Mix like a DJ: silence cut between songs, and on the beat where the tempos match."""
+        self.smart_mix = bool(on)
+        self._plan = self._no_plan = None
+
+    def upcoming_mix(self):
+        """How the next song will come in, once it's planned (the DJ page says so)."""
+        return self._plan
+
     def set_gain(self, key, db):
         """A song's loudness correction (dB, from its measured loudness)."""
         for song in (self._song, self._next):
@@ -568,7 +598,7 @@ class Engine(QObject):
             if feed is None or not self._eq_pending:
                 return
             song, ms_written = feed.locate(feed.taken)
-            if song is not feed.last_song() or (self._join is not None and self._join.kind == "align"
+            if feed.taken < feed.mixed_until or song is not feed.last_song() or (self._join is not None and self._join.kind == "align"
                                                  and self._join.feed.last_song() is not song):
                 return                           # mid-blend: once the next song has taken over
             self._eq_pending = False
@@ -615,6 +645,7 @@ class Engine(QObject):
                 self._active = True
                 self._playing = playing
                 self._eq_pending = False
+                self._plan = self._no_plan = None     # planned afresh from here
         if dec is None:
             self._fail("Couldn't start FFmpeg: %s" % err)
             return
@@ -811,21 +842,46 @@ class Engine(QObject):
         song, ms = feed.locate(feed.taken)
         if song is not feed.last_song() or song is nxt or not song.duration_ms:
             return
-        remain = song.duration_ms - ms
         blend = self.blend_ms if getattr(nxt, "blend", True) else 0
         chain = eq_core.chain(self.eq)
+        end, way_in = song.duration_ms, 0.0
+        if blend and self.smart_mix:
+            if song.duration_ms - ms <= MIX_LISTEN_MS:
+                self._listen(song, nxt)
+            plan = self._plan
+            if plan is not None and plan.cur_key == song.key and plan.next_key == nxt.key:
+                until = plan.start_at - ms
+                if until > BLEND_PREP_MS:
+                    return
+                if until >= 600:
+                    self._start_mix(song, nxt, plan, ms + 500, chain)
+                    return
+                logger.info("A mix's moment went by; blending plainly")
+                self._plan, self._no_plan = None, (song.key, nxt.key)
+            # the plain blend, from where this song's sound ends into where the next one's begins
+            heard, next_heard = mixer.known(song.key), mixer.known(nxt.key)
+            if heard is not None and ms < heard.sound_end <= song.duration_ms:
+                end = int(heard.sound_end)
+            if next_heard is not None:
+                way_in = next_heard.sound_start
+        remain = end - ms
         if blend and remain <= blend + BLEND_PREP_MS and remain > blend + 900:
             at = ms + 500
-            blend = min(blend, max(0, song.duration_ms - at - 300))
+            blend = min(blend, max(0, end - at - 300))
             try:
-                dec = _Decode([(song.src, at), (nxt.src, 0)], chain, blend_ms=blend,
-                              on_info=self._info_for([song, nxt]), spatial=eq_core.spatial_graph(self.eq))
+                dec = _Decode([(song.src, at), (nxt.src, way_in)], chain, blend_ms=blend,
+                              on_info=self._info_for([song, nxt]), spatial=eq_core.spatial_graph(self.eq),
+                              until_ms=end if end < song.duration_ms else 0)
             except OSError:
                 logger.warning("Couldn't start the blend", exc_info=True)
                 return
-            parts = [(0, song, at), (_bytes(song.duration_ms - at - blend), nxt, 0.0)]
-            self._join = _Join("align", _Feed(dec, parts), song, at)
+            parts = [(0, song, at), (_bytes(end - at - blend), nxt, way_in)]
+            feed = _Feed(dec, parts)
+            feed.mixed_until = _bytes(end - at)
+            self._join = _Join("align", feed, song, at)
             return
+        if blend and remain > blend + 900:
+            return                               # the blend is still to come
         if remain <= GAPLESS_PREP_MS:
             try:
                 dec = _Decode([(nxt.src, 0)], chain, on_info=self._info_for([nxt]),
@@ -833,6 +889,64 @@ class Engine(QObject):
             except OSError:
                 return
             self._join = _Join("follow", _Feed(dec, [(0, nxt, 0.0)]))
+
+    def _start_mix(self, song, nxt, plan, at, chain):
+        """The two songs through one graph: it starts as this song, so it joins where the music is the same."""
+        lift = 1.0
+        if self.eq.get("normalize"):
+            lift = 10 ** ((min(0.0, song.gain_db) - min(0.0, nxt.gain_db)) / 20.0)
+
+        def mix(norm):
+            return mixer.graph(plan, at, norm, lift)
+        try:
+            dec = _Decode([(song.src, at), (nxt.src, plan.in_ms)], chain, mix=mix,
+                          on_info=self._info_for([song, nxt]), spatial=eq_core.spatial_graph(self.eq))
+        except OSError:
+            logger.warning("Couldn't start the mix", exc_info=True)
+            self._plan, self._no_plan = None, (song.key, nxt.key)
+            return
+        parts = [(0, song, at), (_bytes(plan.start_at - at), nxt, float(plan.in_ms), plan.speed),
+                 (_bytes(plan.end_at - at), nxt, plan.in_ms + (plan.end_at - plan.start_at) * plan.speed)]
+        feed = _Feed(dec, parts)
+        feed.mixed_until = _bytes(plan.end_at - at)
+        self._join = _Join("align", feed, song, at)
+        logger.info("Mixing in step: in %.1f s, the bass at %.1f s, this song's end at %.1f s, x%.3f",
+                    (plan.start_at - at) / 1000.0, plan.swap_at / 1000.0, plan.end_at / 1000.0, plan.speed)
+
+    def _listen(self, song, nxt):
+        """Both ends of both songs, off the main thread; then the way across is planned."""
+        key = (song.key, nxt.key)
+        plan = self._plan
+        if key == self._listening or key == self._no_plan or (plan and (plan.cur_key, plan.next_key) == key):
+            return
+        self._listening = key
+        self.mix_window.emit(song.key)
+
+        def run():
+            a = mixer.analyse(song.key, song.src, song.duration_ms)
+            b = mixer.analyse(nxt.key, nxt.src, nxt.duration_ms)
+            try:
+                self._heard_sig.emit(song, nxt, a, b)
+            except RuntimeError:                 # the engine's gone (quitting)
+                pass
+        threading.Thread(target=run, daemon=True, name="mix-listen").start()
+
+    @Slot(object, object, object, object)
+    def _on_heard(self, song, nxt, a, b):
+        with self._lock:
+            key = (song.key, nxt.key)
+            if self._listening == key:
+                self._listening = None
+            if song is not self._song or nxt is not self._next or not self.smart_mix:
+                return
+            plan = None
+            if a is not None and b is not None:
+                plan = mixer.plan(song.key, a, nxt.key, b, self.position() + 4000, self.blend_ms)
+            if plan is None:
+                self._no_plan = key
+                return
+            self._plan = plan
+        self.mix_planned.emit()
 
     def _update_gain(self):
         song = self._song

@@ -2,9 +2,12 @@
 steered by what you ask for, how new and how lively), moods and today's charts, and an artist's every song. The
 choosing is the phone's own logic (app.core.music_brain); this draws it with the tab's own parts.
 """
+import threading
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
+from app.core import mixer, music_sources
 from app.core import music_brain as brain
 from app.core import social
 from app.logging_setup import get_logger
@@ -148,6 +151,50 @@ class MusicMore:
                     self._arm_next()
             self._dj_fetch(done)
 
+    def _dj_source(self, track):
+        """Where a song's sound can be had right now (a file or a known stream), or None."""
+        if track.get("source") == "youtube":
+            return music_sources.cached(track) or music_sources.known_stream(track)
+        return track.get("stream")
+
+    def _dj_choose_next(self, key):
+        """About a minute before this song ends: the next few of the DJ's own songs are listened to, and the one
+        that follows on best (tempo, punch) moves up to be next. Your own picks are never moved."""
+        cur = self.current()
+        if not self._dj_on or cur is None or cur.get("id") != key or self._dj_chose_for == key:
+            return
+        ahead = []
+        for t in self.queue[self.index + 1:self.index + 4]:
+            if not t.get("_dj"):
+                break
+            src = self._dj_source(t)
+            if src:
+                ahead.append((t, src))
+        here = self._dj_source(cur)
+        if len(ahead) < 2 or not here:
+            return
+        self._dj_chose_for = key
+        dur = int(cur.get("duration") or 0) * 1000
+
+        def run():
+            a = mixer.analyse(key, here, dur)
+            heard = [(t, mixer.analyse(t["id"], src, int(t.get("duration") or 0) * 1000)) for t, src in ahead]
+            heard = [(t, p) for t, p in heard if p is not None]
+            if a is not None and heard:
+                self._dj_pick_sig.emit(key, min(heard, key=lambda x: mixer.fit(a, x[1]))[0]["id"])
+        threading.Thread(target=run, daemon=True, name="dj-listen").start()
+
+    def _dj_picked(self, key, best):
+        cur = self.current()
+        if not self._dj_on or cur is None or cur.get("id") != key:
+            return
+        i = next((k for k in range(self.index + 1, len(self.queue)) if self.queue[k].get("id") == best), None)
+        if i is None or i == self.index + 1:
+            return
+        self.queue.insert(self.index + 1, self.queue.pop(i))
+        self._render_queue()
+        self._arm_next()
+
     def _build_dj(self):
         page = self._pages["dj"]
         page.clear()
@@ -188,6 +235,15 @@ class MusicMore:
             sub = "Picking songs…"
         elif self._dj_on:
             sub = "On air: %s" % (self._dj_theme or "your mix")
+            # the mix, said plainly: this one's tempo, how the next one will come in
+            cur = self.current()
+            heard = mixer.known(cur.get("id")) if cur else None
+            if heard is not None and heard.bpm > 0:
+                sub += "  ·  %d BPM" % heard.bpm
+            if not self.player.smart_mix:
+                sub += "  ·  Mixing off"
+            elif self.player.upcoming_mix() is not None:
+                sub += "  ·  next mixes in on the beat"
         else:
             sub = "Songs you love and new ones you'll love, in short named sets, one running into the next."
         page.hero.set_text("Beta", "DJ", sub)
