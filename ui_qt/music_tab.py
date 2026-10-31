@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 from app import config
 from app.core import lyrics as lyrics_db
 from app.core import music_brain
-from app.core import music_sources
+from app.core import music_sources, social
 from app.core import eq as eq_core
 from app.core import taste as taste_core
 from app.core import upnext
@@ -59,6 +59,7 @@ from .audio_engine import Engine, loudness
 from .music_import import ImportSheet
 from .music_import_liked import LikedImportSheet
 from .music_onboarding import Onboarding
+from .music_owner import MusicOwner
 from .music_share import ShareSheet
 from .music_panels import EqPanel, InfoPanel, QueuePanel, SidePanel
 from .music_more import MusicMore
@@ -1067,7 +1068,7 @@ class _FullView(QWidget):
         super().keyPressEvent(event)
 
 
-class MusicTab(SocialPages, MusicMore, QWidget):
+class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
     _kept_charts = Signal(object)
     SHOW_ONBOARDING = True   # the taste setup on first run
     RESUME_ON_START = True   # the last song back (and playing) when the app opens
@@ -1245,9 +1246,9 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         stage_lay.addWidget(self.pages)
         self._pages = {}
         for key in ("home", "explore", "search", "artist", "album", "songs", "artists", "albums", "local", "queue",
-                    "mix", "playlist") + SocialPages.SOCIAL_PAGES + MusicMore.MORE_PAGES:
+                    "mix", "playlist") + SocialPages.SOCIAL_PAGES + MusicMore.MORE_PAGES + MusicOwner.OWNER_PAGES:
             page = _Page(key)
-            if key in SocialPages.SOCIAL_PAGES + MusicMore.MORE_PAGES + ("home", "search"):
+            if key in SocialPages.SOCIAL_PAGES + MusicMore.MORE_PAGES + MusicOwner.OWNER_PAGES + ("home", "search"):
                 page.hero.set_compact()
             self._pages[key] = page
             self.pages.addWidget(page)
@@ -1322,6 +1323,9 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         self.importer = ImportSheet(self)
         self.importer.imported.connect(self._imported)
         self.liked_import = LikedImportSheet(self)
+        self._init_owner()
+        QApplication.instance().applicationStateChanged.connect(
+            lambda st: setattr(social, "foreground", st == Qt.ApplicationState.ApplicationActive))
         self.sharer = ShareSheet(self)
 
         self.onboarding = Onboarding(self)
@@ -2389,6 +2393,8 @@ class MusicTab(SocialPages, MusicMore, QWidget):
             self._build_people(item)
         elif key == "dj":
             self._build_dj()
+        elif key == "owner":
+            self._build_owner()
         elif key == "library":
             self._build_library()
         elif key == "recent":
@@ -4097,7 +4103,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         super().resizeEvent(event)
         if self.full.isVisible():
             self.full.setGeometry(self.rect())
-        for sheet in (self.onboarding, self.importer, self.liked_import, self.sharer,
+        for sheet in (self.onboarding, self.importer, self.liked_import, self.sharer, self._owner_sheet,
                       getattr(self, "_settings_sheet", None)):
             if sheet is not None and _alive(sheet) and sheet.isVisible():
                 sheet.setGeometry(self.rect())

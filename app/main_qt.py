@@ -17,6 +17,8 @@ logger = get_logger("app_qt")
 
 
 def main():
+    from app.core import crash_report
+    crash_report.watch()
     # A build check, not a way to start the app (see app/self_test.py).
     if "--self-test" in sys.argv[1:]:
         from . import self_test

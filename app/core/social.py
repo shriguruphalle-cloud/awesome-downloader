@@ -108,10 +108,16 @@ def _clear():
 
 
 # ------------------------------------------------------------------ requests
-def call(method, path, body=None, auth=True):
-    """One request; the answer's JSON (a dict), or SocialError."""
+APP_VERSION_TAG = "pc-%s" % config.APP_VERSION     # told apart from the phone's on the owner's dashboard
+foreground = False                                  # the window's in use (the tab keeps this up to date)
+
+
+def call(method, path, body=None, auth=True, headers=None):
+    """One request; the answer's JSON (a dict), or SocialError. `headers`: more of them, never logged."""
+    headers = dict(headers or {})
     data = None
-    headers = {"Accept": "application/json", "User-Agent": "AwesomeDownloader/%s" % config.APP_VERSION}
+    headers.update({"Accept": "application/json", "User-Agent": "AwesomeDownloader/%s" % config.APP_VERSION,
+                    "X-App-Version": APP_VERSION_TAG, "X-App-State": "foreground" if foreground else "background"})
     if body is not None or method not in ("GET", "DELETE"):
         data = json.dumps(body if body is not None else {}).encode("utf-8")
         headers["Content-Type"] = "application/json; charset=utf-8"

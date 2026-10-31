@@ -2,8 +2,9 @@
 into each other, the sound, the lyrics, what's suggested, and the library.
 Every change is applied at once and kept (MusicTab saves the settings)."""
 import os
+import time
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCursor, QFont
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QMessageBox, QScrollArea, QVBoxLayout, QWidget
 
@@ -15,6 +16,14 @@ from . import theme
 from .browser_chrome import style_menu
 from .music_panels import GlassSheet, Switch
 from .music_widgets import LinkLabel, Pill, ThinSlider
+
+
+class _Maker(QLabel):
+    """The maker's name. (Ten quick clicks on it, on the owner's account, ask for the dashboard's PIN.)"""
+    clicked = Signal()
+
+    def mousePressEvent(self, _e):
+        self.clicked.emit()
 
 
 def _text(text, px, weight=QFont.Weight.Medium, alpha=255):
@@ -188,9 +197,24 @@ class MusicSettings(GlassSheet):
         self.cache_btn = self._pill("Clear (%d MB)" % self._cache_mb(), self._clear)
         self._row("Fetched songs", "Songs kept to play again at once (the last %d)." % music_sources.CACHE_KEEP,
                   self.cache_btn)
+        self._section("About")
+        self.maker = _Maker("Made by Shriguru Phalle")
+        self.maker.setFont(look.font(14.5, QFont.Weight.DemiBold))
+        self.maker.setStyleSheet("color: rgba(255,255,255,200); background: transparent;")
+        self.maker.clicked.connect(self._maker_clicked)
+        self._taps, self._last_tap = 0, 0.0
+        self.col.addWidget(self.maker)
         self.col.addStretch(1)
 
     # ---- changes ----
+    def _maker_clicked(self):
+        now = time.monotonic()
+        self._taps = self._taps + 1 if now - self._last_tap < 1.5 else 1
+        self._last_tap = now
+        if self._taps >= 10:
+            self._taps = 0
+            self.tab.owner_door()
+
     def _blend_changed(self, v):
         self.blend_value.setText("%d s" % v if v else "Off")
         self.tab.set_blend(v)
