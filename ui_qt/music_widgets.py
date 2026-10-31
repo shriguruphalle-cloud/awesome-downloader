@@ -375,6 +375,8 @@ class TrackRow(QWidget):
         self._hits = {}
         self.accent = look.TEXT
         self.setFixedHeight(look.ROW_H)
+        self._press_y = None
+        self._dragging = False
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_btn = icon_button("close" if in_queue else "plus",
@@ -469,14 +471,30 @@ class TrackRow(QWidget):
         self.update()
 
     def mouseMoveEvent(self, e):
+        lst = self.parent()
+        if self._press_y is not None and e.buttons() & Qt.MouseButton.LeftButton and hasattr(lst, "row_dragged") \
+                and lst.in_queue and (self._dragging or abs(e.position().y() - self._press_y) > 8):
+            self._dragging = True
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+            lst.row_dragged(self, e.globalPosition().y())
+            return
         over = any(r.contains(e.position()) for k, r in self._hits.items() if k in ("artist", "album"))
         self.setCursor(Qt.CursorShape.PointingHandCursor if over or e.position().x() < 44
                        else Qt.CursorShape.ArrowCursor)
         super().mouseMoveEvent(e)
 
+    def mouseReleaseEvent(self, e):
+        was, self._dragging, self._press_y = self._dragging, False, None
+        if was:
+            self.unsetCursor()
+            self.parent().row_dropped(self)
+            return
+        super().mouseReleaseEvent(e)
+
     def mousePressEvent(self, e):
         pos = e.position()
         if e.button() == Qt.MouseButton.LeftButton:
+            self._press_y = pos.y()
             if pos.x() < 42:
                 self.play.emit(self.track)
                 return
@@ -555,7 +573,9 @@ class TrackRow(QWidget):
 
 
 class TrackList(QWidget):
-    """Songs, numbered, as rows; the first `limit` shown until "Show all"."""
+    """Songs, numbered, as rows; the first `limit` shown until "Show all". In the queue, a row dragged up or down
+    moves that song (`moved`: from, to)."""
+    moved = Signal(int, int)
 
     def __init__(self, wire, show_art=True, show_album=True, numbered=True, in_queue=False, limit=None,
                  parent=None):
@@ -577,6 +597,32 @@ class TrackList(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(70)
         self._timer.timeout.connect(self._tick)
+        self._drag = None
+        self._drop_at = None
+
+    def row_dragged(self, row, global_y):
+        """A row is being dragged: a line shows where it would land."""
+        y = self.mapFromGlobal(QPoint(0, int(global_y))).y()
+        self._drag = row
+        self._drop_at = max(0, min(len(self.rows) - 1, sum(1 for r in self.rows if r.y() + r.height() / 2 < y)))
+        self.update()
+
+    def row_dropped(self, row):
+        src = self.rows.index(row) if row in self.rows else None
+        dst, self._drag, self._drop_at = self._drop_at, None, None
+        self.update()
+        if src is not None and dst is not None:
+            self.moved.emit(src, dst - 1 if dst > src else dst)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self._drop_at is None or not self.rows:
+            return
+        i = self._drop_at
+        y = self.rows[i].y() if i < len(self.rows) else self.rows[-1].y() + self.rows[-1].height()
+        p = QPainter(self)
+        p.fillRect(QRectF(0, y - 1, self.width(), 2), QColor(125, 211, 252))
+        p.end()
 
     def set_tracks(self, tracks):
         for r in self.rows:
@@ -1479,6 +1525,7 @@ class Rail(QWidget):
         top.col.addWidget(self.search_box)
         top.col.addSpacing(6)
         for key, text, icon in (("home", "Home", "home"), ("explore", "Explore", "trend"),
+                                ("discover", "Moods & charts", "note"), ("dj", "DJ", "sparkle"),
                                 ("search", "Search results", "search")):
             top.col.addWidget(self._item(key, text, icon))
         self.items["search"].hide()

@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 
 from app import config
 from app.core import lyrics as lyrics_db
+from app.core import music_brain
 from app.core import music_sources
 from app.core import eq as eq_core
 from app.core import taste as taste_core
@@ -58,6 +59,7 @@ from .audio_engine import Engine, loudness
 from .music_import import ImportSheet
 from .music_onboarding import Onboarding
 from .music_panels import EqPanel, InfoPanel, QueuePanel, SidePanel
+from .music_more import MusicMore
 from .music_social_pages import SocialPages
 from .music_widgets import (
     Hero, Pill, PlayerBar, Rail, RingButton, SectionHeader, SuggestPanel, ThinSlider, TileGrid, Toast, TrackList,
@@ -190,6 +192,16 @@ class _Page(QScrollArea):
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # its room always kept, the bar drawn only when there's something to scroll. Left to come and go, it changed
+        # the page's width: at a window 1300 wide the page fitted with the bar and not without it, round and round
+        # until the stack ran out and the app died
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        bar = self.verticalScrollBar()
+        bar.rangeChanged.connect(lambda _lo, hi, b=bar: b.setStyleSheet(
+            "" if hi > 0 else "QScrollBar:vertical { background: transparent; border: none; }"
+                              "QScrollBar::handle:vertical { background: transparent; border: none; }"
+                              "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+                              "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"))
         self.setStyleSheet("QScrollArea { background: transparent; }")
         self.viewport().setAutoFillBackground(False)
         self.body = QWidget()
@@ -1053,7 +1065,7 @@ class _FullView(QWidget):
         super().keyPressEvent(event)
 
 
-class MusicTab(SocialPages, QWidget):
+class MusicTab(SocialPages, MusicMore, QWidget):
     SHOW_ONBOARDING = True   # the taste setup on first run
     RESUME_ON_START = True   # the last song back (and playing) when the app opens
     MINI_PLAYER = True       # the floating mini player while the app is out of sight
@@ -1192,6 +1204,7 @@ class MusicTab(SocialPages, QWidget):
         QTimer.singleShot(0, self._watch_window)
         # Awesome Music's people: the same account as the phone app (music_social, music_social_pages)
         self._init_social(self._corner_row)
+        self._init_more()
         if self.RESUME_ON_START:
             QTimer.singleShot(700, self._resume_last)
         if self.SHOW_ONBOARDING and self.taste.needs_onboarding():
@@ -1221,9 +1234,9 @@ class MusicTab(SocialPages, QWidget):
         stage_lay.addWidget(self.pages)
         self._pages = {}
         for key in ("home", "explore", "search", "artist", "album", "songs", "artists", "albums", "local", "queue",
-                    "mix", "playlist") + SocialPages.SOCIAL_PAGES:
+                    "mix", "playlist") + SocialPages.SOCIAL_PAGES + MusicMore.MORE_PAGES:
             page = _Page(key)
-            if key in SocialPages.SOCIAL_PAGES:
+            if key in SocialPages.SOCIAL_PAGES + MusicMore.MORE_PAGES:
                 page.hero.set_compact()
             self._pages[key] = page
             self.pages.addWidget(page)
@@ -2152,6 +2165,7 @@ class MusicTab(SocialPages, QWidget):
         self.taste.log(track, "search_play" if self._context == "search" and self._chosen else "play")
         self.taste.started(track, chosen=self._chosen)
         self.hub.playing(track)
+        self.dj_track_started(track)
 
     def _end_listen(self, natural=False):
         track, self._listen = self._listen, None
@@ -2181,10 +2195,16 @@ class MusicTab(SocialPages, QWidget):
 
         def work():
             try:
-                tracks = self.taste.autoplay(cur, exclude=exclude, n=15, chosen=chosen)
+                tracks = music_brain.value(music_brain.autoplay, cur, exclude, 15, chosen)
             except Exception:   # noqa: BLE001
-                logger.info("Up next found nothing", exc_info=True)
+                logger.info("The station found nothing", exc_info=True)
                 tracks = []
+            if not tracks:
+                try:
+                    tracks = self.taste.autoplay(cur, exclude=exclude, n=15, chosen=chosen)
+                except Exception:   # noqa: BLE001
+                    logger.info("Up next found nothing", exc_info=True)
+                    tracks = []
             self._upnext_sig.emit(gen, (token, tracks))
         threading.Thread(target=work, daemon=True).start()
 
@@ -2340,6 +2360,12 @@ class MusicTab(SocialPages, QWidget):
             self._build_account()
         elif key == "people":
             self._build_people(item)
+        elif key == "dj":
+            self._build_dj()
+        elif key == "discover":
+            self._build_discover()
+        elif key == "catalog":
+            self._build_catalog(item)
         if self.pages.currentWidget() is not page:
             self._fade_in(page)
         self.pages.setCurrentWidget(page)
@@ -2773,6 +2799,10 @@ class MusicTab(SocialPages, QWidget):
         page = self._pages["search"]
         if part == "music":
             found = value or {"top": None, "songs": [], "albums": [], "artists": []}
+            try:
+                found = music_brain.tidy_search(self._search.get("query") or "", found)  # no uploads, real albums first
+            except Exception:   # noqa: BLE001 -- as it came
+                logger.debug("Couldn't tidy the search", exc_info=True)
             self._results = found["songs"]
             self._songs_list.set_tracks(found["songs"])
             self._section_state("songs", found["songs"], err, "")
@@ -2922,6 +2952,8 @@ class MusicTab(SocialPages, QWidget):
                                                            if a["songs"] else None)
         h.add_action(self._ring("shuffle", "Shuffle", lambda: self._play_artist(a, shuffle=True)))
         h.add_action(self._save_ring(a))
+        if a.get("browse_id"):
+            h.add_action(Pill("Every song", style="outline")).clicked.connect(lambda: self.open_catalog(a))
         if a["songs"]:
             lst = self._track_list(show_album=True)
             lst.set_tracks(a["songs"])
@@ -3072,6 +3104,7 @@ class MusicTab(SocialPages, QWidget):
             page.hero.add_action(Pill("Clear", style="outline")).clicked.connect(self.clear_queue)
             page.hero.set_trio(self.queue[self.index + 1:self.index + 4], "Next")
         self.queue_list = self._track_list(in_queue=True)
+        self.queue_list.moved.connect(self.move_in_queue)
         self.queue_list.set_tracks(self.queue)
         page.add(self.queue_list)
         if not self.queue:
@@ -3084,6 +3117,19 @@ class MusicTab(SocialPages, QWidget):
         if (self.side.isVisible() and self.side.current == "queue") or self.full.is_open(self.full.queue_card):
             self._refresh_panels()
         self.rail.items["queue"].set_count(len(self.queue))
+
+    def move_in_queue(self, src, dst):
+        """A song in the queue dragged to a new place; the one playing keeps playing."""
+        if not (0 <= src < len(self.queue)) or not (0 <= dst < len(self.queue)) or src == dst:
+            return
+        playing = self.current()
+        t = self.queue.pop(src)
+        self.queue.insert(dst, dict(t, _auto=False))
+        if playing is t:
+            self.queue[dst] = t
+        self.index = next((i for i, x in enumerate(self.queue) if x.get("id") == (playing or {}).get("id")), self.index)
+        self._render_queue()
+        self._arm_next()
 
     def _shuffle_queue(self):
         cur = self.current()
@@ -3154,7 +3200,11 @@ class MusicTab(SocialPages, QWidget):
         if on:
             self.taste.log(item, "like")
         where = "Liked songs" if item.get("kind", "track") == "track" else "Your music"
-        self.status.setText(("Added to %s: %s" if on else "Removed from %s: %s") % (where, item["title"]))
+        if on:
+            self.status.setText("Added to %s: %s" % (where, item["title"]))
+        else:       # taken straight back, it returns to where it was
+            self.status.show_message("Removed from %s: %s" % (where, item["title"]),
+                                     action=("Undo", lambda: self.toggle_saved(item)), seconds=6.0)
         self._sync_saved()
         if self._here and self._here[0] in ("songs", "artists", "albums"):
             self._build_saved(self._here[0])
