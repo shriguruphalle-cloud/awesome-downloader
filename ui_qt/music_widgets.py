@@ -892,9 +892,9 @@ class Tile(QWidget):
         if it.get("kind") == "mix":
             return it.get("subtitle") or ""
         kind = it.get("type") or ("Live show" if it.get("source") == "archive" else "Album")
-        bits = [kind if it.get("source") != "archive" else "", it.get("year") or "", it.get("artist") or ""]
+        bits = [kind if it.get("source") != "archive" else "", str(it.get("year") or ""), it.get("artist") or ""]
         if it.get("source") == "archive":
-            bits = [it.get("artist") or "Internet Archive", it.get("year") or ""]
+            bits = [it.get("artist") or "Internet Archive", str(it.get("year") or "")]
         return " · ".join(b for b in bits if b)
 
     def _paint_mood(self, p, r):
@@ -1233,7 +1233,7 @@ class Hero(QWidget):
                        _elide(t.get("album") or t.get("artist") or "", sf, col_w))
             p.setPen(look.TEXT_3)
             p.drawText(QRectF(cx, y + 37, col_w, 16), int(Qt.AlignmentFlag.AlignVCenter),
-                       t.get("year") or (format_eta(t["duration"]) if t.get("duration") else ""))
+                       str(t.get("year") or "") or (format_eta(t["duration"]) if t.get("duration") else ""))
             self._trio_hits.append((QRectF(cx, y - 2, col_w, 58), t))
 
     def mouseMoveEvent(self, e):
