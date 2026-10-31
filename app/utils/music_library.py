@@ -14,7 +14,7 @@ logger = get_logger("music_library")
 
 PATH = os.path.join(config.APPDATA_DIR, "music_library.json")
 KINDS = ("songs", "albums", "artists")
-RECENT_MAX = 40
+RECENT_MAX = 250                   # the last 250 songs played (about 175 KB, synced as one item)
 _KEEP = ("kind", "id", "title", "artist", "duration", "artwork", "source", "page_url", "ext", "license",
          "license_url", "attribution", "album", "album_browse", "artist_browse", "year", "album_id",
          "browse_id", "type", "subtitle")
@@ -64,17 +64,54 @@ def is_saved(item):
     return any(x["id"] == item["id"] for x in _load()[_bucket(item)])
 
 
+_let_go = (None, 0)      # the last one un-saved, and where it was
+
+
 def toggle(item):
     """Saves `item`, or un-saves it if it was saved. Returns whether it's saved now."""
+    global _let_go
     items = _load()[_bucket(item)]
     for i, x in enumerate(items):
         if x["id"] == item["id"]:
             del items[i]
+            _let_go = (item["id"], i)
             _save()
             return False
-    items.insert(0, slim(item))
+    # taken straight back (Undo): where it was, not at the top as a new one
+    at = _let_go[1] if _let_go[0] == item["id"] else 0
+    _let_go = (None, 0)
+    items.insert(min(at, len(items)), slim(item))
     _save()
     return True
+
+
+def save_many(items):
+    """Saves each of `items` (the first ends up lowest, as if saved first) that isn't saved yet, writing the file once:
+    a thousand songs one by one would rewrite it a thousand times. Returns how many were new."""
+    state = _load()
+    have = {}
+    added = 0
+    for item in items:
+        kind = _bucket(item)
+        known = have.setdefault(kind, {x["id"] for x in state[kind]})
+        if item.get("id") and item["id"] not in known:
+            known.add(item["id"])
+            state[kind].insert(0, slim(item))
+            added += 1
+    if added:
+        _save()
+    return added
+
+
+def merge_playlist(title, tracks, source="", artwork=None):
+    """The playlist called `title` with `tracks` added (those it hasn't got), or a new one."""
+    for p in _load().setdefault("playlists", []):
+        if p.get("title") == title:
+            known = {t.get("id") for t in p.get("tracks") or []}
+            p.setdefault("tracks", []).extend(slim(t) for t in tracks if t.get("id") not in known)
+            _save()
+            return dict(p)
+    return create_playlist(title, tracks, source=source, artwork=artwork)
 
 
 def add_recent(track):

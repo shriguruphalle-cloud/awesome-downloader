@@ -136,8 +136,8 @@ playlist_import._get = lambda url, timeout=20: (
 sp = playlist_import.read("https://open.spotify.com/playlist/abc123")
 check(sp["title"] == "Made Up List" and [i["title"] for i in sp["items"]] == ["Song One", "Song Two"],
       "a Spotify playlist read wrong: %r" % sp)
-ytmusic.search = lambda q: {"songs": [ms._track(id="yt:m%s" % q[:3].replace(" ", ""), title=q.split(" Band")[0],
-                                                artist="Band", source="youtube")], "albums": [], "artists": []}
+ytmusic.search_songs = lambda q: [ms._track(id="yt:m%s" % q[:3].replace(" ", ""), title=q.split(" Band")[0],
+                                           artist="Band", source="youtube")]
 matched = playlist_import.match(sp["items"])
 check([m["title"] for m in matched] == ["Song One", "Song Two"], "matching: %r" % matched)
 got = []

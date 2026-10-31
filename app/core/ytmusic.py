@@ -42,7 +42,7 @@ FILTERS = {
 ARTIST, ALBUM = "MUSIC_PAGE_TYPE_ARTIST", "MUSIC_PAGE_TYPE_ALBUM"
 _DURATION = re.compile(r"^\d{1,2}(:\d{2}){1,2}$")
 _YEAR = re.compile(r"^(19|20)\d{2}$")
-_SIZE = re.compile(r"=(w\d+-h\d+|s\d+)(?=[-a-z0-9]*$)")
+_SIZE = re.compile(r"=(w\d+-h\d+|s\d+)(?=[-A-Za-z0-9_]*$)")
 
 
 class YTMusicError(Exception):
@@ -283,6 +283,22 @@ def _songs_from(data):
     return out
 
 
+def search_songs(query):
+    """Only the songs a search finds -- one request, not search()'s four (matching an imported list, song by song)."""
+    query = (query or "").strip()
+    if not query:
+        return []
+    return [t for t in _songs_from(_post("search", {"query": query, "params": FILTERS["songs"]})) if t]
+
+
+def search_artists(query):
+    """Only the artists a search finds -- one request, not search()'s four (the taste picker's searches)."""
+    query = (query or "").strip()
+    if not query:
+        return []
+    return _rows_from(_post("search", {"query": query, "params": FILTERS["artists"]}), _artist_from_row)
+
+
 def _rows_from(data, make):
     out = []
     for shelf in _walk(data, "musicShelfRenderer"):
@@ -385,6 +401,8 @@ def suggestions(text):
             x = _album_from_row(r)
         elif not bid and _first(r, "videoId"):
             x = _song(r)
+            if x and UPLOAD_TITLE.search(x.get("title") or ""):
+                x = None            # a video upload, not a song
         else:
             x = None                # playlists: not opened here
         if x:
@@ -432,6 +450,60 @@ def artist(browse_id):
     years = {a["title"]: a["year"] for a in out["albums"] + out["singles"] if a.get("year")}
     for t in out["songs"]:
         t["year"] = t.get("year") or years.get(t.get("album"), "")
+    return out
+
+
+def artist_releases(browse_id):
+    """Every album and every single / EP an artist's page lists (its "more" pages, not the ten on the page itself),
+    each with its year and type: {"albums": [...], "singles": [...]}."""
+    data = _post("browse", {"browseId": browse_id})
+    header = data.get("header") or {}
+    out = {"albums": [], "singles": [], "name": _text((next(iter(header.values()), {}) if header else {}).get("title"))}
+    shelves = {}
+    for car in _walk(data.get("contents") or {}, "musicCarouselShelfRenderer"):
+        hd = car.get("header") or {}
+        head = _text(_first(hd, "title") or {}).lower()
+        key = "albums" if head.startswith("albums") else "singles" if head.startswith("singles") else None
+        if key:
+            shelves[key] = ([x for x in (_two_row(c.get("musicTwoRowItemRenderer") or {}) for c in car.get("contents") or []) if x],
+                            _first(hd, "browseEndpoint"))
+
+    def full(item):
+        key, (shown, more) = item
+        if more and more.get("browseId"):
+            try:
+                page = _post("browse", {"browseId": more["browseId"], "params": more.get("params")})
+                got = [x for x in (_two_row(c.get("musicTwoRowItemRenderer") or {})
+                                   for g in _walk(page, "gridRenderer") for c in g.get("items") or []) if x]
+                if got:
+                    shown = got
+            except YTMusicError:
+                pass
+        return key, [x for x in shown if x.get("kind") == "album"]
+    # the albums' and the singles' full lists at once
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="ytm-releases") as pool:
+        out.update(dict(pool.map(full, shelves.items())))
+    return out
+
+
+def search_albums(query, pages=15):
+    """Every album a search finds, page after page (an artist's page lists only its latest hundred: the search
+    reaches back to the first ones)."""
+    data = _post("search", {"query": query, "params": FILTERS["albums"]})
+    out = _rows_from(data, _album_from_row)
+    tok = next(iter(_walk(data, "nextContinuationData")), {}).get("continuation")
+    for _ in range(pages - 1):
+        if not tok:
+            break
+        try:
+            r = _post("search?ctoken=%s&continuation=%s&type=next" % (tok, tok), {})
+        except YTMusicError:
+            break
+        cc = r.get("continuationContents") or {}
+        rows = [_album_from_row(c["musicResponsiveListItemRenderer"])
+                for c in (next(iter(cc.values()), {}).get("contents") or []) if "musicResponsiveListItemRenderer" in c]
+        out += [x for x in rows if x]
+        tok = next(iter(_walk(cc, "nextContinuationData")), {}).get("continuation")
     return out
 
 
@@ -500,7 +572,15 @@ def radio_full(video_id, tune=None):
         we = _first(c.get("navigationEndpoint") or {}, "watchEndpoint")
         if label and we and we.get("playlistId") and label.lower() not in _PLAIN_CHIPS:
             chips[label] = {"playlistId": we["playlistId"], "params": we.get("params")}
-    return {"tracks": _queue_tracks(data), "chips": chips}
+    tracks = _queue_tracks(data)
+    # the song itself first, then what's like it -- minus video uploads ("Video | ...", "Full Video", #tags)
+    return {"tracks": tracks[:1] + [t for t in tracks[1:] if not UPLOAD_TITLE.search(t.get("title") or "")], "chips": chips}
+
+
+# A video upload's title rather than a song's ("Video | Song...", "Song | Singer | Film", "Full Video", "(Official
+# Music Video)", #tags, "Lyrical", "Status"): kept out of what's suggested (bridge.looks_like_upload uses it too)
+UPLOAD_TITLE = re.compile(r"(^\s*(full\s+)?video\b|\|\s*\S|\bfull\s+(video|song)\b|\bofficial\s+(music\s+)?video\b|"
+                          r"\bvideo\s+song\b|#\w|\blyrical\b|\bjukebox\b|\bstatus\b|\bteaser\b|\btrailer\b|\bpromo\b)", re.I)
 
 
 def radio(video_id):
