@@ -73,6 +73,7 @@ class Hub(QObject):
     """You and your people, kept up to date while you're signed in."""
     changed = Signal()               # people / chats / jams
     library_changed = Signal()       # the phone's likes or playlists arrived
+    synced = Signal()                # a sync ended, well or not
     notify = Signal(str, str, object)    # title, text, what to open (("chat", chat) | ("profile", handle) | None)
     account_changed = Signal()       # signed in or out, or your profile changed
     toast = Signal(str)
@@ -228,6 +229,7 @@ class Hub(QObject):
             self.synced_at, self.sync_error = time.time(), None
             if changed:
                 self.library_changed.emit()
+            self.synced.emit()
             if self._sync_again:
                 self._sync_again = False
                 self.sync_soon()
@@ -235,6 +237,7 @@ class Hub(QObject):
         def fail(e):
             self._syncing = False
             self.sync_error = str(e)
+            self.synced.emit()
         self.run(lambda: social.sync_library(self.taste), ok, fail)
 
     def sync_soon(self):
@@ -1080,9 +1083,9 @@ class SignInCard(Glass):
     def _step_email(self):
         self._step = "email"
         self.title.setText("Sign in to Awesome Music")
-        self.sub.setText("One account on your phone and this PC: follow friends, see what they're playing, "
-                         "share songs in chats and listen together in jams. We'll email you a 4-digit code — "
-                         "no password.")
+        self.sub.setText("One account on your phone and this PC: your likes, playlists and history stay the same "
+                         "on both, and you can follow friends, chat and listen together. We'll email you a 4-digit "
+                         "code — no password.")
         self.field.edit.setPlaceholderText("Your email")
         self.field.edit.setMaxLength(254)
         self.field.edit.setText(self.email)

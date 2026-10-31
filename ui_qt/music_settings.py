@@ -97,6 +97,12 @@ class MusicSettings(GlassSheet):
 
     def _build(self):
         t, st = self.tab, self.tab.settings or {}
+        self._section("Account")
+        signed = t.hub.signed_in()
+        self._row("Your phone and this PC",
+                  "Signed in: your likes, playlists and history stay the same on both." if signed else
+                  "Sign in with the email you use on your phone to keep your library the same on both.",
+                  self._pill("Your profile" if signed else "Sign in", lambda: (self.hide(), t.go("account"))))
         self._section("Playback")
         blend_s = float(st.get("music_blend_s", t.BLEND_S))
         self.blend_value = _text("%d s" % blend_s if blend_s else "Off", 13, QFont.Weight.DemiBold, 200)

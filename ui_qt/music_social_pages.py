@@ -73,10 +73,18 @@ class SocialPages:
         self._chat_seen = set()
         self._chat_members = {}
         self._social_lists = {}
+        self.hub.synced.connect(self._show_account_row)
+        self._show_account_row()
+        # "Synced 3 min" stays true without a sync to say so
+        self._account_timer = QTimer(self)
+        self._account_timer.setInterval(60_000)
+        self._account_timer.timeout.connect(self._show_account_row)
+        self._account_timer.start()
         self.hub.start()
 
     # ---- the phone's library arrived ----
     def _library_arrived(self):
+        self.status.setText("Your library is in step with your phone.")
         self._sync_saved()
         self._sync_rail()
         here = self._here[0] if self._here else None
@@ -141,7 +149,24 @@ class SocialPages:
         elif here == "chat":
             self._show_seen()
 
+    def _show_account_row(self):
+        """The rail's account row: an invitation to sign in, or who you are and when the library last synced."""
+        hb = self.hub
+        me = hb.me if hb.signed_in() else None
+        if not me:
+            self.rail.account_item.set_lines("Sign in", "Sync with your phone")
+            return
+        if hb.sync_error:
+            sub = "Couldn't sync — open to retry"
+        elif hb.synced_at:
+            sub = "Synced %s" % when(int(hb.synced_at * 1000))
+        else:
+            sub = "Syncing with your phone…"
+        self.rail.account_item.set_lines(label_of(me) if (me.get("name") or me.get("handle")) else me.get("email", "You"),
+                                         sub)
+
     def _social_account(self):
+        self._show_account_row()
         here = self._here[0] if self._here else None
         if here in ("friends", "chats", "account"):
             self.go(here, None, push=False)
@@ -152,7 +177,8 @@ class SocialPages:
 
     def _need_sign_in(self, page, what):
         """Signed out: the page is the sign-in card."""
-        page.hero.set_text("Awesome Music", what, "Sign in with your email — the same account as on your phone.")
+        page.hero.set_text("Awesome Music", what, "Sign in with the email you use on your phone: your likes, playlists "
+                                                  "and history come over, and stay the same on both.")
         card = SignInCard(self.hub)
         card.done.connect(lambda: self.go(self._here[0] if self._here else "friends", None, push=False))
         holder = QWidget()
@@ -752,7 +778,7 @@ class SocialPages:
         page.clear()
         page.art_url = None
         if not self.hub.signed_in():
-            self._need_sign_in(page, "Your profile")
+            self._need_sign_in(page, "Sign in")
             return
         me = self.hub.me or {}
         page.hero.set_text("Your profile", label_of(me), me.get("email", ""))

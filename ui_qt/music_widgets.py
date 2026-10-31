@@ -1158,6 +1158,11 @@ class NavItem(QAbstractButton):
         self.count = str(n) if n else ""
         self.update()
 
+    def set_lines(self, text, sub):
+        self.setText(text)
+        self.sub = sub
+        self.update()
+
     def enterEvent(self, e):
         self._over = True
         self._fade.start()
@@ -1478,7 +1483,13 @@ class Rail(QWidget):
             top.col.addWidget(self._item(key, text, icon))
         self.items["search"].hide()
         self.col.addWidget(top)
-        self.col.addSpacing(12)
+        self.col.addSpacing(8)
+        # you: signing in keeps this PC and your phone the same
+        self.account_item = NavItem("account", "Sign in", sub="Sync with your phone", icon="person")
+        self.account_item.clicked.connect(lambda _c=False: self.navigate.emit("account"))
+        self.items["account"] = self.account_item
+        self.col.addWidget(self.account_item)
+        self.col.addSpacing(8)
 
         # your library
         self.col.addWidget(_RailLabel("Your library"))
