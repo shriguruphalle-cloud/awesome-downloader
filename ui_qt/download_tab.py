@@ -13,10 +13,11 @@ HTTP, or file I/O -- the tab that actually runs a download (video_tab.py,
 browser_tab.py) keeps that logic and its own small per-job "cancel" flag,
 and just calls into this tab to reflect progress.
 """
-from PySide6.QtCore import QTimer, Signal
-from PySide6.QtWidgets import QFrame, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from .widgets import DownloadCard, EmptyState, centered_column
+from .widgets.button import Button
 from . import motion
 
 # Past this width a list of cards stops reading as a list and starts reading
@@ -42,6 +43,7 @@ class DownloadTab(QWidget):
         super().__init__(parent)
         self.settings = settings
         self._cards = {}
+        self._active = set()        # jobs still running or waiting -- what "Cancel all" stops
         self._job_counter = 0
         self._build_ui()
 
@@ -56,6 +58,25 @@ class DownloadTab(QWidget):
             "Fetch a video in the Video tab, or use the download button in the "
             "Browser. Every download shows up here, wherever it started.")
         root.addWidget(self.empty_label, 1)
+
+        # Over the list while anything is running: how many, and Cancel all
+        self.header = QWidget()
+        self.header.setObjectName("downloadHeader")
+        self.header.setStyleSheet("#downloadHeader { background: transparent; }")
+        head = QHBoxLayout(self.header)
+        head.setContentsMargins(4, 0, 4, 0)
+        self.count_label = QLabel("")
+        self.count_label.setObjectName("downloadCount")
+        head.addWidget(self.count_label)
+        head.addStretch(1)
+        self.cancel_all_btn = Button("Cancel all")
+        self.cancel_all_btn.setObjectName("historyPlain")
+        self.cancel_all_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_all_btn.setToolTip("Stop every download that's running or waiting, music included")
+        self.cancel_all_btn.clicked.connect(self.cancel_all)
+        head.addWidget(self.cancel_all_btn)
+        self.header.setVisible(False)
+        root.addWidget(self.header)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -111,6 +132,8 @@ class DownloadTab(QWidget):
         self._list_layout.insertWidget(0, card)
         motion.grow_in(card)
         self._cards[job_id] = card
+        self._active.add(job_id)
+        self._sync_header()
         self.empty_label.setVisible(False)
         self._scroll.setVisible(True)
         self.job_started.emit()
@@ -136,7 +159,28 @@ class DownloadTab(QWidget):
         if card:
             card.set_playable(playable)
 
+    def _finished(self, job_id):
+        self._active.discard(job_id)
+        self._sync_header()
+
+    def _sync_header(self):
+        n = len(self._active)
+        self.header.setVisible(n > 0)
+        self.count_label.setText("1 download" if n == 1 else "%d downloads" % n)
+
+    def active_jobs(self):
+        return sorted(self._active)
+
+    def cancel_all(self):
+        """Cancels every download still running or waiting -- each through
+        its own card's Cancel, so each tab stops its own work the usual way."""
+        for job_id in list(self._active):
+            card = self._cards.get(job_id)
+            if card is not None and card.cancel_btn.isEnabled() and card.cancel_btn.text() == "Cancel":
+                card._handle_cancel()
+
     def mark_done(self, job_id, text="✓ Completed", delay_ms=4000):
+        self._finished(job_id)
         card = self._cards.get(job_id)
         if card:
             card.set_complete(text)
@@ -144,6 +188,7 @@ class DownloadTab(QWidget):
         self.job_finished.emit()
 
     def mark_cancelled(self, job_id, text="Cancelled.", delay_ms=1500):
+        self._finished(job_id)
         card = self._cards.get(job_id)
         if card:
             card.set_failed(text)
@@ -156,6 +201,7 @@ class DownloadTab(QWidget):
         and with several downloads running an auto-vanishing failure card
         would be easy to miss. The card's own button becomes "Dismiss" so
         it can be cleared once it's been seen."""
+        self._finished(job_id)
         card = self._cards.get(job_id)
         if not card:
             return
@@ -165,11 +211,15 @@ class DownloadTab(QWidget):
         self.job_finished.emit()
 
     def reset_for_retry(self, job_id):
+        if job_id in self._cards:
+            self._active.add(job_id)
+            self._sync_header()
         card = self._cards.get(job_id)
         if card:
             card.reset_for_retry()
 
     def remove_job(self, job_id):
+        self._finished(job_id)
         card = self._cards.pop(job_id, None)
         if card:
             self._remove_card(card)

@@ -416,6 +416,16 @@ def _lock_for(vid):
         return _fetch_locks.setdefault(vid, threading.Lock())
 
 
+try:
+    from yt_dlp.utils import DownloadCancelled as _CancelBase   # yt-dlp lets a progress hook stop it with this
+except Exception:   # noqa: BLE001
+    _CancelBase = Exception
+
+
+class Cancelled(_CancelBase):
+    """A song's download stopped by the user (Cancel, or Cancel all)."""
+
+
 def cache_audio(track, progress=None, cookies=False):
     """Fetches a YouTube song's audio to the app's cache and returns the
     file. Anonymous unless `cookies` (the Browser tab's sign-in, for a song
@@ -451,10 +461,14 @@ def fetch_song(track, progress=None):
     with the Browser tab's only if YouTube won't give it otherwise."""
     try:
         return cache_audio(track, progress)
+    except Cancelled:
+        raise
     except Exception as first:   # noqa: BLE001
         logger.info("Fetching %s signed out failed (%s); trying the sign-in", track.get("id"), _short(first))
         try:
             return cache_audio(track, progress, cookies=True)
+        except Cancelled:
+            raise
         except Exception as second:   # noqa: BLE001
             raise MusicError(friendly(second if "sign in" in str(second).lower() else first)) from second
 
@@ -509,17 +523,29 @@ def _safe_name(text):
     return clean[:120] or "track"
 
 
-def download(track, folder, progress=None):
+def download(track, folder, progress=None, cancelled=None):
     """Saves `track` into `folder` and returns the file's path. YouTube goes
     through the same audio download as the Video tab (MP3, 320 kbps); the
-    open libraries' files are saved as they are."""
+    open libraries' files are saved as they are. `cancelled()` -> True stops
+    it (raising Cancelled) at the next chunk, and before the MP3 is made."""
     from ..utils import download_history
     os.makedirs(folder, exist_ok=True)
+
+    def check():
+        if cancelled is not None and cancelled():
+            raise Cancelled("Cancelled")
+
+    def tick(got, total):
+        check()
+        if progress:
+            progress(got, total)
+    check()
     name = _safe_name("%s - %s" % (track["artist"], track["title"]) if track["artist"] else track["title"])
     if track["source"] == "youtube":
         # the same fetch that plays it (often already in the cache), signed out
         # first: a signed-in fetch is what gets "The page needs to be reloaded"
-        src = fetch_song(track, progress)
+        src = fetch_song(track, tick)
+        check()
         path = _save_audio(src, folder, name, track)
     elif track["source"] == "local":
         return track["stream"]
@@ -533,17 +559,21 @@ def download(track, folder, progress=None):
             n += 1
         req = urllib.request.Request(url, headers=UA)
         tmp = path + ".part"
-        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
-            total = int(resp.headers.get("Content-Length") or 0)
-            got = 0
-            while True:
-                chunk = resp.read(256 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-                got += len(chunk)
-                if progress:
-                    progress(got, total)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
+                total = int(resp.headers.get("Content-Length") or 0)
+                got = 0
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+                    tick(got, total)
+        except Cancelled:
+            if os.path.exists(tmp):
+                os.remove(tmp)            # nothing half-saved left behind
+            raise
         os.replace(tmp, path)
         if track.get("attribution"):
             # the licence asks for credit: kept beside the song

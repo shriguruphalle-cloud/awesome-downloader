@@ -8,7 +8,9 @@ glue changed.
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from glob import escape as glob_escape, glob
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QLinearGradient, QPainter, QPen, QPixmap
@@ -97,6 +99,32 @@ def _close_glyph(color, size=10):
     painter.end()
     return QIcon(pixmap)
 
+
+
+def _remove_partials(job, finished_too=False):
+    """Deletes what a cancelled download wrote: its .part file, yt-dlp's
+    .ytdl note and the fragments of a streamed video -- and, once its thread
+    has ended (finished_too), a file it completed after all. Files the
+    thread still has open are skipped quietly; the thread's own clean-up,
+    when it ends, gets them."""
+    path = job.get("path")
+    if not path:
+        return
+    folder = os.path.dirname(path)
+    stem = os.path.basename(path)
+    if stem.endswith(".part"):
+        stem = stem[:-5]
+    # "Title.f137.mp4" (one stream of a video yet to be merged) or "Title.mp4" -> "Title."
+    m = re.match(r"(.+?)\.f\d+\.[^.]+$", stem)
+    stem = (m.group(1) if m else os.path.splitext(stem)[0]) + "."
+    for f in glob(os.path.join(glob_escape(folder), glob_escape(stem) + "*")):
+        name = os.path.basename(f)
+        partial = name.endswith((".part", ".ytdl")) or ".part-Frag" in name or ".temp." in name
+        if partial or (finished_too and f == path):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 class _QueueCard(QFrame):
     """One stacked link, as a card with a thumbnail.
@@ -2049,6 +2077,17 @@ class VideoTab(QWidget):
             # and never reaches the cancel check that would raise
             # DownloadCancelled and let the thread exit.
             job["pause_event"].set()
+            # Done on screen now, not when the thread next looks: a download
+            # stuck waiting on a server that has stopped sending doesn't look
+            # for minutes, and its card sat on "Cancelling..." all that while
+            # (reported). Its slot is free, its card goes, and what it wrote
+            # so far is deleted -- again when the thread finally ends, for
+            # anything it wrote in between.
+            if not job["finished"]:
+                job["finished"] = True
+                self._release_slot(job_id)
+                self.download_tab.mark_cancelled(job_id, delay_ms=600)
+            _remove_partials(job)
 
     def _toggle_pause(self, job_id, paused):
         job = self._jobs.get(job_id)
@@ -2082,7 +2121,29 @@ class VideoTab(QWidget):
             self._waiting.append((job_id, fn, args))
             self._refresh_waiting_positions()
 
+    def _watch_stalls(self):
+        """A running download that has heard nothing from the site for a
+        while says so on its card, instead of sitting on "Starting..." (a
+        server that stops sending gives no error for minutes: yt-dlp waits
+        and retries quietly)."""
+        now = time.monotonic()
+        for job_id in list(self._running):
+            job = self._jobs.get(job_id)
+            if not job or job["finished"] or job["cancel"] or not job["pause_event"].is_set():
+                continue
+            quiet = now - job.get("last_progress", now)
+            if quiet >= 20:
+                job["stalled"] = True
+                self.download_tab.update_progress(
+                    job_id, None, "The site's server has stopped sending (%ds) -- still trying. "
+                                  "Cancel to give up." % int(quiet))
+
     def _start_thread(self, job_id, fn, args):
+        if not hasattr(self, "_stall_timer"):
+            self._stall_timer = QTimer(self)
+            self._stall_timer.setInterval(5000)
+            self._stall_timer.timeout.connect(self._watch_stalls)
+            self._stall_timer.start()
         self._running.add(job_id)
         self.download_tab.set_started(job_id)
         threading.Thread(target=fn, args=args, daemon=True).start()
@@ -2174,6 +2235,8 @@ class VideoTab(QWidget):
         job["pause_event"].wait()
         if job["cancel"]:
             raise downloader.DownloadCancelled("Cancelled by user")
+        job["last_progress"] = time.monotonic()
+        job.pop("stalled", None)
 
         # yt-dlp's own hook dict carries the real destination path once it's
         # known -- tmpfilename while a .part file is still being written,
@@ -2236,6 +2299,17 @@ class VideoTab(QWidget):
         # to download without them.
         cookies = self._cookies_from_browser()
         name = (self._jobs.get(job_id) or {}).get("title")
+        job = self._jobs.get(job_id) or {}
+        job["last_progress"] = time.monotonic()
+        try:
+            self._run_download(job_id, url, save_dir, mode, height, container, bitrate, time_range,
+                               hook, cookies, name)
+        finally:
+            if job.get("cancel"):
+                _remove_partials(job, finished_too=True)
+
+    def _run_download(self, job_id, url, save_dir, mode, height, container, bitrate, time_range,
+                      hook, cookies, name):
         try:
             if mode == "audio":
                 _, final_path, used_fallback = downloader.download_audio(
@@ -2270,8 +2344,8 @@ class VideoTab(QWidget):
 
     def _on_download_done(self, job_id, warning, kind, final_path):
         job = self._jobs.get(job_id)
-        if job is None:
-            return
+        if job is None or job["cancel"]:
+            return          # cancelled: already off the screen, its files removed by the thread
         job["finished"] = True
         self._release_slot(job_id)
         save_dir = job["save_dir"]
@@ -2317,8 +2391,8 @@ class VideoTab(QWidget):
 
     def _on_download_error(self, job_id, err):
         job = self._jobs.get(job_id)
-        if job is None:
-            return
+        if job is None or job["cancel"]:
+            return          # cancelled: already off the screen
         job["finished"] = True
         self._release_slot(job_id)
         cancelled = job["cancel"]

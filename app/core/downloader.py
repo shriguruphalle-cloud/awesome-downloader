@@ -1084,6 +1084,10 @@ def download_audio(url, save_dir, bitrate, progress_hook, time_range=None, cooki
     opts = {
         **base_ydl_opts(cookies_from_browser, url),
         **range_ydl_opts(time_range),
+        # its retries and warnings into the app's log: a download that stalls on a server that has
+        # stopped sending otherwise leaves no trace at all
+        "logger": _YdlLog(url),
+        "no_warnings": False,
         "format": "bestaudio/best",
         "outtmpl": outtmpl,
         "progress_hooks": [progress_hook],
@@ -1118,6 +1122,10 @@ def download_video(url, save_dir, height, progress_hook, time_range=None, cookie
     opts = {
         **base_ydl_opts(cookies_from_browser, url),
         **range_ydl_opts(time_range),
+        # its retries and warnings into the app's log: a download that stalls on a server that has
+        # stopped sending otherwise leaves no trace at all
+        "logger": _YdlLog(url),
+        "no_warnings": False,
         "format": fmt,
         "format_sort": VIDEO_FORMAT_SORT,
         "outtmpl": outtmpl,

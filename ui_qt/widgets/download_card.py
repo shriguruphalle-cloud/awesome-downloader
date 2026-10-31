@@ -180,9 +180,11 @@ class DownloadCard(_PaintedCard):
 
     # ----------------------------------------------------------- progress ---
     def set_progress(self, pct, detail):
-        self.progress_bar.setValue(int(max(0.0, min(100.0, pct))))
-        self.progress_bar.set_animating(True)
-        self.pct_label.setText(f"{pct:.0f}%")
+        """`pct` None: only the words change (a note while nothing arrives)."""
+        if pct is not None:
+            self.progress_bar.setValue(int(max(0.0, min(100.0, pct))))
+            self.progress_bar.set_animating(True)
+            self.pct_label.setText(f"{pct:.0f}%")
         if detail:
             self.detail_label.setText(detail)
 
