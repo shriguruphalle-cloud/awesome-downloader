@@ -489,7 +489,6 @@ class BrowserTab(QWidget):
         self._tabs = []
         # Tabs in the order they were last used: closing one goes back to
         # the one used before it, as in Chrome and Edge.
-        self._recent = []
         self._cur = None
         self._closed = []
         self._page_fullscreen = False
@@ -829,7 +828,7 @@ class BrowserTab(QWidget):
         view.contextMenuRequested.connect(lambda args, t=tab: self._on_context_menu(t, args))
         view.acceleratorKey.connect(lambda args, t=tab: self._on_accelerator(t, args))
         view.externalUri.connect(lambda args, t=tab: self._on_external_uri(t, args))
-        view.windowCloseRequested.connect(lambda t=tab: QTimer.singleShot(0, lambda: self._close(t)))
+        view.windowCloseRequested.connect(lambda t=tab: QTimer.singleShot(0, lambda: self._close(t, to_opener=True)))
         view.processFailed.connect(lambda kind, t=tab: self._on_process_failed(t, kind))
         if tab.private:
             view.created.connect(lambda v=view, t=tab: self._block_in_private(v, t))
@@ -919,7 +918,6 @@ class BrowserTab(QWidget):
     def _switch_to(self, tab):
         if tab not in self._tabs:
             return
-        self._recent = [t for t in self._recent if t is not tab and t in self._tabs] + [tab]
         prev = self._current()
         if prev is not None and prev is not tab:
             prev.pill.set_active(False)
@@ -972,7 +970,7 @@ class BrowserTab(QWidget):
             self.pages.setCurrentWidget(self.home.surface())
             self._apply_home_backdrop()
 
-    def _close(self, tab, record=True):
+    def _close(self, tab, record=True, to_opener=False):
         if tab not in self._tabs:
             return
         if len(self._tabs) == 1:
@@ -991,13 +989,11 @@ class BrowserTab(QWidget):
             view.close_page()
             self.pages.removeWidget(view)
             view.deleteLater()
-        self._recent = [t for t in self._recent if t is not tab]
         if was_current:
-            # back to the tab used before this one; failing that, the one
-            # that opened it, then its neighbour
-            target = next((t for t in reversed(self._recent) if t in self._tabs), None)
-            if target is None:
-                target = tab.opener if tab.opener in self._tabs else self._tabs[min(idx, len(self._tabs) - 1)]
+            # the tab beside it: the one on its right, or on its left if it was the last
+            target = self._tabs[min(idx, len(self._tabs) - 1)]
+            if to_opener and tab.opener in self._tabs:
+                target = tab.opener
             self._cur = None
             self._switch_to(target)
         self._update_now_playing()
@@ -1106,9 +1102,8 @@ class BrowserTab(QWidget):
             show_toast(self.pages, "Sign in on this page, then fetch the link again", kind="info", ms=6000)
 
     def _open_link(self, opener, url, background):
-        index = self._tabs.index(opener) + 1 if opener in self._tabs else None
         return self._create_tab(url=url, activate=not background, private=opener.private if opener else False,
-                                index=index, opener=opener)
+                                opener=opener)
 
     def go_back(self):
         tab = self._current()
@@ -1373,8 +1368,7 @@ class BrowserTab(QWidget):
                        on_action=lambda: self._open_link(opener, uri, background=False), kind="warning")
             return
         deferral = args.GetDeferral()
-        index = self._tabs.index(opener) + 1 if opener in self._tabs else None
-        tab = self._create_tab(activate=True, private=opener.private, index=index, opener=opener)
+        tab = self._create_tab(activate=True, private=opener.private, opener=opener)
         view = self._ensure_view(tab)
         if view is None:
             deferral.Complete()

@@ -258,7 +258,8 @@ n = len(bt._tabs)
 js(tab.view, "document.getElementById('bg').dispatchEvent("
              "new MouseEvent('auxclick',{button:1,bubbles:true,cancelable:true})); 1")
 check(wait(lambda: len(bt._tabs) == n + 1, 5), "middle-click didn't open a tab")
-bg = bt._tabs[bt._tabs.index(tab) + 1]
+bg = bt._tabs[-1]
+check(bg.pending_url == BASE + "/other.html", "a link's new tab didn't open last")
 check(bt._current() is tab, "the background tab took focus")
 check(bg.view is None and bg.pending_url == BASE + "/other.html", "the background tab loaded early")
 bt._switch_to(bg)
@@ -281,6 +282,21 @@ check(js(pop.view, "window.__opener") is True, "the pop-up lost its opener")
 js(pop.view, "window.close(); 1")
 check(wait(lambda: pop not in bt._tabs, 5), "window.close() didn't close the tab")
 check(bt._current() is tab, "window.close() didn't go back to the opener")
+
+# ---- closing the tab in view: the one beside it, as in Chrome ----------------------
+one = bt._create_tab(activate=True)
+two = bt._create_tab(activate=True)
+three = bt._create_tab(activate=True)
+check(bt._tabs[-3:] == [one, two, three], "new tabs didn't open last")
+bt._switch_to(tab)                  # used most recently, and it must not be where closing goes
+bt._switch_to(two)
+bt._close(two)
+check(bt._current() is three, "closing a tab didn't go to the one on its right")
+bt._close(three)
+check(bt._current() is one, "closing the last tab didn't go to the one on its left")
+bt._switch_to(tab)
+bt._close(one)
+check(bt._current() is tab, "closing a tab out of view changed the one in view")
 
 # ---- magnet links ----------------------------------------------------------------
 js(tab.view, "document.getElementById('mag').click(); 1")
