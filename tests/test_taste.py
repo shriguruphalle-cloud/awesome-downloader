@@ -138,9 +138,9 @@ home = mt._pages["home"]
 titles = [w.title for w in home.sections.findChildren(type(home.sections)) if hasattr(w, "title")]
 from ui_qt.music_widgets import SectionHeader  # noqa: E402
 labels = [h.title for h in home.sections.findChildren(SectionHeader)]
-check("Your Daily Mixes" in labels and "Discover for you" in labels and "New from your artists" in labels,
+check("Made for you" in labels and "Recommended for you" in labels and "New from your artists" in labels,
       "the home page doesn't show the feed: %r" % labels)
-check(home.hero.title == "Daily Mix 1", "the home header isn't the first Daily Mix: %r" % home.hero.title)
+check(home.hero.title.startswith("Good "), "the home header isn't the greeting: %r" % home.hero.title)
 check(took < 150, "the home page took %.0f ms to show the feed" % took)
 print("the home page shows the feed in %.0f ms (under 150)" % took)
 

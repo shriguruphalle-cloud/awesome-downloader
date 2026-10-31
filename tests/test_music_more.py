@@ -104,7 +104,7 @@ brain.mood_mix = lambda key: ok({"kind": "mix", "id": "mood:" + key, "title": "C
 brain.home_charts = lambda region, langs, base, fresh: ok({"charts": [
     {"kind": "mix", "id": "chart:t", "title": "Top Synthetic", "over": "Chart", "subtitle": "Today", "chart": True,
      "tracks": [song(4)], "artwork": None}], "key": "k"})
-mt.rail.items["discover"].click()
+mt.go("discover")
 check(wait_for(lambda: getattr(mt, "_chart_grid", None) is not None), "the charts didn't show")
 mt._open_mood("chill")
 check(wait_for(lambda: mt._here[0] == "mix"), "the mood didn't open")

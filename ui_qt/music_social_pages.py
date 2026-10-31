@@ -141,6 +141,7 @@ class SocialPages:
         n = self.hub.unread()
         if "chats" in self.rail.items:
             self.rail.items["chats"].set_count(n or "")
+            self.rail.items["social"].set_count(n or "")
         here = self._here[0] if self._here else None
         if here == "friends":
             self._fill_friends()
@@ -205,7 +206,6 @@ class SocialPages:
         page.hero.add_action(prof)
         # find people
         find = Field("Find people by @username or name")
-        find.setMaximumWidth(520)
         page.add(find, "Find people")
         results = QWidget()
         rcol = QVBoxLayout(results)
@@ -304,7 +304,6 @@ class SocialPages:
             else:
                 text = "%s was your circle's top listener last month." % label_of(who)
             card = Glass()
-            card.setMaximumWidth(620)
             card.col.addWidget(_label(text, 13.5, QFont.Weight.DemiBold, look.TEXT, wrap=True))
             page.add(card, "Top listener")
         self.hub.run(social.top_listener, ok, lambda _e: None)
@@ -317,7 +316,6 @@ class SocialPages:
         handle, which = what["handle"], what["which"]
         page.hero.set_text("@" + handle, which.title(), "")
         box = QWidget()
-        box.setMaximumWidth(760)
         col = QVBoxLayout(box)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(2)
@@ -426,7 +424,23 @@ class SocialPages:
             if u.get("self") and u.get("listen_total"):
                 page.add(_label("You've listened for %d hours this month, %d in all." % (
                     (u.get("listen_month") or 0) // 3600, (u.get("listen_total") or 0) // 3600), 13, color=look.TEXT_2))
-            if not u.get("self"):
+            who = QWidget()
+            wl = QHBoxLayout(who)
+            wl.setContentsMargins(0, 0, 0, 0)
+            wl.setSpacing(14)
+            wl.addWidget(Avatar(u, 84))
+            wl.addStretch(1)
+            page.add(who)
+            if u.get("self"):
+                ed = Pill("Edit profile", style="solid")
+                ed.clicked.connect(lambda: self.go("account"))
+                page.hero.add_action(ed)
+                sh = Pill("Share profile", style="glass")
+                sh.setToolTip("Copy your @username")
+                sh.clicked.connect(lambda: (QApplication.clipboard().setText("@" + (u.get("handle") or "")),
+                                            self.status.setText("Your @username is copied.")))
+                page.hero.add_action(sh)
+            else:
                 if u.get("following"):
                     msg = Pill("Message", style="solid")
                     msg.clicked.connect(lambda: self._open_dm(u))
@@ -444,7 +458,6 @@ class SocialPages:
             now = (u.get("now") or {}).get("track")
             if now:
                 card = Glass()
-                card.setMaximumWidth(620)
                 card.col.addWidget(SongCard(now, relay))
                 page.add(card, "Playing now")
             if u.get("locked"):
@@ -463,7 +476,6 @@ class SocialPages:
                 bl.setSpacing(2)
                 for it in items[:30]:
                     bl.addWidget(SongCard(it, rl))
-                box.setMaximumWidth(620)
                 page.add(box, title)
             if not now and not r.get("artists") and not r.get("playlists") and not r.get("liked"):
                 page.add(_label("Nothing to show yet.", 13, color=look.TEXT_3))
@@ -495,7 +507,6 @@ class SocialPages:
         new.clicked.connect(self._new_group)
         page.hero.add_action(new)
         box = QWidget()
-        box.setMaximumWidth(760)
         self._social_lists["chats"] = QVBoxLayout(box)
         self._social_lists["chats"].setContentsMargins(0, 0, 0, 0)
         self._social_lists["chats"].setSpacing(2)

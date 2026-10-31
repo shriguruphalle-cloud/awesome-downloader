@@ -520,24 +520,35 @@ def rounded(pix, w, h, radius, circle=False):
     return out
 
 
+_cover_art = None
+
+
+def _placeholder_art():
+    """The picture where a cover isn't (yet): the glass note on black, as on the phone. Loaded once."""
+    global _cover_art
+    if _cover_art is None:
+        import os
+        from PySide6.QtGui import QPixmap
+        _cover_art = QPixmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "music_cover.jpg"))
+    return _cover_art
+
+
 def placeholder(p, rect, pal, radius=6, circle=False, glyph=True):
-    """Where a cover will be: the page's colour, a note on it."""
-    from .browser_chrome import draw_icon
+    """Where a cover will be: the glass note, cropped to fill as a cover would be."""
+    art = _placeholder_art()
     p.save()
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    g = QLinearGradient(rect.topLeft(), rect.bottomRight())
-    g.setColorAt(0, with_alpha(mix(pal["base"], TEXT, 0.12), 1.0))
-    g.setColorAt(1, pal["deep"])
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(g)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    shape = QPainterPath()
     if circle:
-        p.drawEllipse(rect)
+        shape.addEllipse(rect)
     else:
-        p.drawRoundedRect(rect, radius, radius)
-    if glyph:
-        s = min(rect.width(), rect.height()) * 0.36
-        draw_icon(p, "music", QRectF(rect.center().x() - s / 2, rect.center().y() - s / 2, s, s),
-                  with_alpha(TEXT, 0.45))
+        shape.addRoundedRect(rect, radius, radius)
+    p.setClipPath(shape)
+    if art.isNull():
+        p.fillRect(rect, QColor(10, 10, 12))
+    else:
+        p.drawPixmap(rect, art, QRectF(art.rect()))
     p.restore()
 
 

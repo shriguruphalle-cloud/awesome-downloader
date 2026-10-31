@@ -1507,12 +1507,17 @@ class Rail(QWidget):
         head = QHBoxLayout()
         head.setContentsMargins(6, 0, 0, 6)
         head.setSpacing(10)
-        self.mark = _Mark()
-        head.addWidget(self.mark)
-        self.brand = GradientLine("Awesome ", "Music", "", px=19)
-        self.brand.set_colors("#ffffff", "#7dd3fc", True, "#a5b4fc")
-        self.brand.setMinimumWidth(0)   # never wider than the rail: the column would spill past its edge
-        self.brand.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.mark = _Mark(self)          # (not shown: the wordmark carries the logo)
+        self.mark.hide()
+        import os
+        self.brand = QLabel()
+        word = QPixmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "music_wordmark.png"))
+        if not word.isNull():
+            dpr = self.devicePixelRatioF()
+            word = word.scaledToHeight(int(46 * max(dpr, 2.0)), Qt.TransformationMode.SmoothTransformation)
+            word.setDevicePixelRatio(max(dpr, 2.0))
+            self.brand.setPixmap(word)
+        self.brand.setStyleSheet("background: transparent;")
         head.addWidget(self.brand, 1)
         self.menu_btn = icon_button("dots", "Music settings and import", 32, 18, self)
         self.menu_btn.clicked.connect(
@@ -1524,11 +1529,11 @@ class Rail(QWidget):
         self.search.returnPressed.connect(lambda: self.searched.emit(self.search.text()))
         top.col.addWidget(self.search_box)
         top.col.addSpacing(6)
-        for key, text, icon in (("home", "Home", "home"), ("explore", "Explore", "trend"),
-                                ("discover", "Moods & charts", "note"), ("dj", "DJ", "sparkle"),
-                                ("search", "Search results", "search")):
+        for key, text, icon in (("home", "Home", "home"), ("search", "Search", "search"),
+                                ("library", "Your music", "disc"), ("social", "Social", "people")):
             top.col.addWidget(self._item(key, text, icon))
-        self.items["search"].hide()
+        self._item("explore", "Explore", "trend").setParent(self)     # (reached from its links; not a tab)
+        self.items["explore"].hide()
         self.col.addWidget(top)
         self.col.addSpacing(8)
         # you: signing in keeps this PC and your phone the same
@@ -1538,29 +1543,34 @@ class Rail(QWidget):
         self.col.addWidget(self.account_item)
         self.col.addSpacing(8)
 
-        # your library
-        self.col.addWidget(_RailLabel("Your library"))
+        # the open tab's sub-tabs
+        self._subs = {}
+
+        def sub(tab):
+            box = QWidget()
+            box.setStyleSheet("background: transparent;")
+            lay = QVBoxLayout(box)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(2)
+            self._subs[tab] = box
+            self.col.addWidget(box)
+            return lay
+
+        # Your music
+        lib = sub("library")
         for key, text, icon in (("songs", "Liked songs", "heart"), ("artists", "Artists", "person"),
                                 ("albums", "Albums", "disc"), ("local", "On this PC", "folder"),
-                                ("queue", "Queue", "queue"), ("taste", "Your taste", "target")):
-            self.col.addWidget(self._item(key, text, icon))
-        self.col.addSpacing(10)
-
-        # people: the same Awesome Music account as on the phone (music_social)
-        self.col.addWidget(_RailLabel("Together"))
-        for key, text, icon in (("friends", "Friends", "people"), ("chats", "Chats", "chat")):
-            self.col.addWidget(self._item(key, text, icon))
-        self.col.addSpacing(10)
-
-        # playlists, with new and import on the heading
+                                ("recent", "Recent", "note"), ("queue", "Queue", "queue"),
+                                ("dj", "DJ", "sparkle"), ("taste", "Your taste", "target")):
+            lib.addWidget(self._item(key, text, icon))
+        lib.addSpacing(10)
         pl = _RailLabel("Playlists")
         new = pl.add_button(icon_button("plus", "New playlist", 28, 16))
         new.clicked.connect(lambda: self.navigate.emit("newplaylist"))
-        self.col.addWidget(pl)
+        lib.addWidget(pl)
         self._pl_box = QVBoxLayout()
         self._pl_box.setSpacing(2)
-        self.col.addLayout(self._pl_box)
-        # first in the section, always: bring playlists over from other apps
+        lib.addLayout(self._pl_box)
         self.import_item = NavItem("import", "Import a playlist", sub="Spotify, Apple Music, YouTube",
                                    icon="playlist_import")
         self.import_item.setCheckable(False)
@@ -1568,9 +1578,12 @@ class Rail(QWidget):
                                     "-- or a list of songs")
         self.import_item.clicked.connect(lambda: self.navigate.emit("import"))
         self._pl_box.addWidget(self.import_item)
-        self.col.addSpacing(12)
-
-        # made for you, at the bottom: it folds away
+        # Social
+        soc = sub("social")
+        for key, text, icon in (("chats", "Chats", "chat"), ("friends", "People", "people")):
+            soc.addWidget(self._item(key, text, icon))
+        # Home: made for you, folding away
+        home = sub("home")
         self.made_card = _RailCard()
         self.made_head = _FoldHeader("Made for you", "sparkle")
         self.made_head.clicked.connect(self._toggle_made)
@@ -1579,10 +1592,24 @@ class Rail(QWidget):
         self._made_box.setSpacing(2)
         self.made_card.col.addLayout(self._made_box)
         self.made_card.hide()
-        self.col.addWidget(self.made_card)
+        home.addWidget(self.made_card)
         self.col.addStretch(1)
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
+        self.tab = None
+        self._show_tab("home")
+
+    # which tab a page belongs to; a page not listed (an artist, an album, a mix) stays under the tab it was opened from
+    TAB_OF = {"home": "home", "explore": "home", "discover": "home", "search": "search",
+              "library": "library", "songs": "library", "artists": "library", "albums": "library", "local": "library",
+              "recent": "library", "queue": "library", "dj": "library", "taste": "library", "playlist": "library",
+              "social": "social", "chats": "social", "friends": "social", "chat": "social", "people": "social",
+              "profile": "social", "account": "social"}
+
+    def _show_tab(self, tab):
+        self.tab = tab
+        for name, box in self._subs.items():
+            box.setVisible(name == tab)
 
     def _item(self, key, text, icon):
         item = NavItem(key, text, icon=icon)
@@ -1621,10 +1648,14 @@ class Rail(QWidget):
         self._set_dynamic("playlists", self._pl_box, entries)
 
     def select(self, key):
+        tab = self.TAB_OF.get(key) or ("library" if str(key).startswith("pl:") or key in self._dynamic_keys("playlists")
+                                       else ("home" if key in self._dynamic_keys("made") else self.tab))
+        self._show_tab(tab)
         for k, item in self.items.items():
-            item.setChecked(k == key)
-        if key == "search":
-            self.items["search"].show()
+            item.setChecked(k == key or k == tab)
+
+    def _dynamic_keys(self, which):
+        return {w.key for w in self._dynamic[which]}
 
     def set_accent(self, colour):
         self.search_box.accent = colour

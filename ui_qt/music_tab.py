@@ -1068,6 +1068,7 @@ class _FullView(QWidget):
 
 
 class MusicTab(SocialPages, MusicMore, QWidget):
+    _kept_charts = Signal(object)
     SHOW_ONBOARDING = True   # the taste setup on first run
     RESUME_ON_START = True   # the last song back (and playing) when the app opens
     MINI_PLAYER = True       # the floating mini player while the app is out of sight
@@ -1213,6 +1214,8 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         # Awesome Music's people: the same account as the phone app (music_social, music_social_pages)
         self._init_social(self._corner_row)
         self._init_more()
+        if self._here and self._here[0] == "home":
+            self._build_home()      # (the first page opened before these existed)
         if self.RESUME_ON_START:
             QTimer.singleShot(700, self._resume_last)
         if self.SHOW_ONBOARDING and self.taste.needs_onboarding():
@@ -1244,7 +1247,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         for key in ("home", "explore", "search", "artist", "album", "songs", "artists", "albums", "local", "queue",
                     "mix", "playlist") + SocialPages.SOCIAL_PAGES + MusicMore.MORE_PAGES:
             page = _Page(key)
-            if key in SocialPages.SOCIAL_PAGES + MusicMore.MORE_PAGES:
+            if key in SocialPages.SOCIAL_PAGES + MusicMore.MORE_PAGES + ("home", "search"):
                 page.hero.set_compact()
             self._pages[key] = page
             self.pages.addWidget(page)
@@ -1753,7 +1756,15 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         self.rail.set_accent(self.stage.pal["accent"])
 
     def _rail_go(self, key):
-        if key == "taste":
+        if key == "search":
+            self.go("search")
+            self.rail.search.setFocus()
+            self.rail.search.selectAll()
+        elif key == "social":
+            self.go("chats")
+        elif key == "account" and self.hub.signed_in() and (self.hub.me or {}).get("handle"):
+            self.go("profile", {"handle": self.hub.me["handle"]})    # your own page, as on the phone
+        elif key == "taste":
             self.open_taste(editing=True)
         elif key == "import":
             self.importer.open()
@@ -2153,26 +2164,22 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         """The suggestions on the home page: Daily Mixes, Discover, Because
         you played X, New from your artists, Picked for your taste."""
         feed = self.taste.feed()
-        if feed.get("mixes"):
-            grid = self._tile_grid("album", rows=1)
-            grid.set_items(feed["mixes"])
-            page.add(grid, "Your Daily Mixes")
         if feed.get("discover"):
-            lst = self._track_list(limit=6)
-            lst.set_tracks(feed["discover"])
-            page.add(lst, "Discover for you")
+            grid = self._tile_grid("track", rows=1)
+            grid.set_items(feed["discover"][:12])
+            page.add(grid, "Recommended for you", "See all")
         for b in (feed.get("because") or [])[:2]:
-            lst = self._track_list(limit=5)
-            lst.set_tracks(b["tracks"])
-            page.add(lst, "Because you played %s" % b["title"])
+            grid = self._tile_grid("track", rows=1)
+            grid.set_items(b["tracks"][:12])
+            page.add(grid, "Because you played %s" % b["title"], "See all")
         if feed.get("new"):
             grid = self._tile_grid("album", rows=1)
             grid.set_items(feed["new"])
             page.add(grid, "New from your artists", "See all")
         if feed.get("picked"):
-            lst = self._track_list(limit=6)
-            lst.set_tracks(feed["picked"])
-            page.add(lst, "Picked for your taste")
+            grid = self._tile_grid("track", rows=1)
+            grid.set_items(feed["picked"][:12])
+            page.add(grid, "Picked for your taste", "See all")
 
     # ---- what you listen to, told to the taste model ----
     def _open_listen(self, track):
@@ -2379,6 +2386,10 @@ class MusicTab(SocialPages, MusicMore, QWidget):
             self._build_people(item)
         elif key == "dj":
             self._build_dj()
+        elif key == "library":
+            self._build_library()
+        elif key == "recent":
+            self._build_recent()
         elif key == "discover":
             self._build_discover()
         elif key == "catalog":
@@ -2527,7 +2538,8 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         elif kind == "album":
             self.go("album", item)
         elif kind == "mood":
-            self.run_search(item["title"])
+            key = str(item.get("id", "")).split(":", 1)[-1]
+            self._open_mood(key) if key in music_brain.MOOD_MIXES else self.run_search(item["title"])
         elif kind == "mix":
             self.play_item(item)
         elif kind == "ytplaylist":
@@ -2559,55 +2571,22 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         page = self._pages["home"]
         page.clear()
         page.art_url = None
-        h = page.hero
-        cur = self.current()
-        if cur:
-            playing = self._playing()
-            h.set_text("Now playing" if playing else "Paused", cur["title"],
-                       " · ".join(x for x in (cur.get("artist"), cur.get("album"), cur.get("year")) if x))
-            pp = h.add_action(Pill("Pause" if playing else "Play", "pause" if playing else "play"))
-            pp.clicked.connect(self.toggle)
-            h.add_action(self._ring("mic", "Lyrics", lambda: self.open_full(True)))
-            h.add_action(self._ring("expand", "Full screen", lambda: self.open_full(False)))
-            h.add_action(self._save_ring(cur))
-            h.add_action(self._add_ring(cur))
-            if cur.get("source") != "local":
-                h.add_action(self._ring("download", "Download this song", lambda: self.keep(self.current())))
-            if cur.get("artist_browse"):
-                h.add_action(Pill("Artist", style="outline")).clicked.connect(
-                    lambda: self.go("artist", {"browse_id": cur["artist_browse"], "title": cur.get("artist", "")}))
-            if cur.get("album_browse"):
-                h.add_action(Pill("Album", style="outline")).clicked.connect(
-                    lambda: self.go("album", {"browse_id": cur["album_browse"], "title": cur.get("album", ""),
-                                              "source": "youtube", "kind": "album"}))
-            upcoming = self.queue[self.index + 1:self.index + 4]
-            h.set_trio(upcoming, "Up next" if upcoming else "")
-        elif self.taste.feed().get("mixes"):
-            mix = self.taste.feed()["mixes"][0]
-            h.set_text("Made for you", mix["title"], "%s · %d songs" % (mix["subtitle"], len(mix["tracks"])))
-            h.add_action(Pill("Play", "play")).clicked.connect(lambda: self.play_item(mix))
-            h.add_action(self._ring("shuffle", "Shuffle", lambda: self._play_list(mix["tracks"], shuffle=True)))
-            h.add_action(Pill("Your taste", style="outline")).clicked.connect(lambda: self.open_taste(editing=True))
-            h.set_trio(mix["tracks"][:3], "In this mix")
-            page.art_url = thumb_url(mix.get("artwork"), 900) if mix.get("artwork") else None
-        else:
-            h.set_text("Music", "Play anything",
-                       "Songs, albums and artists from YouTube Music, and free music from open libraries — "
-                       "no account, nothing to sign in to.")
-            h.add_action(Pill("Search", "search")).clicked.connect(
-                lambda: (self.rail.search.setFocus(), self.rail.search.selectAll()))
-            h.add_action(Pill("Your taste", style="outline")).clicked.connect(lambda: self.open_taste(editing=True))
+        if getattr(self, "_charts", None) is None:
+            return
+        self._home_top(page)
+        self._add_charts(page, "home")
+        feed = self.taste.feed()
+        if feed.get("mixes"):
+            grid = self._tile_grid("album", rows=1)
+            grid.set_items(feed["mixes"])
+            page.add(grid, "Made for you")
+        self._add_new_releases(page)
         self._add_feed(page)
         recent = [t for t in music_library.recent() if t.get("kind", "track") == "track"]
         if recent:
             grid = self._tile_grid("track", rows=1)
             grid.set_items(recent[:16])
             page.add(grid, "Recently played", "See all")
-        if not self.taste.feed().get("mixes"):
-            moods = [{"kind": "mood", "id": "mood:" + k, "title": t, "hue": hue} for k, t, hue in Rail.MOODS]
-            mg = self._tile_grid("mood", rows=1)
-            mg.set_items(moods)
-            page.add(mg, "Start with a mood")
         self._set_current_marks()
 
     def _ring(self, kind, tip, slot):
@@ -2750,6 +2729,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         page.hero.set_text("Search", "Find anything",
                            "Type a song, an artist or an album on the left — every library is searched at once.")
         self._songs_list = self._track_list(limit=8)
+        self._add_moods(page, 2)
 
     def run_search(self, text=None):
         q = (text if isinstance(text, str) else self.rail.search.text()).strip()
