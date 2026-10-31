@@ -475,7 +475,7 @@ class MusicOwner:
         col.addLayout(head)
         bits = ["@" + handle if handle and name else "", "online" if online else "seen " + ago(u.get("seen")),
                 "%d active %s" % (u.get("days") or 0, "day" if u.get("days") == 1 else "days"), u.get("country") or "",
-                "v" + u["version"] if u.get("version") else ""]
+                (("v" if u["version"][0].isdigit() else "") + u["version"]) if u.get("version") else ""]
         col.addWidget(_t("  ·  ".join(b for b in bits if b), 11.5))
         playing = u.get("playing")
         if playing:
