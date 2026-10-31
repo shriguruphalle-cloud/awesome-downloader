@@ -705,7 +705,7 @@ class Tile(QWidget):
         self._fade = QTimer(self)
         self._fade.setInterval(16)
         self._fade.timeout.connect(self._step)
-        if mode != "mood" and item.get("artwork"):
+        if item.get("artwork"):
             art().want(thumb_url(item["artwork"], 320), self._got)
 
     def _got(self, pm):
@@ -906,6 +906,19 @@ class Tile(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(g)
         p.drawRoundedRect(r, 18, 18)
+        if self._raw is not None:
+            # its own cover under the mood's colour, as on the phone
+            s = int(r.width())
+            if self._pix is None or self._pix.width() != int(s * 2):
+                self._pix = look.rounded(self._raw, s, s, 18)
+            p.drawPixmap(r.topLeft(), self._pix)
+            tint = QColor.fromHslF(hue % 1.0, 0.70, 0.34)
+            shade = QLinearGradient(r.topLeft(), r.bottomLeft())
+            shade.setColorAt(0, look.with_alpha(tint, 0.94))
+            shade.setColorAt(0.5, look.with_alpha(tint, 0.45))
+            shade.setColorAt(1, QColor(0, 0, 0, 140))
+            p.setBrush(shade)
+            p.drawRoundedRect(r, 18, 18)
         p.save()
         path = QPainterPath()
         path.addRoundedRect(r, 18, 18)
@@ -921,10 +934,17 @@ class Tile(QWidget):
         fm = QFontMetricsF(f)
         p.setFont(f)
         p.setPen(look.TEXT)
-        y = r.bottom() - 14 - fm.descent()
-        for line in reversed(lines):
-            p.drawText(QPointF(r.left() + 15, y), line)
-            y -= px * 0.98
+        y = r.top() + 12 + fm.ascent()
+        for line in lines:
+            p.drawText(QPointF(r.left() + 14, y), line)
+            y += px * 0.98
+        words = self.item.get("line")
+        if words:
+            lf = look.font(11.5, QFont.Weight.Medium)
+            p.setFont(lf)
+            p.setPen(QColor(255, 255, 255, 205))
+            p.drawText(QRectF(r.left() + 14, y - fm.ascent() + 6, r.width() - 26, 34),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap), words)
 
 
 class TileGrid(QWidget):
@@ -1135,6 +1155,9 @@ class Hero(QWidget):
         self._layout()
 
     def _ensure_blend(self):
+        if self.compact:        # a short header carries no picture: there's no room to show one whole
+            self._blend = None
+            return
         dpr = self.devicePixelRatioF()
         key = (self.width(), self.height(), id(self._raw), self._wide, self._pal["base"].rgb(), dpr)
         if key != self._blend_key:

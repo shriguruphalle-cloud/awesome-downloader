@@ -8,8 +8,8 @@ import os
 import time
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QAbstractButton, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen
+from PySide6.QtWidgets import QAbstractButton, QGridLayout, QHBoxLayout, QMenu, QVBoxLayout, QWidget
 
 from app.core import mixer, music_sources
 from app.core import music_brain as brain
@@ -19,7 +19,8 @@ from app.logging_setup import get_logger
 from . import music_look as look
 from app.utils import music_library
 
-from .browser_chrome import draw_icon
+from . import theme
+from .browser_chrome import draw_icon, style_menu
 from .music_social import Field, Glass, _alive, _label
 from .music_widgets import NavItem, Pill, SectionHeader
 
@@ -32,6 +33,13 @@ EXTEND_LEFT = 3         # this few songs left in the DJ's run: more are asked fo
 
 HUES = {"chill": 0.52, "focus": 0.60, "workout": 0.02, "party": 0.88, "romance": 0.96, "sad": 0.64, "lofi": 0.76,
         "indie": 0.40, "jazz": 0.10, "classical": 0.14, "hiphop": 0.08, "phonk": 0.80}
+
+
+MOOD_LINES = {"chill": "Slow down, breathe out", "focus": "Head down, in the zone", "workout": "Louder, faster, one more",
+              "party": "Turn it up tonight", "romance": "Songs for two", "sad": "For the heavy days",
+              "lofi": "Soft beats, warm crackle", "indie": "Off the beaten track", "jazz": "Smoke, brass and late hours",
+              "classical": "Strings, keys and calm", "hiphop": "Bars, beats and swagger",
+              "phonk": "Cowbells and drift nights"}
 
 
 class LibraryCard(QAbstractButton):
@@ -364,11 +372,16 @@ class MusicMore:
             page.hero.add_action(Pill("Search", "search")).clicked.connect(lambda: self._rail_go("search"))
 
     def _add_moods(self, page, rows):
-        moods = [{"kind": "mood", "id": "mood:" + k, "title": m.get("title") or k.title(), "hue": HUES.get(k, 0.6)}
+        try:
+            covers = brain.value(brain.mood_covers) or {}     # from what's here already; no network
+        except brain.MusicError:
+            covers = {}
+        moods = [{"kind": "mood", "id": "mood:" + k, "title": m.get("title") or k.title(), "hue": HUES.get(k, 0.6),
+                  "line": MOOD_LINES.get(k, ""), "artwork": covers.get(k)}
                  for k, m in brain.MOOD_MIXES.items()]
         grid = self._tile_grid("mood", rows=rows)
         grid.set_items(moods)
-        page.add(grid, "Moods and genres", "See all")
+        page.add(grid, "Moods and genres")
 
     def _add_charts(self, page, here):
         """Top charts: what's kept shows at once, fresh ones replace it (asked for at most every half hour)."""
@@ -557,54 +570,104 @@ class MusicMore:
         self.go("catalog", {"browse_id": artist.get("browse_id"), "title": artist.get("title", "")})
 
     def _build_catalog(self, artist):
+        """Everything an artist has put out, shown as it loads: narrowed by language, kind and year, searched
+        within, newest or oldest first. What's shown plays as one list."""
         page = self._pages["catalog"]
         page.clear()
         page.art_url = None
         bid = artist.get("browse_id")
-        state = self._catalog = {"id": bid, "tracks": [], "next": 0, "busy": False}
-        page.hero.set_text("Every song", artist.get("title") or "Artist", "Reading the catalogue…")
-        lst = self._track_list()
-        page.add(lst)
-        more = Pill("More songs", style="glass")
-        page.add(more, gap=12)
-        more.hide()
+        state = self._catalog = {"id": bid, "tracks": [], "next": 0, "lang": "", "kind": "", "year": "",
+                                 "newest": True, "shown": []}
+        name = artist.get("title") or "Artist"
         h = page.hero
+        h.set_text("Every song", name, "Reading the catalogue…")
+        h.add_action(Pill("Play", "play")).clicked.connect(
+            lambda: state["shown"] and self.play_from(state["shown"][0], state["shown"]))
+        h.add_action(self._ring("shuffle", "Shuffle",
+                                lambda: state["shown"] and self._play_list(state["shown"], shuffle=True)))
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        find = Field("Search these songs")
+        find.setMaximumWidth(340)
+        row.addWidget(find, 1)
+        btns = {}
+        for key, label in (("lang", "Language"), ("kind", "Kind"), ("year", "Year")):
+            b = Pill(label, style="glass")
+            b.clicked.connect(lambda _c=False, k=key, l=label: pick(k, l))
+            btns[key] = b
+            row.addWidget(b)
+        order = Pill("Newest first", style="glass")
+        row.addWidget(order)
+        page.add(bar)
+        lst = self._track_list()
+        page.add(lst, gap=8)
+        note = _label("", 13, color=look.TEXT_3)
+        page.add(note, gap=4)
+
+        def value_of(t, key):
+            return {"lang": t.get("lang") or "Other", "kind": t.get("kind_of") or "Albums",
+                    "year": str(t.get("year") or "")}[key]
+
+        def show():
+            q = find.text().strip().lower()
+            out = [t for t in state["tracks"]
+                   if all(not state[k] or value_of(t, k) == state[k] for k in ("lang", "kind", "year"))
+                   and (not q or q in (t.get("title") or "").lower() or q in (t.get("album") or "").lower())]
+            out.sort(key=lambda t: str(t.get("year") or "0"), reverse=state["newest"])
+            state["shown"] = out
+            lst.set_tracks(out[:400])
+            self._set_current_marks()
+            h.set_text("Every song", name, "%d songs%s" % (len(state["tracks"]),
+                                                           " so far…" if state["next"] is not None else ""))
+            note.setText("No songs match — try another filter." if state["tracks"] and not out else
+                         ("Showing the first 400 of %d — narrow it down." % len(out) if len(out) > 400 else ""))
+
+        def pick(key, label):
+            counts = {}
+            for t in state["tracks"]:
+                v = value_of(t, key)
+                if v:
+                    counts[v] = counts.get(v, 0) + 1
+            vals = sorted(counts, reverse=True) if key == "year" else sorted(counts, key=lambda v: -counts[v])
+            menu = style_menu(QMenu(self), theme.tokens(True))
+            menu.addAction("All", lambda: choose(key, label, ""))
+            for v in vals:
+                menu.addAction("%s (%d)" % (v, counts[v]), lambda v=v: choose(key, label, v))
+            menu.exec(QCursor.pos())
+
+        def choose(key, label, v):
+            state[key] = v
+            btns[key].setText(v or label)
+            btns[key].style = "tab_on" if v else "glass"
+            btns[key].updateGeometry()
+            btns[key].update()
+            show()
+
+        def flip():
+            state["newest"] = not state["newest"]
+            order.setText("Newest first" if state["newest"] else "Oldest first")
+            show()
+        order.clicked.connect(flip)
+        find.edit.textChanged.connect(lambda _t: show())
 
         def load():
-            if state["busy"] or state["next"] is None or self._catalog is not state:
+            if state["next"] is None or self._catalog is not state:
                 return
-            state["busy"] = True
-            more.setEnabled(False)
 
             def ok(got):
-                state["busy"] = False
                 if self._catalog is not state or not _alive(lst):
                     return
                 have = {t.get("id") for t in state["tracks"]}
                 state["tracks"] += [t for t in (got or {}).get("tracks") or [] if t.get("id") not in have]
                 state["next"] = (got or {}).get("next")
-                lst.set_tracks(state["tracks"])
-                self._set_current_marks()
-                years = "%s–%s" % (got.get("first_year"), got.get("last_year")) if got.get("first_year") else ""
-                h.set_text("Every song", artist.get("title") or "Artist",
-                           " · ".join(x for x in ("%d songs so far" % len(state["tracks"]) if state["next"] is not None
-                                                  else "%d songs" % len(state["tracks"]), years) if x))
-                if state["tracks"] and not getattr(h, "_catalog_played", False):
-                    h._catalog_played = True
-                    h.clear_actions()
-                    h.add_action(Pill("Play", "play")).clicked.connect(
-                        lambda: self.play_from(state["tracks"][0], state["tracks"]))
-                    h.add_action(self._ring("shuffle", "Shuffle",
-                                            lambda: self._play_list(state["tracks"], shuffle=True)))
-                more.setVisible(state["next"] is not None)
-                more.setEnabled(True)
+                show()
+                load()
 
             def fail(e):
-                state["busy"] = False
-                more.setEnabled(True)
-                h.set_text("Every song", artist.get("title") or "Artist", str(e))
+                if self._catalog is state and _alive(lst):
+                    state["next"] = None
+                    h.set_text("Every song", name, str(e))
             self._brain(ok, fail, brain.artist_catalog, bid, state["next"], 8)
-        h._catalog_played = False
-        more.clicked.connect(load)
         load()
-

@@ -116,10 +116,6 @@ pages = iter([{"tracks": [song(5), song(6)], "next": 8, "total": 9, "first_year"
               {"tracks": [song(6), song(7)], "next": None, "total": 9, "first_year": "2001", "last_year": "2020"}])
 brain.artist_catalog = lambda bid, start, count: ok(next(pages))
 mt.open_catalog({"browse_id": "UCx", "title": "Nobody"})
-check(wait_for(lambda: len(mt._catalog.get("tracks") or []) == 2), "the catalogue's first page didn't load")
-from ui_qt.music_widgets import Pill  # noqa: E402
-more = [b for b in mt._pages["catalog"].findChildren(Pill) if b.text() == "More songs"][0]
-more.click()
 check(wait_for(lambda: len(mt._catalog["tracks"]) == 3 and mt._catalog["next"] is None), "the next page didn't load")
 print("every song: page by page, each song once")
 
