@@ -59,6 +59,7 @@ from .audio_engine import Engine, loudness
 from .music_import import ImportSheet
 from .music_import_liked import LikedImportSheet
 from .music_onboarding import Onboarding
+from .music_share import ShareSheet
 from .music_panels import EqPanel, InfoPanel, QueuePanel, SidePanel
 from .music_more import MusicMore
 from .music_social_pages import SocialPages
@@ -1318,6 +1319,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         self.importer = ImportSheet(self)
         self.importer.imported.connect(self._imported)
         self.liked_import = LikedImportSheet(self)
+        self.sharer = ShareSheet(self)
 
         self.onboarding = Onboarding(self)
         self.onboarding.done.connect(self._taste_done)
@@ -1495,6 +1497,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         if track.get("source") != "local":
             menu.addAction("Download", lambda: self.keep(track))
             menu.addAction("Copy link", lambda: QApplication.clipboard().setText(track.get("page_url", "")))
+        menu.addAction("Share as a video…", lambda: self.sharer.open_for(track))
         menu.addAction("Start a radio from this song", lambda: self._radio_from(track))
         self.social_song_actions(menu, track)
         menu.addSeparator()
@@ -3188,6 +3191,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
                                                                     "title": track.get("album", ""),
                                                                     "source": "youtube", "kind": "album"}))
         self.social_song_actions(menu, track)
+        menu.addAction("Share as a video…", lambda: self.sharer.open_for(track))
         if track.get("page_url") and track.get("source") != "local":
             menu.addAction("Copy link", lambda: QApplication.clipboard().setText(track["page_url"]))
         elif track.get("source") == "local":
@@ -3482,6 +3486,12 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         if self.repeat == "all":
             return 0
         return None
+
+    def synced_lines(self, track):
+        """The song's words in time, [(ms, text)], if they've been read for it."""
+        if track.get("id") != getattr(self, "_lyrics_for", None) or self.full.lyrics.state != "ok":
+            return []
+        return list(self.full.lyrics.lines)
 
     def _blend_ok(self, cur, nxt):
         """No blend between an album's songs played in order -- they're
@@ -4101,7 +4111,8 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         super().resizeEvent(event)
         if self.full.isVisible():
             self.full.setGeometry(self.rect())
-        for sheet in (self.onboarding, self.importer, self.liked_import, getattr(self, "_settings_sheet", None)):
+        for sheet in (self.onboarding, self.importer, self.liked_import, self.sharer,
+                      getattr(self, "_settings_sheet", None)):
             if sheet is not None and _alive(sheet) and sheet.isVisible():
                 sheet.setGeometry(self.rect())
         QTimer.singleShot(0, lambda: hasattr(self, "side") and self.side.relayout())
