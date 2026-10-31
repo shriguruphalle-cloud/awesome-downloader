@@ -1,5 +1,4 @@
-"""Closing the tab in view goes back to the tab used before it (as Chrome
-and Edge do), not to whichever happens to sit next to it in the strip."""
+"""Closing the tab in view goes to the one beside it: on its right, or on its left if it was the last."""
 import _support
 from _support import build_window, check, qapp, settle
 
@@ -16,23 +15,25 @@ c = bt._create_tab(activate=True)
 settle(300)
 check(bt._current() is c, "a new tab didn't come to the front")
 
+bt._switch_to(first)
+bt._switch_to(a)
+settle(200)
+bt._close(a)              # the tab used before it was the first one: closing doesn't go there
+settle(200)
+check(bt._current() is b, "closing a tab didn't go to the one on its right")
+print("closing a tab goes to the one on its right")
+
+bt._switch_to(c)
+settle(200)
 bt._close(c)
 settle(200)
-check(bt._current() is b, "closing the newest tab didn't go back to the one before it")
-print("closing a tab goes back to the tab used before it")
+check(bt._current() is b, "closing the last tab didn't go to the one on its left")
+print("...or on its left, when it was the last")
 
-bt._switch_to(first)
 bt._switch_to(b)
-settle(200)
-bt._close(b)
-settle(200)
-check(bt._current() is first, "closing went to a neighbour, not to the tab used before (the first one)")
-print("...even when that tab is at the other end of the strip")
-
-bt._switch_to(a)
 bt._close(first)          # closing a tab that isn't in view changes nothing in view
 settle(200)
-check(bt._current() is a, "closing a background tab changed the tab in view")
+check(bt._current() is b, "closing a background tab changed the tab in view")
 print("closing a tab in the background leaves the one in view alone")
 
 win.close()
