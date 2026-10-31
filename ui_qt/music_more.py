@@ -561,8 +561,10 @@ class MusicMore:
             lr.addWidget(more)
             col.addWidget(line)
         if len(shown) > 1:
-            page.add(self._sort_bar("playlists", self._build_library), gap=14)
-        page.add(box, None if len(shown) > 1 else "Playlists")
+            page.add(self._sort_bar("playlists", self._build_library), "Playlists")
+            page.add(box, gap=6)
+        else:
+            page.add(box, "Playlists")
         st = NavItem("x", "Settings", icon="sliders")
         st.setCheckable(False)
         st.clicked.connect(lambda _c=False: self.open_settings())
@@ -799,8 +801,8 @@ class MusicMore:
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
         find = Field("Search these songs")
-        find.setMaximumWidth(340)
-        row.addWidget(find, 1)
+        find.setFixedWidth(340)
+        row.addWidget(find)
         btns = {}
         for key, label in (("lang", "Language"), ("kind", "Kind"), ("year", "Year")):
             b = Pill(label, style="glass")
@@ -809,6 +811,7 @@ class MusicMore:
             row.addWidget(b)
         order = Pill("Newest first", style="glass")
         row.addWidget(order)
+        row.addStretch(1)
         page.add(bar)
         lst = self._track_list()
         page.add(lst, gap=8)

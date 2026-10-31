@@ -520,7 +520,7 @@ class InfoPanel(QWidget):
                 "Sample rate": "%.1f kHz" % (info["sample_rate"] / 1000.0) if info.get("sample_rate") else "",
                 "Channels": (info.get("channels") or "").capitalize(), "Quality": q, "Licence": t.get("license")}
         for k, v in vals.items():
-            self.values[k].setText(v or "—")
+            self.values[k].setText(str(v or "—"))
 
 
 def _scrolling(widget):

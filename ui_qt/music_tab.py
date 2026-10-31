@@ -1266,6 +1266,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         self.reload_btn.clicked.connect(self.reload)
         corner_row.addWidget(self.back_btn)
         corner_row.addWidget(self.reload_btn)
+        corner_row.addStretch(1)
         corner.move(look.GUTTER - 6, 8)
         corner.resize(80, 34)
         self._corner_row = corner_row
@@ -2406,6 +2407,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         if self.pages.currentWidget() is not page:
             self._fade_in(page)
         self.pages.setCurrentWidget(page)
+        self.pages.setFocus()
         self.rail.select((item if isinstance(item, str) else item.get("id")) if key in ("mix", "playlist")
                          and item else key)
         self.back_btn.setVisible(bool(self._history))
@@ -3118,6 +3120,12 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         page.add(self.queue_list)
         if not self.queue:
             page.add(_Note("Add songs with + , or play one to start."))
+        here = {t.get("id") for t in self.queue}
+        before = [t for t in music_library.recent() if t.get("kind", "track") == "track" and t.get("id") not in here][:10]
+        if before:
+            lst = self._track_list()
+            lst.set_tracks(before)
+            page.add(lst, "Played before")
         self._set_current_marks()
 
     def _render_queue(self):

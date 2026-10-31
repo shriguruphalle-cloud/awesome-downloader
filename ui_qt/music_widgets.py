@@ -1087,6 +1087,7 @@ class Hero(QWidget):
         self._old = self._blend
         self._raw, self._wide = pix, wide
         self._blend_key = None
+        self._layout()
         self._fade = 0.0 if self._old is not None else 1.0
         if self._fade < 1.0:
             self._anim.start()
@@ -1109,7 +1110,7 @@ class Hero(QWidget):
 
     def _layout(self):
         w = self._text_width()
-        top_px = min(56, max(36, self.width() * 0.045)) if self.compact else min(96, max(44, self.width() * 0.075))
+        top_px = min(56, max(36, self.width() * 0.045)) if self.compact else min(72, max(44, self.width() * 0.06))
         self._px, self._lines = look.fit_display((self.title or "").upper(), w, max_px=top_px,
                                                  min_px=28 if self.compact else 34)
         top = 52 if self.compact else 46
@@ -1130,7 +1131,7 @@ class Hero(QWidget):
             self.setMinimumHeight(int(need))
             self.setMaximumHeight(int(need))
             return
-        self.setMinimumHeight(int(max(340, need, self.preferred_h)))
+        self.setMinimumHeight(int(max(need, 0 if self._raw is None else max(340, self.preferred_h))))
 
     @staticmethod
     def _wrap(text, f, width, lines=2):
@@ -1625,8 +1626,6 @@ class Rail(QWidget):
         for key, text, icon in (("home", "Home", "home"), ("search", "Search", "search"),
                                 ("library", "Your music", "disc"), ("social", "Social", "people")):
             top.col.addWidget(self._item(key, text, icon))
-        self._item("explore", "Explore", "trend").setParent(self)     # (reached from its links; not a tab)
-        self.items["explore"].hide()
         self.col.addWidget(top)
         self.col.addSpacing(8)
         # you: signing in keeps this PC and your phone the same
@@ -1677,6 +1676,7 @@ class Rail(QWidget):
             soc.addWidget(self._item(key, text, icon))
         # Home: made for you, folding away
         home = sub("home")
+        home.addWidget(self._item("explore", "Explore", "trend"))
         self.made_card = _RailCard()
         self.made_head = _FoldHeader("Made for you", "sparkle")
         self.made_head.clicked.connect(self._toggle_made)
@@ -2242,7 +2242,7 @@ class PlayerBar(QWidget):
         col = QVBoxLayout()
         col.setSpacing(3)
         self.title = LinkText("Nothing playing", 15, QFont.Weight.DemiBold)
-        self.artist = LinkText("Search for a song to start", 12.5, QFont.Weight.Medium, 185)
+        self.artist = LinkText("Search for a song", 12.5, QFont.Weight.Medium, 185)
         self.credit = QLabel("")
         self.credit.hide()
         from .music_panels import QualityBadge
