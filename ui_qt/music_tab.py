@@ -2338,6 +2338,8 @@ class MusicTab(SocialPages, QWidget):
             self._build_chat(item)
         elif key == "account":
             self._build_account()
+        elif key == "people":
+            self._build_people(item)
         if self.pages.currentWidget() is not page:
             self._fade_in(page)
         self.pages.setCurrentWidget(page)
@@ -3159,6 +3161,7 @@ class MusicTab(SocialPages, QWidget):
         return on
 
     def _sync_saved(self):
+        self.hub.sync_soon() if getattr(self, "hub", None) is not None else None
         cur = self.current()
         on = bool(cur) and music_library.is_saved(cur)
         self.bar.save_btn.set_liked(on, animate=getattr(self, "_just_liked", False))

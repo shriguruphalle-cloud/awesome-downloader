@@ -191,8 +191,12 @@ def refresh_me():
     return u
 
 
-def update_me(handle=None, name=None, share_activity=None, show_artists=None):
+def update_me(handle=None, name=None, share_activity=None, show_artists=None, show_likes=None, private=None):
     b = {}
+    if show_likes is not None:
+        b["show_likes"] = bool(show_likes)
+    if private is not None:
+        b["private"] = bool(private)
     if handle is not None:
         b["handle"] = handle.strip().lstrip("@").lower()
     if name is not None:
@@ -258,6 +262,68 @@ def follow(user_id, on=True):
     return call("POST" if on else "DELETE", "/v1/follow/" + user_id)
 
 
+def remove_follower(user_id):
+    """Someone who follows you, made not to (they aren't told)."""
+    return call("DELETE", "/v1/followers/" + user_id)
+
+
+def suggest():
+    """People you may know, each with "why": follows_you, followed_by:handle[:n], popular:n or new."""
+    return call("GET", "/v1/users/suggest").get("people") or []
+
+
+def follow_list(handle, which):
+    """Who follows `handle` ("followers"), or whom they follow ("following")."""
+    return call("GET", "/v1/users/%s/%s" % (urllib.parse.quote(handle), which)).get("people") or []
+
+
+def playlist_of(handle, playlist_id):
+    """One of someone's playlists, songs and all."""
+    return call("GET", "/v1/users/%s/playlists/%s" % (urllib.parse.quote(handle),
+                                                      urllib.parse.quote(playlist_id, safe=""))).get("playlist")
+
+
+def new_followers(since):
+    """{"people": [...], "now": ms}: who started following you since `since`."""
+    return call("GET", "/v1/followers/new?since=%d" % int(since or 0))
+
+
+def top_listener():
+    """{"last_month", "champion"}: last month's top listener among you and the people you follow."""
+    return call("GET", "/v1/listeners/top")
+
+
+def add_listening(seconds):
+    """Seconds of music heard, for your profile and the month's top listener."""
+    return call("POST", "/v1/listen", {"seconds": int(seconds)})
+
+
+def latest_announcement(since):
+    return call("GET", "/v1/announcements/latest?since=%d" % int(since or 0))
+
+
+# ------------------------------------------------------------------ the library, in step with the phone
+def sync_library(taste):
+    """One sync of likes, playlists, history and taste picks (library_sync does the comparing; the later change
+    of an item wins, as between two phones). True when something here changed."""
+    from . import library_sync
+    changed = False
+    for _round in range(6):
+        prep = library_sync.prepare(taste, {})
+        res = call("POST", "/v1/sync", {"since": prep["since"], "changes": prep["changes"]})
+        got = library_sync.apply(taste, res.get("docs") or [], res.get("rev") or 0)
+        changed = changed or bool(got.get("changed"))
+        # the first time the server's library comes in before this PC's goes up; a long one comes in pages
+        if not prep.get("first") and not res.get("more"):
+            break
+    return changed
+
+
+def forget_sync():
+    from . import library_sync
+    library_sync.forget()
+
+
 # ------------------------------------------------------------------ chats
 def chats():
     return call("GET", "/v1/chats").get("chats") or []
@@ -292,8 +358,19 @@ def messages(chat_id, before=0, after=0):
     return call("GET", "/v1/chats/%s/messages%s" % (chat_id, q)).get("messages") or []
 
 
-def send_text(chat_id, text):
-    return call("POST", "/v1/chats/%s/messages" % chat_id, {"kind": "text", "text": text}).get("message")
+def send_text(chat_id, text, reply_to=None):
+    body = {"kind": "text", "text": text}
+    if reply_to:
+        body["reply_to"] = reply_to
+    return call("POST", "/v1/chats/%s/messages" % chat_id, body).get("message")
+
+
+def edit_text(chat_id, message_id, text):
+    return call("POST", "/v1/chats/%s/edit" % chat_id, {"id": message_id, "text": text})
+
+
+def unsend(chat_id, message_id):
+    return call("POST", "/v1/chats/%s/unsend" % chat_id, {"id": message_id})
 
 
 def send_item(chat_id, item, note=""):

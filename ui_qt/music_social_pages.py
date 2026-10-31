@@ -15,7 +15,7 @@ from . import music_look as look
 from . import theme
 from .browser_chrome import style_menu
 from .music_social import (Avatar, Bubble, ChatLive, ChatRow, Compose, Field, Glass, Hub, JamChip, JamClient,
-                           PersonRow, SignInCard, SongCard, _alive, _label, label_of, pick_avatar)
+                           PersonRow, SignInCard, SongCard, _alive, _label, label_of, pick_avatar, when)
 from .music_widgets import Pill
 
 
@@ -36,15 +36,27 @@ class SocialPages:
     """Mixed into MusicTab. Uses the tab's _pages, _here, go(), play_from(), current(), queue / index /
     player / _started, status, rail and the corner row."""
 
-    SOCIAL_PAGES = ("friends", "profile", "chats", "chat", "account")
+    SOCIAL_PAGES = ("friends", "profile", "people", "chats", "chat", "account")
 
     def _init_social(self, corner_row):
         self.hub = Hub(self)
         self.hub.toast.connect(self.status.setText)
         self.hub.changed.connect(self._social_changed)
         self.hub.account_changed.connect(self._social_account)
+        self.hub.library_changed.connect(self._library_arrived)
+        self.hub.notify.connect(self._tell)
+        self.hub.taste = self.taste
+        self.hub.is_playing = self._playing
         self.chat_live = ChatLive(self)
         self.chat_live.message.connect(self._chat_message)
+        self.chat_live.edited.connect(self._chat_edited)
+        self.chat_live.unsent.connect(self._chat_unsent)
+        self._bubbles = {}
+        self._compose = None
+        self._seen_label = None
+        self._tray = None
+        self._tray_open = None
+        QApplication.instance().aboutToQuit.connect(self.hub.flush_listening)
         self.jam = JamClient(self.hub, self)
         self.jam.follow_fn = self.jam_follow
         self.jam.here_fn = lambda: (list(self.queue), self.index,
@@ -63,6 +75,53 @@ class SocialPages:
         self._social_lists = {}
         self.hub.start()
 
+    # ---- the phone's library arrived ----
+    def _library_arrived(self):
+        self._sync_saved()
+        self._sync_rail()
+        here = self._here[0] if self._here else None
+        if here in ("songs", "artists", "albums", "playlist"):
+            self.go(here, self._here[1], push=False)
+
+    # ---- telling you: a banner while you're here, a Windows notification while you're away ----
+    def _tell(self, title, text, target):
+        if not bool(self.settings.get("music_notifications", True)) if self.settings is not None else False:
+            return
+        win = self.window()
+        here = win.isActiveWindow() and self.isVisible()
+        if here:
+            if target and target[0] == "chat" and self._chat_open == target[1].get("id"):
+                return
+            self.status.setText("%s — %s" % (title, text))
+            return
+        self._tray_message(title, text, target)
+
+    def _tray_message(self, title, text, target):
+        from PySide6.QtWidgets import QSystemTrayIcon
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        if self._tray is None:
+            self._tray = QSystemTrayIcon(self.window().windowIcon(), self)
+            self._tray.setToolTip("Awesome Music")
+            self._tray.messageClicked.connect(self._tray_clicked)
+            self._tray.show()
+        self._tray_open = target
+        self._tray.showMessage(title, text or title, QSystemTrayIcon.MessageIcon.NoIcon, 7000)
+
+    def _tray_clicked(self):
+        win = self.window()
+        win.showNormal() if win.isMinimized() else win.show()
+        win.raise_()
+        win.activateWindow()
+        target, self._tray_open = self._tray_open, None
+        stack = getattr(win, "tabs", None)
+        if stack is not None and stack.indexOf(self) >= 0:
+            stack.setCurrentWidget(self)
+        if target and target[0] == "chat":
+            self.go("chat", {"id": target[1]["id"], "title": target[1].get("title")})
+        elif target and target[0] == "profile" and target[1]:
+            self.go("profile", {"handle": target[1]})
+
     def _social_page_left(self, key):
         """go() is opening `key`: a chat that's no longer on screen stops being live."""
         if key != "chat" and getattr(self, "chat_live", None) is not None:      # (the first page opens before it's made)
@@ -79,6 +138,8 @@ class SocialPages:
             self._fill_friends()
         elif here == "chats":
             self._fill_chats()
+        elif here == "chat":
+            self._show_seen()
 
     def _social_account(self):
         here = self._here[0] if self._here else None
@@ -169,8 +230,98 @@ class SocialPages:
         page.add(people, "Your people")
         self._fill_friends()
         self.hub.refresh()
+        self._add_top_listener(page)
+        self._add_suggestions(page)
         if me and not me.get("handle"):
             self.status.setText("Pick a username in Your profile so friends can find you.")
+
+    @staticmethod
+    def _why(why):
+        """The words for why someone is suggested."""
+        why = why or ""
+        if why == "follows_you":
+            return "Follows you"
+        if why.startswith("followed_by:"):
+            parts = why.split(":")
+            more = " and %s more" % parts[2] if len(parts) > 2 else ""
+            return "Followed by @%s%s" % (parts[1], more)
+        if why.startswith("popular:"):
+            return "%s followers" % why.split(":")[1]
+        return "New on Awesome Music" if why == "new" else ""
+
+    def _add_suggestions(self, page):
+        box = QWidget()
+        col = QVBoxLayout(box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(2)
+        page.add(box, "People you may know")
+
+        def ok(people):
+            if not _alive(box):
+                return
+            box.setVisible(bool(people))
+            for p in people[:8]:
+                btn = Pill("Follow back" if p.get("follows_you") else "Follow", style="solid")
+                btn.clicked.connect(lambda _c=False, p=p: self._follow(p, True))
+                row = PersonRow(dict(p, why_text=self._why(p.get("why"))), btn)
+                row.clicked.connect(lambda _c=False, p=p: p.get("handle") and self.go("profile", {"handle": p["handle"]}))
+                col.addWidget(row)
+        self.hub.run(social.suggest, ok, lambda _e: None)
+
+    def _add_top_listener(self, page):
+        def ok(r):
+            who = r.get("champion")
+            if not who or not _alive(page) or not self._here or self._here[0] != "friends":
+                return
+            if who.get("self"):
+                text = "You were last month's top listener, with %d hours." % ((who.get("seconds") or 0) // 3600)
+            else:
+                text = "%s was your circle's top listener last month." % label_of(who)
+            card = Glass()
+            card.setMaximumWidth(620)
+            card.col.addWidget(_label(text, 13.5, QFont.Weight.DemiBold, look.TEXT, wrap=True))
+            page.add(card, "Top listener")
+        self.hub.run(social.top_listener, ok, lambda _e: None)
+
+    # ---- who follows whom ----
+    def _build_people(self, what):
+        page = self._pages["people"]
+        page.clear()
+        page.art_url = None
+        handle, which = what["handle"], what["which"]
+        page.hero.set_text("@" + handle, which.title(), "")
+        box = QWidget()
+        box.setMaximumWidth(760)
+        col = QVBoxLayout(box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(2)
+        page.add(box)
+        mine = (self.hub.me or {}).get("handle") == handle
+
+        def ok(people):
+            if not _alive(box):
+                return
+            self._fill_people(col, [p for p in people if not p.get("self")], "No one yet.")
+            if mine and which == "followers":
+                for i in range(col.count()):
+                    row = col.itemAt(i).widget()
+                    if isinstance(row, PersonRow):
+                        row.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                        row.setToolTip("Right-click to remove this follower")
+                        row.customContextMenuRequested.connect(lambda _p, r=row: self._follower_menu(r.person, what))
+
+        def fail(e):
+            if _alive(page):
+                page.hero.set_text("@" + handle, which.title(), str(e))
+        self.hub.run(lambda: social.follow_list(handle, which), ok, fail)
+
+    def _follower_menu(self, person, what):
+        menu = style_menu(QMenu(self), theme.tokens(True))
+        menu.addAction("Remove this follower", lambda: self.hub.run(
+            lambda: social.remove_follower(person["id"]),
+            lambda _r: (self.status.setText("%s no longer follows you." % label_of(person)),
+                        self.go("people", what, push=False), self.hub.refresh())))
+        menu.exec(QCursor.pos())
 
     def _fill_people(self, col, people, empty):
         _empty(col)
@@ -240,7 +391,15 @@ class SocialPages:
                 return
             u = r.get("user") or {}
             page.hero.set_text("@" + (u.get("handle") or ""), label_of(u),
-                               "%d followers · following %d" % (u.get("followers") or 0, u.get("following") or 0))
+                               "%d followers · following %d" % (u.get("followers") or 0, u.get("following_count") or 0))
+            if not u.get("locked"):
+                for which in ("followers", "following"):
+                    b = Pill(which.title(), style="glass")
+                    b.clicked.connect(lambda _c=False, w=which: self.go("people", {"handle": u.get("handle"), "which": w}))
+                    page.hero.add_action(b)
+            if u.get("self") and u.get("listen_total"):
+                page.add(_label("You've listened for %d hours this month, %d in all." % (
+                    (u.get("listen_month") or 0) // 3600, (u.get("listen_total") or 0) // 3600), 13, color=look.TEXT_2))
             if not u.get("self"):
                 if u.get("following"):
                     msg = Pill("Message", style="solid")
@@ -262,8 +421,14 @@ class SocialPages:
                 card.setMaximumWidth(620)
                 card.col.addWidget(SongCard(now, relay))
                 page.add(card, "Playing now")
-            for title, items, kind in (("Artists they like", r.get("artists") or [], None),
-                                       ("Playlists", r.get("playlists") or [], "mix")):
+            if u.get("locked"):
+                page.add(_label("This profile is private. It opens to the people it follows.", 13, color=look.TEXT_2))
+                return
+            pl_relay = _Relay(page)
+            pl_relay.play.connect(lambda it, h=u.get("handle"): self._open_their_playlist(h, it))
+            for title, items, rl in (("Artists they like", r.get("artists") or [], relay),
+                                     ("Liked songs", r.get("liked") or [], relay),
+                                     ("Playlists", r.get("playlists") or [], pl_relay)):
                 if not items:
                     continue
                 box = QWidget()
@@ -271,16 +436,25 @@ class SocialPages:
                 bl.setContentsMargins(0, 0, 0, 0)
                 bl.setSpacing(2)
                 for it in items[:30]:
-                    bl.addWidget(SongCard(dict(it, kind=kind) if kind else it, relay))
+                    bl.addWidget(SongCard(it, rl))
                 box.setMaximumWidth(620)
                 page.add(box, title)
-            if not now and not r.get("artists") and not r.get("playlists"):
+            if not now and not r.get("artists") and not r.get("playlists") and not r.get("liked"):
                 page.add(_label("Nothing to show yet.", 13, color=look.TEXT_3))
 
         def fail(e):
             if _alive(page):
                 page.hero.set_text("Profile", "@" + handle, str(e))
         self.hub.run(lambda: social.profile(handle), ok, fail)
+
+    def _open_their_playlist(self, handle, item):
+        def ok(pl):
+            songs = (pl or {}).get("tracks") or []
+            if songs:
+                self.play_from(songs[0], songs)
+            else:
+                self.status.setText("That playlist is empty.")
+        self.hub.run(lambda: social.playlist_of(handle, item.get("id")), ok)
 
     # ---- Chats ----
     def _build_chats(self):
@@ -367,9 +541,16 @@ class SocialPages:
         self._chat_box.setContentsMargins(0, 0, 0, 0)
         self._chat_box.setSpacing(4)
         self._chat_seen = set()
+        self._bubbles = {}
         page.add(box)
+        self._seen_label = _label("", 11.5, color=look.TEXT_3)
+        self._seen_label.setMaximumWidth(820)
+        self._seen_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._seen_label.hide()
+        page.add(self._seen_label, gap=0)
         compose = Compose()
         compose.setMaximumWidth(820)
+        self._compose = compose
         compose.send.connect(lambda t: self._chat_send(cid, t))
         compose.share_now.connect(lambda: self._share_current_to(cid))
         compose.start_jam.connect(lambda: self.jam.start(cid))
@@ -384,6 +565,7 @@ class SocialPages:
             QTimer.singleShot(60, lambda: page.verticalScrollBar().setValue(page.verticalScrollBar().maximum()))
             self.hub.run(lambda: social.mark_read(cid), lambda _r: self.hub.refresh(), lambda _e: None)
             QTimer.singleShot(80, compose.field.edit.setFocus)
+            self._show_seen()
         self.hub.run(lambda: social.messages(cid), ok)
 
     def _chat_message(self, m, scroll=True):
@@ -394,10 +576,17 @@ class SocialPages:
         self._chat_seen.add(m.get("id"))
         me_id = (self.hub.me or {}).get("id")
         who = self._chat_members.get(m.get("user")) if len(self._chat_members) > 2 else None
-        b = Bubble(m, m.get("user") == me_id, label_of(who) if who else None, QColor(125, 211, 252))
+        quoted = None
+        if m.get("reply"):
+            ru = (m["reply"] or {}).get("user")
+            quoted = "You" if ru == me_id else label_of(self._chat_members.get(ru) or {})
+        b = Bubble(m, m.get("user") == me_id, label_of(who) if who else None, QColor(125, 211, 252), quoted=quoted)
         b.play.connect(self._play_shared)
         b.join.connect(self.jam.join)
+        b.menu_asked.connect(self._bubble_menu)
+        self._bubbles[m.get("id")] = b
         self._chat_box.addWidget(b)
+        self._show_seen()
         if scroll:
             page = self._pages["chat"]
             QTimer.singleShot(40, lambda: page.verticalScrollBar().setValue(page.verticalScrollBar().maximum()))
@@ -406,7 +595,91 @@ class SocialPages:
                 self.hub.run(lambda: social.mark_read(cid), lambda _r: None, lambda _e: None)
 
     def _chat_send(self, cid, text):
-        self.hub.run(lambda: social.send_text(cid, text), lambda m: (self._chat_message(m), self.hub.refresh()))
+        c = self._compose
+        editing = c.editing if c is not None and _alive(c) else None
+        reply = c.reply_to if c is not None and _alive(c) else None
+        if c is not None and _alive(c):
+            c.reply_to = c.editing = None
+            c.clear_note()
+        if editing is not None:
+            mid = editing.get("id")
+            self.hub.run(lambda: social.edit_text(cid, mid, text),
+                         lambda _r: self._chat_edited({"id": mid, "text": text}))
+            return
+        rid = (reply or {}).get("id")
+        self.hub.run(lambda: social.send_text(cid, text, rid), lambda m: (self._chat_message(m), self.hub.refresh()))
+
+    def _bubble_menu(self, bubble, pos):
+        m = bubble.msg
+        cid = self._chat_open
+        menu = style_menu(QMenu(self), theme.tokens(True))
+        who = self._chat_members.get(m.get("user")) or {}
+        menu.addAction("Reply", lambda: self._compose.answer(m, "yourself" if bubble.mine else label_of(who)))
+        if m.get("kind") == "text":
+            menu.addAction("Copy", lambda: QApplication.clipboard().setText(m.get("text") or ""))
+        if bubble.mine:
+            if m.get("kind") == "text":
+                menu.addAction("Edit", lambda: self._compose.edit(m))
+            menu.addAction("Unsend", lambda: self.hub.run(lambda: social.unsend(cid, m.get("id")),
+                                                          lambda _r: self._chat_unsent(m.get("id"))))
+        menu.addSeparator()
+        for line in self._seen_lines(m):
+            menu.addAction(line).setEnabled(False)
+        menu.exec(pos)
+
+    def _chat_edited(self, e):
+        b = self._bubbles.get(e.get("id"))
+        if b is not None and _alive(b):
+            b.set_text(e.get("text") or "")
+
+    def _chat_unsent(self, mid):
+        b = self._bubbles.pop(mid, None)
+        if b is not None and _alive(b):
+            b.setParent(None)
+            b.deleteLater()
+        self._show_seen()
+        self.hub.refresh()
+
+    def _chat_view(self):
+        return next((c for c in self.hub.chats if c["id"] == self._chat_open), None) or {}
+
+    def _seen_lines(self, m):
+        """In a group, who has seen a message and who hasn't yet."""
+        me_id = (self.hub.me or {}).get("id")
+        others = [x for x in self._chat_view().get("members") or [] if x.get("id") != me_id]
+        if m.get("user") != me_id or not others:
+            return []
+        seen = [label_of(x) for x in others if (x.get("last_read") or 0) >= (m.get("at") or 0)]
+        wait = [label_of(x) for x in others if (x.get("last_read") or 0) < (m.get("at") or 0)]
+        out = []
+        if seen:
+            out.append("Seen by " + ", ".join(seen))
+        if wait:
+            out.append("Not yet: " + ", ".join(wait))
+        return out
+
+    def _show_seen(self):
+        """Under your last message: Sent, Seen; in a group, Seen by N or Seen by everyone."""
+        lab = self._seen_label
+        if lab is None or not _alive(lab):
+            return
+        me_id = (self.hub.me or {}).get("id")
+        ids = sorted(self._bubbles)
+        last = self._bubbles[ids[-1]].msg if ids else None
+        if not last or last.get("user") != me_id:
+            lab.hide()
+            return
+        chat = self._chat_view()
+        others = [x for x in chat.get("members") or [] if x.get("id") != me_id]
+        n = sum(1 for x in others if (x.get("last_read") or 0) >= (last.get("at") or 0))
+        if not n:
+            text = "Sent"
+        elif chat.get("kind") == "group":
+            text = "Seen by everyone" if n == len(others) else "Seen by %d" % n
+        else:
+            text = "Seen"
+        lab.setText(text)
+        lab.show()
 
     def _leave_chat(self, cid):
         if QMessageBox.question(self, "Leave the group",
@@ -528,20 +801,49 @@ class SocialPages:
         priv.setMaximumWidth(620)
         for key, text, sub in (("share_activity", "Show friends what I'm playing",
                                 "Friends see the song you're on, and can play it too."),
-                               ("show_artists", "Show the artists I like on my profile", "")):
+                               ("show_artists", "Show the artists I like on my profile", ""),
+                               ("show_likes", "Show my liked songs on my profile", ""),
+                               ("private", "Private profile",
+                                "Only people you follow see your playlists, likes and what you play.")):
             row = QHBoxLayout()
             col = QVBoxLayout()
             col.addWidget(_label(text, 13.5, QFont.Weight.DemiBold, look.TEXT))
             if sub:
                 col.addWidget(_label(sub, 12, color=look.TEXT_3))
             row.addLayout(col, 1)
-            on = me.get(key, True)
+            on = me.get(key, key != "private")
             pill = Pill("On" if on else "Off", style="tab_on" if on else "glass")
             pill.clicked.connect(lambda _c=False, k=key, v=not on: self.hub.run(
                 lambda: social.update_me(**{k: v}), lambda _u: self.hub.account_changed.emit()))
             row.addWidget(pill)
             priv.col.addLayout(row)
         page.add(priv, "Privacy")
+        lib = Glass()
+        lib.setMaximumWidth(620)
+        row = QHBoxLayout()
+        col = QVBoxLayout()
+        col.addWidget(_label("Keep my library the same on my phone and this PC", 13.5, QFont.Weight.DemiBold, look.TEXT))
+        hb = self.hub
+        state = ("Couldn't sync: %s" % hb.sync_error) if hb.sync_error else (
+            "Synced %s" % when(int(hb.synced_at * 1000)) if hb.synced_at else "Likes, playlists, history and your taste")
+        col.addWidget(_label(state, 12, color=look.TEXT_3))
+        row.addLayout(col, 1)
+        now_btn = Pill("Sync now", style="glass")
+        now_btn.clicked.connect(lambda: (self.hub.sync(), self.status.setText("Syncing your library…")))
+        row.addWidget(now_btn)
+        lib.col.addLayout(row)
+        row2 = QHBoxLayout()
+        col2 = QVBoxLayout()
+        col2.addWidget(_label("Notifications", 13.5, QFont.Weight.DemiBold, look.TEXT))
+        col2.addWidget(_label("Messages, new followers and news, while the app is in the background.", 12,
+                              color=look.TEXT_3))
+        row2.addLayout(col2, 1)
+        n_on = bool((self.settings or {}).get("music_notifications", True))
+        n_btn = Pill("On" if n_on else "Off", style="tab_on" if n_on else "glass")
+        n_btn.clicked.connect(lambda: (self.set_pref("music_notifications", not n_on), self.go("account", None, push=False)))
+        row2.addWidget(n_btn)
+        lib.col.addLayout(row2)
+        page.add(lib, "This PC and your phone")
         acct = QWidget()
         al = QHBoxLayout(acct)
         al.setContentsMargins(0, 0, 0, 0)

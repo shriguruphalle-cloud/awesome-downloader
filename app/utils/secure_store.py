@@ -130,6 +130,7 @@ def covered_paths():
             browser_data.SHORTCUTS_PATH, browser_data.PREFS_PATH, video_queue_state.STATE_PATH,
             download_queue_state.STATE_PATH, torrent_state.STATE_PATH, music_library.PATH,
             os.path.join(config.APPDATA_DIR, "music_taste.json"),
+            os.path.join(config.APPDATA_DIR, "sync_state.json"),      # the library's sync with the phone
             os.path.join(config.APPDATA_DIR, "music_account.json")]     # the Awesome Music sign-in (app.core.social)
 
 

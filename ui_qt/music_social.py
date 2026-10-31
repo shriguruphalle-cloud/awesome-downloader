@@ -72,6 +72,8 @@ def label_of(person):
 class Hub(QObject):
     """You and your people, kept up to date while you're signed in."""
     changed = Signal()               # people / chats / jams
+    library_changed = Signal()       # the phone's likes or playlists arrived
+    notify = Signal(str, str, object)    # title, text, what to open (("chat", chat) | ("profile", handle) | None)
     account_changed = Signal()       # signed in or out, or your profile changed
     toast = Signal(str)
     _back = Signal(object, object, object, object)      # callback, result, error-callback, error
@@ -89,6 +91,26 @@ class Hub(QObject):
         self._gone.connect(self._signed_out)
         social.on_signed_out(self._gone.emit)       # (may come from a worker thread)
         self._busy = False
+        self.taste = None                # the tab's model, for the library's sync
+        self.is_playing = None           # () -> whether music is playing
+        self.synced_at = 0.0
+        self.sync_error = None
+        self._syncing = False
+        self._sync_again = False
+        self._sync_soon = QTimer(self)
+        self._sync_soon.setSingleShot(True)
+        self._sync_soon.setInterval(4000)
+        self._sync_soon.timeout.connect(self.sync)
+        self._sync_timer = QTimer(self)
+        self._sync_timer.setInterval(5 * 60_000)
+        self._sync_timer.timeout.connect(self.sync)
+        self._unsent = 0                 # seconds heard, not yet told to the server
+        self._listen_timer = QTimer(self)
+        self._listen_timer.setInterval(10_000)
+        self._listen_timer.timeout.connect(self._listened)
+        self._told = {}                  # chat id -> the last message time told
+        self._looked = False
+        self._news = {"follow_since": 0, "news_since": 0}
 
     # ---- running things off the UI thread ----
     def run(self, fn, ok=None, fail=None):
@@ -128,16 +150,31 @@ class Hub(QObject):
         if not social.signed_in():
             return
         self.run(social.refresh_me, lambda _u: self.account_changed.emit(), lambda _e: None)
-        self.refresh()
-        self._timer.start()
+        self._started()
 
     def signed_in_now(self):
         self.account_changed.emit()
+        self._started()
+
+    def _started(self):
         self.refresh()
+        self.sync()
         self._timer.start()
+        self._sync_timer.start()
+        self._listen_timer.start()
 
     def _signed_out(self):
         self._timer.stop()
+        self._sync_timer.stop()
+        self._listen_timer.stop()
+        self._unsent = 0
+        self._told, self._looked = {}, False
+        self._news = {"follow_since": 0, "news_since": 0}
+        self.synced_at, self.sync_error = 0.0, None
+        try:
+            social.forget_sync()
+        except OSError:
+            pass
         self.people, self.chats, self.live = [], [], []
         self._presence = None
         self.account_changed.emit()
@@ -164,6 +201,8 @@ class Hub(QObject):
                 self.live = res[2]
             self.error = None
             self.changed.emit()
+            self._tell_messages()
+            self._check_news()
 
         def fail(e):
             self._busy = False
@@ -173,6 +212,94 @@ class Hub(QObject):
 
     def unread(self):
         return sum(1 for c in self.chats if c.get("unread"))
+
+    # ---- the library, in step with the phone ----
+    def sync(self):
+        """One sync now (a second asked for meanwhile follows it)."""
+        if not social.signed_in() or self.taste is None:
+            return
+        if self._syncing:
+            self._sync_again = True
+            return
+        self._syncing = True
+
+        def ok(changed):
+            self._syncing = False
+            self.synced_at, self.sync_error = time.time(), None
+            if changed:
+                self.library_changed.emit()
+            if self._sync_again:
+                self._sync_again = False
+                self.sync_soon()
+
+        def fail(e):
+            self._syncing = False
+            self.sync_error = str(e)
+        self.run(lambda: social.sync_library(self.taste), ok, fail)
+
+    def sync_soon(self):
+        """A change here (a like, a playlist): synced a few seconds on, several together as one."""
+        if social.signed_in():
+            self._sync_soon.start()
+
+    # ---- how long you listen ----
+    def _listened(self):
+        if self.is_playing is not None and self.is_playing():
+            self._unsent += 10
+        if self._unsent >= 180:
+            self.flush_listening()
+
+    def flush_listening(self):
+        secs, self._unsent = self._unsent, 0
+        if secs >= 60 and social.signed_in():
+            def fail(_e):
+                self._unsent += secs     # kept for the next time
+            self.run(lambda: social.add_listening(secs), lambda _r: None, fail)
+        else:
+            self._unsent = secs
+
+    # ---- what to tell you ----
+    def _tell_messages(self):
+        """New messages, once each. The first look after starting only takes note: no flood of old ones."""
+        me_id = (social.me() or {}).get("id")
+        first = not self._looked
+        self._looked = True
+        for c in self.chats:
+            at = c.get("last_at") or 0
+            if at <= self._told.get(c["id"], 0):
+                continue
+            self._told[c["id"]] = at
+            if first or not c.get("unread") or c.get("last_by") == me_id:
+                continue
+            who = next((label_of(m) for m in c.get("members") or [] if m.get("id") == c.get("last_by")), c.get("title"))
+            last = c.get("last_text") or ""
+            if "jam" in last.lower():
+                text = "%s invited you to listen together" % who
+            elif last.startswith("Shared "):
+                text = "%s sent you %s" % (who, last[len("Shared "):])
+            else:
+                text = "%s: %s" % (who, last) if c.get("kind") == "group" else last
+            self.notify.emit(c.get("title") or who or "New message", text, ("chat", c))
+
+    def _check_news(self):
+        """New followers and the app's announcements, each told once."""
+        news = dict(self._news)
+
+        def fetch():
+            return social.new_followers(news["follow_since"]), social.latest_announcement(news["news_since"])
+
+        def ok(res):
+            fol, ann = res
+            self._news["follow_since"] = fol.get("now") or news["follow_since"]
+            a = ann.get("announcement")
+            self._news["news_since"] = (a or {}).get("at") or ann.get("now") or news["news_since"]
+            if news["follow_since"]:
+                for p in (fol.get("people") or [])[:5]:
+                    text = "%s started following you%s" % (label_of(p), "" if p.get("following") else " — follow back?")
+                    self.notify.emit("New follower", text, ("profile", p.get("handle")))
+            if news["news_since"] and a:
+                self.notify.emit(a.get("title") or "Awesome Music", a.get("body") or "", None)
+        self.run(fetch, ok, lambda _e: None)
 
     def playing(self, track):
         """A song started (or None: stopped) -- friends see it, when you share what you play."""
@@ -199,6 +326,8 @@ def _socket_request(path):
 class ChatLive(QObject):
     """One chat, live while it's on screen."""
     message = Signal(dict)
+    edited = Signal(dict)
+    unsent = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -235,6 +364,10 @@ class ChatLive(QObject):
             return
         if m.get("t") == "message" and isinstance(m.get("message"), dict):
             self.message.emit(m["message"])
+        elif m.get("t") == "edited":
+            self.edited.emit(m)
+        elif m.get("t") == "unsent":
+            self.unsent.emit(m.get("id"))
 
     def _lost(self, ws):
         if ws is not self._ws or self.chat_id is None:
@@ -637,7 +770,8 @@ class PersonRow(_Clickable):
             rel = "Friends" if person.get("following") and person.get("follows_you") else (
                 "Follows you" if person.get("follows_you") else ("Following" if person.get("following") else ""))
             sub = "@%s" % person.get("handle") if person.get("handle") else ""
-            col.addWidget(_label(" · ".join(x for x in (sub, rel) if x), 12, color=look.TEXT_3))
+            col.addWidget(_label(" · ".join(x for x in (sub, person.get("why_text") or rel) if x), 12,
+                                 color=look.TEXT_3))
         row.addLayout(col, 1)
         if button is not None:
             row.addWidget(button)
@@ -718,10 +852,14 @@ class Bubble(QWidget):
     that plays when clicked, or an invitation to a jam."""
     play = Signal(object)
     join = Signal(str)
+    menu_asked = Signal(object, object)      # this bubble, where
 
-    def __init__(self, msg, mine, sender=None, accent=None, parent=None):
+    def __init__(self, msg, mine, sender=None, accent=None, parent=None, quoted=None):
         super().__init__(parent)
         self.msg, self.mine = msg, mine
+        self.text_label = None
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(lambda pos: self.menu_asked.emit(self, self.mapToGlobal(pos)))
         self.accent = QColor(accent or QColor(125, 211, 252))
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 2, 0, 2)
@@ -734,6 +872,13 @@ class Bubble(QWidget):
             col.addWidget(_label(sender, 11.5, QFont.Weight.DemiBold, QColor(125, 211, 252, 230)))
         kind = msg.get("kind")
         item = msg.get("item") or {}
+        reply = msg.get("reply")
+        if reply:
+            q = _label(("%s: " % quoted if quoted else "") + (reply.get("text") or "A message"), 12, color=look.TEXT_2,
+                       wrap=True)
+            q.setStyleSheet(q.styleSheet() + " border-left: 2px solid rgba(125,211,252,200); padding-left: 8px;")
+            q.setMaximumWidth(460)
+            col.addWidget(q)
         if kind == "item" and item:
             col.addWidget(SongCard(item, self))
             if msg.get("text"):
@@ -748,10 +893,13 @@ class Bubble(QWidget):
         else:
             t = _label(msg.get("text", ""), 13.5, color=look.TEXT, wrap=True)
             t.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            t.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)   # (the bubble's own menu, not the label's)
             t.setMaximumWidth(460)
             col.addWidget(t)
-        tm = _label(time.strftime("%H:%M", time.localtime((msg.get("at") or 0) / 1000.0)), 10.5, color=look.TEXT_3)
-        col.addWidget(tm, 0, Qt.AlignmentFlag.AlignRight)
+            self.text_label = t
+        self.time_label = _label("", 10.5, color=look.TEXT_3)
+        col.addWidget(self.time_label, 0, Qt.AlignmentFlag.AlignRight)
+        self._show_time()
         self.card.setMaximumWidth(500)
         if mine:
             outer.addStretch(1)
@@ -759,6 +907,17 @@ class Bubble(QWidget):
         else:
             outer.addWidget(self.card)
             outer.addStretch(1)
+
+    def _show_time(self):
+        at = time.strftime("%H:%M", time.localtime((self.msg.get("at") or 0) / 1000.0))
+        self.time_label.setText(("edited · " if self.msg.get("edited") else "") + at)
+
+    def set_text(self, text):
+        """Edited, by its sender (here or on another device)."""
+        self.msg["text"], self.msg["edited"] = text, True
+        if self.text_label is not None:
+            self.text_label.setText(text)
+        self._show_time()
 
     def eventFilter(self, obj, ev):
         from PySide6.QtCore import QEvent
@@ -1058,6 +1217,18 @@ class Compose(Glass):
     def __init__(self, parent=None):
         super().__init__(24, parent)
         self.col.setContentsMargins(8, 8, 8, 8)
+        self.reply_to = None             # the message being answered
+        self.editing = None              # the message being edited
+        strip = QHBoxLayout()
+        self.note = _label("", 12, color=look.TEXT_2)
+        self.note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.note_close = icon_button("close", "Cancel", 24, 11)
+        self.note_close.clicked.connect(self.clear_note)
+        strip.addWidget(self.note, 1)
+        strip.addWidget(self.note_close)
+        self.col.addLayout(strip)
+        self.note.hide()
+        self.note_close.hide()
         row = QHBoxLayout()
         row.setSpacing(8)
         self.share_btn = icon_button("note", "Share the song that's playing", 38, 18)
@@ -1074,6 +1245,28 @@ class Compose(Glass):
         row.addWidget(self.field, 1)
         row.addWidget(self.send_btn)
         self.col.addLayout(row)
+
+    def answer(self, msg, who):
+        self.editing, self.reply_to = None, msg
+        self._note("Replying to %s: %s" % (who, msg.get("text") or "a song"))
+
+    def edit(self, msg):
+        self.reply_to, self.editing = None, msg
+        self.field.edit.setText(msg.get("text") or "")
+        self._note("Editing your message")
+
+    def _note(self, text):
+        self.note.setText(text)
+        self.note.show()
+        self.note_close.show()
+        self.field.edit.setFocus()
+
+    def clear_note(self):
+        if self.editing is not None:
+            self.field.edit.clear()
+        self.reply_to = self.editing = None
+        self.note.hide()
+        self.note_close.hide()
 
     def _send(self):
         t = self.field.text().strip()
