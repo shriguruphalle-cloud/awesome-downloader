@@ -59,7 +59,7 @@ def add_bookmark(url, title):
     bookmarks = load_bookmarks()
     if is_bookmarked(bookmarks, url):
         return bookmarks
-    bookmarks.append({"url": url, "title": title or url})
+    bookmarks.append({"url": url, "title": url if title is None else title.strip()})   # "" = icon only
     _save(BOOKMARKS_PATH, bookmarks)
     return bookmarks
 
@@ -75,7 +75,7 @@ def update_bookmark(old_url, url, title):
     out = []
     for b in bookmarks:
         if b.get("url") == old_url:
-            out.append(dict(b, url=url, title=(title or "").strip() or url))
+            out.append(dict(b, url=url, title=(title or "").strip()))   # "" = icon only on the bar
         elif b.get("url") != url:
             out.append(b)
     _save(BOOKMARKS_PATH, out)

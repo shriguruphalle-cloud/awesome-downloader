@@ -31,7 +31,7 @@ browser_data.update_bookmark("https://site2.example/", "   ", "Nothing")
 check(urls() == before, "an empty address was saved")
 browser_data.update_bookmark("https://site2.example/", "https://x.example/", "")
 x = next(b for b in browser_data.load_bookmarks() if b["url"] == "https://x.example/")
-check(x["title"] == "https://x.example/", "an empty name didn't fall back to the address")
+check(x["title"] == "", "an empty name wasn't kept (the bar shows only the icon, as Chrome does)")
 print("storage: edited in place, no duplicates, no empty address")
 
 # ---- what the URL box accepts --------------------------------------------------------------

@@ -319,9 +319,11 @@ class _NativeDownload(QObject):
     page's cookies and session come along); this mirrors it onto a card in
     the Download tab and drives pause, resume and cancel from there."""
 
-    def __init__(self, browser, op, path, host):
+    def __init__(self, browser, op, path, host, view=None):
         super().__init__(browser)
         self.browser = browser
+        self.view = view                # the page that started it: a failed start is tried again there
+        self._auto_retried = False
         self.op = op
         self.path = path
         self.name = os.path.basename(path)
@@ -362,6 +364,18 @@ class _NativeDownload(QObject):
             logger.exception("Pause/resume failed")
 
     def retry(self):
+        uri = ""
+        try:
+            uri = str(self.op.Uri)
+        except Exception:   # noqa: BLE001
+            pass
+        if self.view is not None and uri.startswith(("http://", "https://")) and self.finished:
+            # a download that failed from the start: ask the same page for it again (same session, cookies)
+            logger.info("Asking for the download again from its page")
+            self.browser._retry_uris.add(uri)
+            self.browser.download_tab.remove_job(self.job_id)
+            self.view.load(uri)
+            return
         try:
             if self.op.CanResume:
                 self.finished = False
@@ -370,6 +384,11 @@ class _NativeDownload(QObject):
                 self._timer.start()
         except Exception:   # noqa: BLE001
             logger.exception("Resume failed")
+
+    def _retry_once(self, uri):
+        """Not an automatic retry any more (resuming a download that never began left cards stuck at 0%):
+        the failure is shown, and Retry on the card asks for the file again from the page that started it."""
+        return False
 
     def play(self):
         if self.path and os.path.exists(self.path):
@@ -415,6 +434,15 @@ class _NativeDownload(QObject):
             elif self.paused or reason == "UserPaused":
                 dt.update_progress(self.job_id, self._pct, "Paused  •  " + size)
             else:
+                # what happened, in the log: the reason alone ("FileFailed") said too little to find a cause
+                try:
+                    uri = str(self.op.Uri)
+                except Exception:   # noqa: BLE001
+                    uri = "?"
+                logger.warning("Browser download failed: %s after %d of %d bytes; to %s; from %s",
+                               reason, received, total, self.path, uri[:200])
+                if not self._auto_retried and self._retry_once(uri):
+                    return
                 pretty = _INTERRUPT_REASONS.get(reason) or re.sub(r"(?<!^)([A-Z])", r" \1", reason).lower()
                 dt.mark_failed(self.job_id, f"Failed: {pretty}")
                 self._end()
@@ -471,6 +499,7 @@ class BrowserTab(QWidget):
         self._fs_timer.setInterval(100)
         self._fs_timer.timeout.connect(self._fs_poll)
         self._downloads = []
+        self._retry_uris = set()        # downloads being asked for a second time (_NativeDownload._retry_once)
         self._status_busy = False
         self._panel = None
         self._watched_window = None
@@ -1471,10 +1500,17 @@ class BrowserTab(QWidget):
         try:
             suggested = os.path.basename(str(args.ResultFilePath or "")) or "download"
             os.makedirs(self.download_dir, exist_ok=True)
-            path = _unique_path(os.path.join(self.download_dir, suggested))
+            path = _unique_path(os.path.normpath(os.path.abspath(os.path.join(self.download_dir, suggested))))
             args.ResultFilePath = path
             args.Handled = True     # no engine download flyout: the Download tab shows it
-            dl = _NativeDownload(self, args.DownloadOperation, path, _title_for(tab.url))
+            dl = _NativeDownload(self, args.DownloadOperation, path, _title_for(tab.url), view=tab.view)
+            try:
+                uri = str(args.DownloadOperation.Uri)
+            except Exception:   # noqa: BLE001
+                uri = ""
+            if uri in self._retry_uris:           # this is the retry: it doesn't get another
+                self._retry_uris.discard(uri)
+                dl._auto_retried = True
             self._downloads.append(dl)
             show_toast(self.pages, "Downloading %s" % os.path.basename(path), action="Show",
                        on_action=self.show_downloads_requested.emit)
@@ -1724,11 +1760,11 @@ class BrowserTab(QWidget):
                 self.bookmarks_bar.setVisible(True)
             self._bookmarks_changed()
             self.bookmarks_bar.flash(url)
-        popup = BookmarkPopup(self, self._t, self._dark, existing.get("title") or url, added)
+        popup = BookmarkPopup(self, self._t, self._dark, existing.get("title") if "title" in existing else url, added)
 
         def save(title):
             browser_data.remove_bookmark(url)
-            browser_data.add_bookmark(url, title or url)
+            browser_data.add_bookmark(url, title)   # left empty: only the icon on the bar
             self._bookmarks_changed()
 
         def remove():
@@ -1753,7 +1789,7 @@ class BrowserTab(QWidget):
             return False
         if dialog is None:
             from .dialogs.bookmark_dialog import EditBookmarkDialog
-            dialog = EditBookmarkDialog(self.window(), item.get("title") or url, url,
+            dialog = EditBookmarkDialog(self.window(), item.get("title", url), url,
                                         dark_mode=self._dark, normalize=bookmark_address)
         if not dialog.exec():
             return False

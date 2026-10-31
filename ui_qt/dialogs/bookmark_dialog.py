@@ -27,7 +27,7 @@ class EditBookmarkDialog(CinematicDialog):
         name_label.setObjectName("muted")
         col.addWidget(name_label)
         self.name = QLineEdit(title or "")
-        self.name.setPlaceholderText(url or "")
+        self.name.setPlaceholderText("Leave empty to show only the icon")
         self.name.setAccessibleName("Name")
         col.addWidget(self.name)
         col.addSpacing(8)
@@ -64,7 +64,7 @@ class EditBookmarkDialog(CinematicDialog):
         if url is None:
             return
         self.result_url = url
-        self.result_title = self.name.text().strip() or url
+        self.result_title = self.name.text().strip()   # "" = only the icon on the bar
         self.accept()
 
     def values(self):

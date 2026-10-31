@@ -1989,6 +1989,7 @@ class BookmarkPopup(GlassPopup):
                                        px=14, weight=QFont.Weight.Bold))
         self.body.addWidget(self.label("Name", role="muted", px=11))
         self.name = QLineEdit(title)
+        self.name.setPlaceholderText("Leave empty to show only the icon")
         self.name.setStyleSheet(
             f"QLineEdit {{ background: {t['field_bg']}; color: {t['text']}; border: 1px solid {t['field_border']};"
             f" border-radius: 9px; padding: 6px 9px; font-size: 13px;"
@@ -2311,8 +2312,8 @@ class _BookmarkChip(QAbstractButton):
     def __init__(self, url, title, parent=None):
         super().__init__(parent)
         self.url = url
-        self.title = title or url
-        self.setToolTip(f"{self.title}\n{url}")
+        self.title = title if title is not None else url   # "" = only the site's icon, as in Chrome
+        self.setToolTip(f"{self.title}\n{url}" if self.title else url)
         self.setFixedHeight(26)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -2320,7 +2321,8 @@ class _BookmarkChip(QAbstractButton):
         self._t = theme.tokens(True)
         self._icon = favicons().get(url)
         fm = QFontMetricsF(_font(self, 12, QFont.Weight.Medium))
-        self.setFixedWidth(round(min(self.MAX_W, 8 + 16 + 6 + fm.horizontalAdvance(self.title) + 10)))
+        self.setFixedWidth(32 if not self.title else
+                           round(min(self.MAX_W, 8 + 16 + 6 + fm.horizontalAdvance(self.title) + 10)))
 
     def apply_theme(self, t):
         self._t = t
@@ -2367,6 +2369,9 @@ class _BookmarkChip(QAbstractButton):
             p.drawPixmap(ir, self._icon, QRectF(self._icon.rect()))
         else:
             draw_icon(p, "globe", ir, qcolor(t["text_faint"]))
+        if not self.title:
+            p.end()
+            return
         _faded_text(p, QRectF(ir.right() + 6, 0, self.width() - ir.right() - 12, self.height()), self.title,
                     qcolor(t["text_muted"]), _font(self, 12, QFont.Weight.Medium), self.devicePixelRatioF(),
                     fade=14)
