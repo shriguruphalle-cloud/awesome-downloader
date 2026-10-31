@@ -195,4 +195,30 @@ check("Delete it" in shown[-1] and music_library.playlist(pl["id"]), "deleting a
 music_tab.QMenu = music_more.QMenu = QMenu
 mt.queue, mt.index = [], -1
 print("the song and playlist menus, the sleep timer")
+
+# the Search tab comes back to the moods; Back skips a deleted playlist
+from app.core import music_sources  # noqa: E402
+music_sources.search_everywhere = lambda q, cb: None
+mt.run_search("synthetic")
+settle(100)
+check(not any("Moods" in h.title for h in mt._pages["search"].findChildren(SectionHeader)), "moods under results")
+rail.items["search"].click()
+settle(100)
+check(any("Moods" in h.title for h in mt._pages["search"].findChildren(SectionHeader)) and not rail.search.text(),
+      "the Search tab didn't go back to the moods")
+mt.run_search("synthetic")
+settle(100)
+rail.search.clear()
+settle(100)
+check(any("Moods" in h.title for h in mt._pages["search"].findChildren(SectionHeader)), "emptying the box left the results")
+gone = music_library.create_playlist("Gone", [song])
+gid = gone["id"] if isinstance(gone, dict) else gone
+mt.go("library")
+mt.go("playlist", gid)
+music_library.delete_playlist(gid)
+mt.go("recent")
+mt.back()
+settle(100)
+check(mt._here[0] == "library", "Back opened a deleted playlist: %s" % (mt._here,))
+print("Search goes back to the moods; Back skips what's gone")
 print("PHONE PARITY OK")

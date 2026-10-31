@@ -1282,6 +1282,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         self._suggest_wait.setInterval(160)
         self._suggest_wait.timeout.connect(self._ask_suggestions)
         self.rail.search.textEdited.connect(self._typed)
+        self.rail.search.textChanged.connect(self._search_box_changed)
         self.rail.search.installEventFilter(self)
         row.addWidget(self.stage, 1)
         root.addLayout(row, 1)
@@ -1766,6 +1767,8 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
 
     def _rail_go(self, key):
         if key == "search":
+            if self._search and (self._here or (None,))[0] == "search":
+                self._clear_search()
             self.go("search")
             self.rail.search.setFocus()
             self.rail.search.selectAll()
@@ -2439,6 +2442,8 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         if not self._history:
             return
         key, item = self._history.pop()
+        while key == "playlist" and isinstance(item, str) and not music_library.playlist(item) and self._history:
+            key, item = self._history.pop()     # one that's been deleted since
         self._here = None
         self.go(key, item, push=False)
 
@@ -3075,7 +3080,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         self.library = self._track_list(show_art=False)
         self._local_note = _Note("Reading your music folder...")
         page.add(self._local_note)
-        page.add(self.library, "Songs")
+        self._local_head = page.add(self.library, "Songs")
         self.refresh_library()
 
     def _choose_folder(self):
@@ -3096,6 +3101,8 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         self._local_note.setText("" if tracks else "No songs here yet. Songs you download land in this folder "
                                                    "and play offline.")
         self._local_note.setVisible(not tracks)
+        if _alive(getattr(self, "_local_head", None)):
+            self._local_head.setVisible(bool(tracks))
         page = self._pages["local"]
         page.hero.set_text("On this PC", "Downloaded",
                            "%s · %s" % (count(len(tracks), "song"), self.music_dir))

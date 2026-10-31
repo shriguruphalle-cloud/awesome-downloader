@@ -780,6 +780,20 @@ class MusicMore:
         fade.start()
 
     # ---- what you looked for ----
+    def _clear_search(self):
+        """Back to the Search page's moods: the search box emptied, the Search tab pressed on the results."""
+        self._search = {}
+        self._gen += 1
+        self.rail.search.clear()
+        page = self._pages["search"]
+        page.art_url = None
+        self._build_search_empty()
+        self._paint_page(page)
+
+    def _search_box_changed(self, text):
+        if not text.strip() and self._search and (self._here or (None,))[0] == "search":
+            self._clear_search()
+
     def _remember_search(self, q):
         had = [x for x in (self.settings or {}).get("music_recent_searches") or [] if x.lower() != q.lower()]
         self.set_pref("music_recent_searches", ([q] + had)[:12])
@@ -882,8 +896,7 @@ class MusicMore:
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
         find = Field("Search these songs")
-        find.setFixedWidth(340)
-        row.addWidget(find)
+        row.addWidget(find, 1)
         btns = {}
         for key, label in (("lang", "Language"), ("kind", "Kind"), ("year", "Year")):
             b = Pill(label, style="glass")
@@ -892,7 +905,6 @@ class MusicMore:
             row.addWidget(b)
         order = Pill("Newest first", style="glass")
         row.addWidget(order)
-        row.addStretch(1)
         page.add(bar)
         lst = self._track_list()
         page.add(lst, gap=8)

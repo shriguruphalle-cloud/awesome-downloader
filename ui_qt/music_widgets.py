@@ -2335,7 +2335,7 @@ class PlayerBar(QWidget):
 
     # (narrower than, what folds away) -- the least needed first
     _FOLD = ((1480, "keep_btn"), (1400, "info_btn"), (1330, "vol_label"), (1290, "volume"), (1220, "lyrics_btn"),
-             (1150, "eq_btn"), (1060, "back10_btn"), (1060, "fwd10_btn"), (1000, "add_btn"), (940, "more_btn"),
+             (1150, "eq_btn"), (1060, "back10_btn"), (1060, "fwd10_btn"), (1250, "add_btn"), (940, "more_btn"),
              (900, "shuffle_btn"), (900, "repeat_btn"), (860, "queue_btn"))
 
     def resizeEvent(self, e):
@@ -2345,7 +2345,7 @@ class PlayerBar(QWidget):
             getattr(self, name).setVisible(w >= limit)
         self.sep_l.setVisible(w >= 1100)
         self.sep_r.setVisible(w >= 1100)
-        self.left.setFixedWidth(look.RAIL_W + 130 if w >= 1250 else max(200, int(w * 0.26)))
+        self.left.setFixedWidth(look.RAIL_W + 130 if w >= 1250 else max(280, int(w * 0.28)))
 
     def glass_rect(self):
         return QRectF(self.rect()).adjusted(8, 8, -8, -8)
