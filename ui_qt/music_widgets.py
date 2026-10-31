@@ -909,7 +909,7 @@ class Tile(QWidget):
         if self._raw is not None:
             # its own cover under the mood's colour, as on the phone
             s = int(r.width())
-            if self._pix is None or self._pix.width() != int(s * 2):
+            if self._pix is None or round(self._pix.width() / self._pix.devicePixelRatio()) != s:
                 self._pix = look.rounded(self._raw, s, s, 18)
             p.drawPixmap(r.topLeft(), self._pix)
             tint = QColor.fromHslF(hue % 1.0, 0.70, 0.34)
