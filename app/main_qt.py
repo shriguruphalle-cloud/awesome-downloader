@@ -93,6 +93,7 @@ def main():
     # An open music player: free music from open libraries, or YouTube
     # Music, with no account (ui_qt/music_tab.py).
     music_tab = MusicTab(settings=settings)
+    music_tab.download_tab = download_tab       # its song downloads show up (and cancel) there too
     win.add_tab(music_tab, "Music")
     # its pages are painted edge to edge in their album's colours
     win.set_full_bleed(music_tab)

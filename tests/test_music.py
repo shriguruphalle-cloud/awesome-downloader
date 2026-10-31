@@ -390,7 +390,7 @@ print("a kept YouTube song is saved from the fetched file as a tagged MP3")
 
 # ---- keeping songs: one at a time ------------------------------------------------------------
 kept = []
-ms.download = lambda track, folder, progress=None: (progress and progress(5, 10), kept.append(track["id"]),
+ms.download = lambda track, folder, progress=None, cancelled=None: (progress and progress(5, 10), kept.append(track["id"]),
                                                     os.path.join(folder, "k.mp3"))[2]
 one = ms._track(id="ov:keep-1", title="Keep 1", artist="Test", source="openverse", stream="https://cdn.test/1.mp3")
 two = ms._track(id="ov:keep-2", title="Keep 2", artist="Test", source="openverse", stream="https://cdn.test/2.mp3")
@@ -401,7 +401,7 @@ check(wait(lambda: mt._kept.get("ov:keep-1") == "done" and mt._kept.get("ov:keep
 check(kept == ["ov:keep-1", "ov:keep-2"], "the songs weren't kept in order: %r" % kept)
 mt.keep(tones[2])
 check("local:" not in "".join(kept), "a song already on this PC was downloaded again")
-ms.download = lambda track, folder, progress=None: (_ for _ in ()).throw(
+ms.download = lambda track, folder, progress=None, cancelled=None: (_ for _ in ()).throw(
     RuntimeError("ERROR: [youtube] abcdefghijk: The page needs to be reloaded."))
 three = ms._track(id="ov:keep-3", title="Keep 3", artist="Test", source="openverse", stream="https://cdn.test/3.mp3")
 mt.keep(three)
@@ -409,7 +409,7 @@ check(wait(lambda: "Couldn't download" in mt.status.text(), 3000), "a failed dow
 check("fresh start" in mt.status.text() and "[youtube]" not in mt.status.text(),
       "a failed download's message is yt-dlp's, not in words: %s" % mt.status.text())
 again = []
-ms.download = lambda track, folder, progress=None: (again.append(track["id"]), os.path.join(folder, "k3.mp3"))[1]
+ms.download = lambda track, folder, progress=None, cancelled=None: (again.append(track["id"]), os.path.join(folder, "k3.mp3"))[1]
 mt.status.button.click()
 check(wait(lambda: again == ["ov:keep-3"] and mt._kept.get("ov:keep-3") == "done", 3000),
       "Try again didn't download it: %r" % again)

@@ -146,6 +146,7 @@ class MiniPlayer(QWidget):
         self.moved_by_user = False
         self._ms = self._dur = 0
         self.k = 1.0
+        self.ck = 1.0
 
         self.pill = _Pill(self)
         self.pill.clicked.connect(self.restore_requested)
@@ -199,6 +200,8 @@ class MiniPlayer(QWidget):
         side = int(max(self.MIN_SIDE, min(self.MAX_SIDE, side)))
         self.setFixedSize(side, side)
         self.k = side / float(self.BASE)
+        # the controls grow with the window only a little: a big window is a bigger cover, not bigger buttons
+        self.ck = min(self.k, 1.12)
         self._layout()
         self.update()
 
@@ -213,11 +216,11 @@ class MiniPlayer(QWidget):
         return self._outer().adjusted(rim, rim, -rim, -rim)
 
     def _times_rect(self):
-        i, k = self._inner(), self.k
+        i, k = self._inner(), self.ck
         return QRectF(i.x() + 16 * k, i.bottom() - 106 * k, i.width() - 32 * k, 18 * k)
 
     def _layout(self):
-        i, k = self._inner(), self.k
+        i, k = self._inner(), self.ck
         for b in self.rounds:
             b.scale(k)
         self.pill.scale(k)
@@ -355,7 +358,7 @@ class MiniPlayer(QWidget):
 
     # ---- moving it, and sizing it by a corner ----
     def _corner_at(self, pos):
-        g = self.GRIP
+        g = int(self.GRIP * max(1.0, self.k))
         w, h = self.width(), self.height()
         left, right = pos.x() <= g, pos.x() >= w - g
         top, bottom = pos.y() <= g, pos.y() >= h - g
@@ -440,6 +443,8 @@ class MiniPlayer(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        # an all-but-invisible fill over the whole window, so its rounded corners still catch the mouse
+        p.fillRect(self.rect(), QColor(0, 0, 0, 1))
         outer = self._outer()
         inner_r = self.INNER_R * self.k
         outer_r = inner_r + self._rim()
@@ -466,7 +471,7 @@ class MiniPlayer(QWidget):
         else:
             p.fillRect(inner, QColor(self._pal.get("base", QColor(60, 52, 48))))
         if self.ui > 0.01:
-            k = self.k
+            k = self.ck
             p.setOpacity(self.ui)
             top = QLinearGradient(inner.topLeft(), QPointF(inner.x(), inner.y() + 90 * k))
             top.setColorAt(0, QColor(0, 0, 0, 80))
@@ -493,7 +498,7 @@ class MiniPlayer(QWidget):
         # the time gone, the time left
         t = self._times_rect()
         p.setOpacity(self.ui)
-        p.setFont(look.font(11 * self.k, QFont.Weight.DemiBold))
+        p.setFont(look.font(11 * self.ck, QFont.Weight.DemiBold))
         p.setPen(QColor(255, 255, 255, 235))
         p.drawText(t, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, format_eta(self._ms // 1000))
         left = max(0, self._dur - self._ms) // 1000

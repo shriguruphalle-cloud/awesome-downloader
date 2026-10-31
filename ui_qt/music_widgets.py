@@ -355,6 +355,7 @@ class TrackRow(QWidget):
     play = Signal(object)
     queue = Signal(object)
     keep = Signal(object)
+    cancel_keep = Signal(object)
     remove = Signal(object)
     more = Signal(object, QPoint)
     open_artist = Signal(object)
@@ -380,7 +381,9 @@ class TrackRow(QWidget):
                                    "Remove from the queue" if in_queue else "Add to the queue", 30, 14, self)
         self.add_btn.clicked.connect(lambda: (self.remove if in_queue else self.queue).emit(self.track))
         self.keep_btn = icon_button("download", "Download this song", 30, 15, self)
-        self.keep_btn.clicked.connect(lambda: self.keep.emit(self.track))
+        self._kept_state = None
+        self.keep_btn.clicked.connect(lambda: (self.cancel_keep if self._kept_state in ("busy", "waiting")
+                                               else self.keep).emit(self.track))
         if track.get("source") == "local":
             self.keep_btn.setEnabled(False)
             self.keep_btn.set_tip("On this PC")
@@ -401,9 +404,15 @@ class TrackRow(QWidget):
 
     def set_kept(self, state, pct=None):
         b = self.keep_btn
-        if state == "busy":
-            b.set_tip("Downloading... %d%%" % pct if pct is not None else "Downloading...")
-            b.setEnabled(False)
+        self._kept_state = state
+        if state in ("busy", "waiting"):
+            b.set_kind("stop")
+            if state == "waiting":
+                b.set_tip("Waiting to download — click to cancel")
+            else:
+                b.set_tip(("Downloading... %d%% — click to cancel" % pct) if pct is not None
+                          else "Downloading... — click to cancel")
+            b.setEnabled(True)
         elif state == "done":
             b.set_kind("check")
             b.set_tip("Downloaded")
@@ -425,13 +434,16 @@ class TrackRow(QWidget):
 
     def _geometry(self):
         w = self.width()
-        x_num = 12
-        x_add = x_num + 30
-        x_art = x_add + 34
+        # a narrow list (the queue beside the full-screen card): tighter columns and no length column,
+        # so the names keep the room
+        tight = w < 440
+        x_num = 2 if tight else 12
+        x_add = x_num + (24 if tight else 30)
+        x_art = x_add + (30 if tight else 34)
         x_text = x_art + (48 if self.show_art else 6)
-        x_more = w - 12 - 30
-        x_keep = x_more - 32
-        x_dur = x_keep - 12 - 46
+        x_more = w - (4 if tight else 12) - 30
+        x_keep = x_more - (28 if tight else 32)
+        x_dur = x_keep - 4 if tight else x_keep - 12 - 46
         album = self.show_album and w >= 680
         if album:
             x_album = x_text + (x_dur - x_text) * 0.56
@@ -536,8 +548,9 @@ class TrackRow(QWidget):
         if t.get("duration"):
             p.setFont(look.font(12, QFont.Weight.Medium))
             p.setPen(look.TEXT_3)
-            p.drawText(QRectF(x_dur, 0, 46, h), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
-                       format_eta(t["duration"]))
+            if self.width() >= 440:
+                p.drawText(QRectF(x_dur, 0, 46, h), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
+                           format_eta(t["duration"]))
         p.end()
 
 
@@ -892,12 +905,20 @@ class Hero(QWidget):
         self._anim.setInterval(16)
         self._anim.timeout.connect(self._step)
         self.preferred_h = 0
+        self.compact = False          # a page that's mostly what's under it (people, chats): a short header
         self.setMouseTracking(True)
         self.actions = QWidget(self)
         self.action_row = QHBoxLayout(self.actions)
         self.action_row.setContentsMargins(0, 0, 0, 0)
         self.action_row.setSpacing(10)
         self.setMinimumHeight(340)
+
+    def set_compact(self, on=True):
+        self.compact = on
+        if not on:
+            self.setMaximumHeight(16777215)
+        self._layout()
+        self.update()
 
     def set_text(self, overline, title, subline=""):
         self.overline, self.title, self.subline = overline, title, subline
@@ -952,9 +973,10 @@ class Hero(QWidget):
 
     def _layout(self):
         w = self._text_width()
-        self._px, self._lines = look.fit_display((self.title or "").upper(), w,
-                                                 max_px=min(96, max(44, self.width() * 0.075)), min_px=34)
-        top = 46
+        top_px = min(56, max(36, self.width() * 0.045)) if self.compact else min(96, max(44, self.width() * 0.075))
+        self._px, self._lines = look.fit_display((self.title or "").upper(), w, max_px=top_px,
+                                                 min_px=28 if self.compact else 34)
+        top = 52 if self.compact else 46
         y = top + (22 if self.overline else 0)
         line_h = self._px * 0.98
         y += line_h * len(self._lines)
@@ -967,7 +989,11 @@ class Hero(QWidget):
         # the three songs sit along the foot of the header, never closer than
         # this to the actions (their label goes 22 px above them)
         self._trio_min_y = bottom + 52
-        need = (self._trio_min_y + 64) if self.trio else (bottom + 40)
+        need = (self._trio_min_y + 64) if self.trio else (bottom + (20 if self.compact else 40))
+        if self.compact:
+            self.setMinimumHeight(int(need))
+            self.setMaximumHeight(int(need))
+            return
         self.setMinimumHeight(int(max(340, need, self.preferred_h)))
 
     @staticmethod
@@ -1432,10 +1458,11 @@ class Rail(QWidget):
         head.setSpacing(10)
         self.mark = _Mark()
         head.addWidget(self.mark)
-        self.brand = GradientLine("", "Music", "", px=26)
+        self.brand = GradientLine("Awesome ", "Music", "", px=19)
         self.brand.set_colors("#ffffff", "#7dd3fc", True, "#a5b4fc")
-        head.addWidget(self.brand)
-        head.addStretch(1)
+        self.brand.setMinimumWidth(0)   # never wider than the rail: the column would spill past its edge
+        self.brand.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        head.addWidget(self.brand, 1)
         self.menu_btn = icon_button("dots", "Music settings and import", 32, 18, self)
         self.menu_btn.clicked.connect(
             lambda: self.menu_requested.emit(self.menu_btn.mapToGlobal(QPoint(0, self.menu_btn.height()))))
@@ -1458,6 +1485,12 @@ class Rail(QWidget):
         for key, text, icon in (("songs", "Liked songs", "heart"), ("artists", "Artists", "person"),
                                 ("albums", "Albums", "disc"), ("local", "On this PC", "folder"),
                                 ("queue", "Queue", "queue"), ("taste", "Your taste", "target")):
+            self.col.addWidget(self._item(key, text, icon))
+        self.col.addSpacing(10)
+
+        # people: the same Awesome Music account as on the phone (music_social)
+        self.col.addWidget(_RailLabel("Together"))
+        for key, text, icon in (("friends", "Friends", "people"), ("chats", "Chats", "chat")):
             self.col.addWidget(self._item(key, text, icon))
         self.col.addSpacing(10)
 
@@ -1821,18 +1854,70 @@ class LinkText(QLabel):
         self._fit()
 
     def _fit(self):
+        # too long for its room: it scrolls slowly (a pause at the start each time round) instead of
+        # being cut short
         full = getattr(self, "_full", "")
-        w = max(10, self.width())
-        super().setText(QFontMetricsF(self.font()).elidedText(full, Qt.TextElideMode.ElideRight, w - 2)
-                        if full else "")
+        super().setText(full)
+        over = bool(full) and QFontMetricsF(self.font()).horizontalAdvance(full) > self.width() - 2
+        if not hasattr(self, "_tick"):
+            self._tick = QTimer(self)
+            self._tick.setInterval(33)
+            self._tick.timeout.connect(self._step)
+            self._shift = 0.0
+            self._hold = 0
+        self._shift, self._hold = 0.0, 60
+        if over and self.isVisible():
+            self._tick.start()
+        else:
+            self._tick.stop()
+        self.update()
+
+    def _step(self):
+        if self._hold > 0:
+            self._hold -= 1
+            return
+        loop = QFontMetricsF(self.font()).horizontalAdvance(self._full) + 48
+        self._shift += 0.9
+        if self._shift >= loop:
+            self._shift, self._hold = 0.0, 60
+        self.update()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._fit()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        if hasattr(self, "_tick"):
+            self._tick.stop()
+
+    def paintEvent(self, e):
+        fm = QFontMetricsF(self.font())
+        tw = fm.horizontalAdvance(self._full)
+        if not self._full or tw <= self.width() - 2:
+            super().paintEvent(e)
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        f = QFont(self.font())
+        f.setUnderline(self._hover)
+        p.setFont(f)
+        p.setPen(QColor(255, 255, 255, 255 if self._hover else self._alpha))
+        y = (self.height() - fm.height()) / 2.0 + fm.ascent()
+        x = -self._shift
+        p.drawText(QPointF(x, y), self._full)
+        p.drawText(QPointF(x + tw + 48, y), self._full)
+        p.end()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._fit()
 
     def _style(self, hover):
+        self._hover = hover
         self.setStyleSheet("color: rgba(255,255,255,%d); background: transparent;%s"
                            % (255 if hover else self._alpha, " text-decoration: underline;" if hover else ""))
+        self.update()
 
     def enterEvent(self, e):
         self._style(True)

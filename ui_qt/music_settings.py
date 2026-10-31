@@ -129,7 +129,10 @@ class MusicSettings(GlassSheet):
             b.key = key
             self.bg_btns.append(b)
         self._row("Full-screen background", "A fluid animation in the playing cover's colours that moves with "
-                                           "the beat -- or the cover itself, still.", *self.bg_btns)
+                                           "the beat, a mirror that opens outward on it (Crystal, Neon), rain "
+                                           "that drives with it, a picture of your own -- or the cover itself, still. React, Trails, "
+                                           "Glow, Symmetry and the frosted glass are in full screen's "
+                                           "background menu.", *self.bg_btns)
         self._section("Sound")
         self._row("Equalizer & effects", "Ten bands, presets, bass boost, virtual surround and mono — heard as "
                                          "you change them.", self._pill("Open", lambda: (self.hide(),
@@ -173,7 +176,11 @@ class MusicSettings(GlassSheet):
         self.tab.set_blend(v)
 
     def _backdrop(self, key):
-        self.tab.set_backdrop(key)
+        if key == "image":
+            self.tab.choose_backdrop_image(ask=not self.tab.full.backdrop_image)
+            key = self.tab.full.backdrop_mode
+        else:
+            self.tab.set_backdrop(key)
         for b in self.bg_btns:
             b.style = "tab_on" if b.key == key else "glass"
             b.update()

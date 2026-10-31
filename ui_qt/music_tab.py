@@ -21,8 +21,10 @@ is fetched whole meanwhile, to carry on from if the stream breaks.
 What plays after a song you chose is its radio, ordered by the listening
 session (app/core/upnext.py): same language and mood, nothing repeated.
 """
+import math
 import os
 import random
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -56,6 +58,7 @@ from .audio_engine import Engine, loudness
 from .music_import import ImportSheet
 from .music_onboarding import Onboarding
 from .music_panels import EqPanel, InfoPanel, QueuePanel, SidePanel
+from .music_social_pages import SocialPages
 from .music_widgets import (
     Hero, Pill, PlayerBar, Rail, RingButton, SectionHeader, SuggestPanel, ThinSlider, TileGrid, Toast, TrackList,
     art, frost_strip, icon_button, thumb_url, total_length,
@@ -450,8 +453,8 @@ class _PlayerCard(QWidget):
             dv.setFixedSize(1, max(10, int(h * k)))
         # the bottom row in the design's proportions: Lyrics, Queue, EQ, then the volume takes the rest
         tile_h = int(round(inner * 0.125))
-        tile_w = int(round(inner * 0.155))
-        lyr_w = int(round(inner * 0.235))
+        tile_w = int(round(inner * 0.13))
+        lyr_w = int(round(inner * 0.19))
         for t in (self.queue_tile, self.eq_tile):
             t.setFixedSize(tile_w, tile_h)
         self.lyrics_pill.ui_scale = min(1.0, ki)
@@ -480,7 +483,8 @@ class _PlayerCard(QWidget):
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         rad = getattr(self, "radius", 36.0)
         frosted = look.paint_frost(p, self, r, rad)
-        look.paint_glass(p, r, rad, None, None, look.mix(QColor(20, 16, 14), self.accent, 0.10),
+        look.paint_glass(p, r, rad, None, None, look.mix(look.mix(QColor(getattr(self, "pal", {}).get("deep", QColor(20, 16, 14))), QColor(12, 10, 10), 0.45),
+                                  self.accent, 0.12),
                          strength=0.60 if frosted else 0.72)
         p.end()
 
@@ -519,6 +523,22 @@ class _FullView(QWidget):
         # the living background: a fluid animation in the cover's colours, on the beat (music_backdrop)
         self.backdrop_mode = "aurora"
         self.levels = None                  # () -> (bass, loudness) of what's playing
+        self.bands = None                   # () -> (bass, mid, high, loudness), for the mirrors
+        self._travel = 0.0
+        self.backdrop_mono = False          # the moving background in black and white
+        self._rain = 0.0
+        self._flash = 0.0                   # the lightning, fading
+        self._bolt = 0.0
+        self._next_bolt = 0.0               # no lightning before this (time.monotonic)
+        self.backdrop_fx = {}               # the visualiser's controls (music_backdrop.FX)
+        self.frost_on = True                # the cards over the background: frosted glass, or clear
+        self.backdrop_image = ""            # "Your image": the picture's path
+        self.progress = None                # () -> (position ms, length ms) of the song
+        self._story_t = 0.0                 # Storm story: how far into its 90-second cycle
+        self.is_playing = None              # () -> whether the music is playing
+        self._image_loaded = None
+        self._trail = None
+        self._bass_top = 0.0                # the deepest kick lately (fading over ~20 s)
         self._fluid = None
         self._fluid_img = None
         self._beat = None
@@ -565,7 +585,7 @@ class _FullView(QWidget):
         self.lang_btn.clicked.connect(lambda: self.lang_requested.emit(
             self.lang_btn.mapToGlobal(QPoint(0, self.lang_btn.height() + 6))))
         self.info_btn = icon_button("info", "Song information", 44, 20, self)
-        self.theme_btn = icon_button("sparkle", "Background: Liquid aurora, Electric nebula or a still cover",
+        self.theme_btn = icon_button("sparkle", "Background: aurora, nebula, the four mirrors or a still cover",
                                      44, 20, self)
         self.theme_btn.clicked.connect(lambda: self.theme_requested.emit(
             self.theme_btn.mapToGlobal(QPoint(0, self.theme_btn.height() + 6))))
@@ -697,7 +717,7 @@ class _FullView(QWidget):
         self.card.set_width(cw)
         ch = self.card.height()
         cx = (W - cw) // 2
-        cy = top + max(0, (room - ch) // 2)
+        cy = max(top, (H - ch) // 2)   # the page's own centre: the same gap above and below
         self.card.move(cx, cy)
         k = max(0.75, min(1.3, min(W / 1700.0, H / 1000.0)))
         gap = int(34 * k)
@@ -760,6 +780,7 @@ class _FullView(QWidget):
         self._pal = pal
         self._bg_scaled = None
         self.fx.set_accent(pal["accent"])
+        self.card.pal = pal
         self.card.set_accent(pal["accent"])
         self.update()
 
@@ -803,24 +824,122 @@ class _FullView(QWidget):
                 self._fluid_img = None
                 self.update()
             return
-        if self.backdrop_mode in ("aurora", "nebula"):
-            from .music_backdrop import BeatFollower, FluidRenderer
+        from .music_backdrop import MIRRORS, THEMES
+        if self.backdrop_mode == "image" and not self.backdrop_image:
+            self.backdrop_mode = "aurora"           # no picture chosen (or it's gone): the default
+        if self.backdrop_mode in ("aurora", "nebula", "storm", "image", "storm_story", "synthesis") + MIRRORS + THEMES:
+            from .music_backdrop import BeatFollower, FlashLimiter, FluidRenderer
             if self._fluid is None:
                 self._fluid = FluidRenderer()
                 self._beat = BeatFollower()
+                self._limit = FlashLimiter()
             if self._fluid.ok:
-                bass, loud = self.levels() if self.levels is not None else (0.0, 0.0)
-                _beat, energy = self._beat.update(bass, loud)
+                if self.bands is not None:
+                    bass, mid, hi, loud = self.bands()
+                else:
+                    (bass, loud), mid, hi = (self.levels() if self.levels is not None else (0.0, 0.0)), 0.0, 0.0
+                beat, energy = self._beat.update(bass, loud, mid, hi)
                 # the music sets the pace: faster on the beat and when it's loud -- nothing pops or flashes
-                self._clock += dt * self._beat.speed(dt)
-                scale = 3 if self.backdrop_mode == "aurora" else 2
-                img = self._fluid.render(self.backdrop_mode, self._clock, 0.0, 0.4, self._pal,
-                                         max(64, self.width() // scale), max(36, self.height() // scale))
+                speed = self._beat.speed(dt)
+                self._clock += dt * speed
+                mono = self.backdrop_mono
+                fx = self.backdrop_fx
+                # React: how hard the music drives the picture; then never more than three flashes a second
+                react = float(fx.get("react", 1.0))
+                beat = self._limit(min(1.0, beat * react))
+                mid_p, hi_p = min(1.0, self._beat.mid.pulse * react), min(1.0, self._beat.hi.pulse * react)
+                sym = int(fx.get("sym", 0))
+                if self.backdrop_mode == "synthesis":
+                    # vector art, drawn by music_scenes: the playing song's title, a web on the kicks
+                    if getattr(self, "_synth", None) is None:
+                        from .music_scenes import Synthesis
+                        self._synth = Synthesis()
+                    img = self._synth.render(max(64, self.width()), max(36, self.height()), self._clock, beat, mid_p,
+                                             hi_p, self._pal, title=self.title.text(), mono=mono)
+                elif self.backdrop_mode == "storm_story":
+                    # the storm over the song: drizzle, building, the storm (lightning on its heavy hits),
+                    # then it passes and the light comes back
+                    from .music_backdrop import STORY_S, story
+                    # its own clock, a whole storm every minute and a half; it waits while the music is paused
+                    if self._playing_now():
+                        self._story_t = (self._story_t + dt) % STORY_S
+                    dens, clr, bolts, pace_k = story(self._story_t / STORY_S)
+                    self._rain += dt * (0.12 + 0.32 * speed) * pace_k
+                    now = time.monotonic()
+                    self._bass_top = max(bass, self._bass_top * math.exp(-dt / 20.0))
+                    if self._next_bolt == 0.0:
+                        self._next_bolt = now + 3.0
+                    heavy = beat > 0.85 and bass >= 0.8 * self._bass_top
+                    if bolts and heavy and now >= self._next_bolt:
+                        self._flash, self._bolt = 1.0, random.random()
+                        self._next_bolt = now + random.uniform(4.0, 9.0)
+                    self._flash *= math.exp(-dt * 3.5)
+                    flicker = 0.55 + 0.45 * math.sin(now * 47.0) * math.sin(now * 13.0)
+                    img = self._fluid.render("storm", self._clock, beat, energy, self._pal,
+                                             max(64, self.width() // 2), max(36, self.height() // 2),
+                                             mid=mid_p, hi=hi_p, travel=self._rain, pace=speed * pace_k, mono=mono,
+                                             storm=self._flash * flicker if self._flash > 0.02 else 0.0,
+                                             bolt=self._bolt, sym=sym, density=dens, clear=clr, hq=1.0)
+                elif self.backdrop_mode == "storm":
+                    # rain: it falls at the music's pace -- slow between beats, driven on them. Lightning
+                    # only on a heavy hit -- a full kick as deep as the strongest the song has struck in
+                    # the last twenty seconds or so -- and then not again for a while (6.5 to 15 seconds):
+                    # a storm, not a strobe
+                    self._rain += dt * (0.12 + 0.32 * speed)   # ~half the old drift, more of a surge
+                    now = time.monotonic()
+                    self._bass_top = max(bass, self._bass_top * math.exp(-dt / 20.0))
+                    if self._next_bolt == 0.0:
+                        self._next_bolt = now + 6.0          # not the moment it opens
+                    # (and the song in full flow: a quiet intro or a ballad gets none)
+                    heavy = beat > 0.9 and bass >= 0.85 * self._bass_top and energy > 0.55
+                    if heavy and now >= self._next_bolt:
+                        self._flash, self._bolt = 1.0, random.random()
+                        self._next_bolt = now + random.uniform(6.5, 15.0)
+                    self._flash *= math.exp(-dt * 3.5)
+                    flicker = 0.55 + 0.45 * math.sin(now * 47.0) * math.sin(now * 13.0)
+                    img = self._fluid.render("storm", self._clock, beat, energy, self._pal,
+                                             max(64, self.width() // 2), max(36, self.height() // 2),
+                                             mid=self._beat.mid.pulse, hi=self._beat.hi.pulse,
+                                             travel=self._rain, pace=speed, mono=mono,
+                                             storm=self._flash * flicker if self._flash > 0.02 else 0.0,
+                                             bolt=self._bolt)
+                elif self.backdrop_mode == "image":
+                    # your own picture, moved by the music; drawn at the window's own size so it stays sharp
+                    if self._image_loaded != self.backdrop_image:
+                        from PySide6.QtGui import QImage
+                        pic = QImage(self.backdrop_image)
+                        self._fluid.set_image(None if pic.isNull() else pic)
+                        self._image_loaded = self.backdrop_image
+                    self._travel += dt * speed * 0.16
+                    img = self._fluid.render("image", self._clock, beat, energy, self._pal,
+                                             max(64, self.width()), max(36, self.height()),
+                                             mid=mid_p, hi=hi_p, travel=self._travel, mono=mono, sym=sym)
+                elif self.backdrop_mode in MIRRORS + THEMES:
+                    # the mirrors and the themes move at the music's pace: a rush on each kick, a drift in
+                    # between; their big shapes answer the kick, the middle ones the snare, the fine ones the hats
+                    self._travel += dt * speed * 0.16
+                    img = self._fluid.render(self.backdrop_mode, self._clock, beat, energy, self._pal,
+                                             max(64, self.width() // 2), max(36, self.height() // 2),
+                                             mid=mid_p, hi=hi_p, travel=self._travel, mono=mono, pace=speed,
+                                             sym=sym)
+                else:
+                    scale = 3 if self.backdrop_mode == "aurora" else 2
+                    img = self._fluid.render(self.backdrop_mode, self._clock, 0.0, 0.4, self._pal,
+                                             max(64, self.width() // scale), max(36, self.height() // scale),
+                                             mono=mono, sym=sym)
                 if img is not None:
+                    img = self._fx_post(img, fx)
+                if img is not None and self.backdrop_mode != "synthesis":   # (Synthesis keeps its black page)
                     # the shade the cover had, laid into the frame itself -- so the glass cards,
                     # which paint the frame under them, match the open part exactly
                     sp = QPainter(img)
                     deep = self._pal["deep"]
+                    if self.backdrop_mono:
+                        # in black and white the shade is grey too -- in the cover's colour it tinted
+                        # the whole frame back (reported: "black and white does not work")
+                        c = QColor(deep)
+                        g = int(round(0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()))
+                        deep = QColor(g, g, g)
                     shade = QLinearGradient(0, 0, 0, img.height())
                     shade.setColorAt(0, look.with_alpha(deep, 0.28))
                     shade.setColorAt(.5, look.with_alpha(deep, 0.10))
@@ -846,6 +965,39 @@ class _FullView(QWidget):
         if cards:
             cards[self._frame % len(cards)].update()
 
+    def _playing_now(self):
+        """Whether the music is playing (the story waits while it's paused)."""
+        return self.is_playing() if self.is_playing is not None else True
+
+    def _fx_post(self, img, fx):
+        """Trails and glow, on the finished frame. Trails: the last frame, fading, kept wherever it's
+        brighter than this one -- movement leaves a smear that dies away. Glow: the frame blurred (made
+        small and drawn back large) and added over itself, so bright things bloom."""
+        trails = float(fx.get("trails", 0.0))
+        glow = float(fx.get("glow", 0.0))
+        if trails > 0.0:
+            prev = self._trail
+            if prev is not None and prev.size() == img.size():
+                p = QPainter(img)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Lighten)
+                p.setOpacity(trails)
+                p.drawImage(0, 0, prev)
+                p.end()
+            self._trail = img.copy()
+        else:
+            self._trail = None
+        if glow > 0.0:
+            w, h = img.width(), img.height()
+            small = img.scaled(max(4, w // 10), max(4, h // 10), Qt.AspectRatioMode.IgnoreAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+            soft = small.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            p = QPainter(img)
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+            p.setOpacity(glow)
+            p.drawImage(0, 0, soft)
+            p.end()
+        return img
+
     def frost_source(self, rect):
         """(the background under `rect`, the same frosted), each at the
         rect's size -- for a glass card to paint itself on; None without the
@@ -853,6 +1005,8 @@ class _FullView(QWidget):
         img = self._fluid_img
         if img is None or self.width() < 2:
             return None
+        if getattr(self, "_frosted", None) is None and not self.frost_on:
+            self._frosted = img             # clear glass: the background as it is, only tinted by the card
         if getattr(self, "_frosted", None) is None:
             small = img.scaled(max(8, img.width() // 6), max(8, img.height() // 6),
                                Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -899,7 +1053,7 @@ class _FullView(QWidget):
         super().keyPressEvent(event)
 
 
-class MusicTab(QWidget):
+class MusicTab(SocialPages, QWidget):
     SHOW_ONBOARDING = True   # the taste setup on first run
     RESUME_ON_START = True   # the last song back (and playing) when the app opens
     MINI_PLAYER = True       # the floating mini player while the app is out of sight
@@ -939,6 +1093,9 @@ class MusicTab(QWidget):
         self._kept = {}            # track id -> "waiting" | "busy" | "done"
         self._keep_tracks = {}     # track id -> the track, to try again
         self._keep_queue = []
+        self._keep_jobs = {}       # track id -> its card in the Download tab
+        self._keep_cancel = set()  # track ids asked to stop
+        self.download_tab = None   # set by the app: every download shows up there
         self._keeping = None
         self._seeking = False
         self._history = []
@@ -1033,6 +1190,8 @@ class MusicTab(QWidget):
         self.player.positionChanged.connect(self._mini_position)
         self.player.playbackStateChanged.connect(lambda _s: self._sync_mini())
         QTimer.singleShot(0, self._watch_window)
+        # Awesome Music's people: the same account as the phone app (music_social, music_social_pages)
+        self._init_social(self._corner_row)
         if self.RESUME_ON_START:
             QTimer.singleShot(700, self._resume_last)
         if self.SHOW_ONBOARDING and self.taste.needs_onboarding():
@@ -1062,8 +1221,10 @@ class MusicTab(QWidget):
         stage_lay.addWidget(self.pages)
         self._pages = {}
         for key in ("home", "explore", "search", "artist", "album", "songs", "artists", "albums", "local", "queue",
-                    "mix", "playlist"):
+                    "mix", "playlist") + SocialPages.SOCIAL_PAGES:
             page = _Page(key)
+            if key in SocialPages.SOCIAL_PAGES:
+                page.hero.set_compact()
             self._pages[key] = page
             self.pages.addWidget(page)
             page.hero.track_clicked.connect(self._trio_clicked)
@@ -1082,6 +1243,7 @@ class MusicTab(QWidget):
         corner_row.addWidget(self.reload_btn)
         corner.move(look.GUTTER - 6, 8)
         corner.resize(80, 34)
+        self._corner_row = corner_row
         self._corner = corner
         self.stage.corners = _Corners(self.stage)
         self.status = Toast(self.stage)
@@ -1121,7 +1283,7 @@ class MusicTab(QWidget):
         b.back10_btn.clicked.connect(lambda: self.skip_by(-10))
         b.fwd10_btn.clicked.connect(lambda: self.skip_by(10))
         b.title.clicked.connect(self._song_menu)
-        b.artist.clicked.connect(lambda _pos: self.open_artist_of(self.current()))
+        b.artist.clicked.connect(lambda pos: self.open_artist_of(self.current(), pos))
         b.add_btn.clicked.connect(lambda: self._playlist_menu(self.current(), QCursor.pos()))
         b.more_btn.clicked.connect(lambda: self._song_menu(QCursor.pos()))
 
@@ -1143,7 +1305,21 @@ class MusicTab(QWidget):
 
         self.full = _FullView(self._panel_list, self.eq, self)
         self.full.levels = self.player.levels
-        self.full.backdrop_mode = (self.settings or {}).get("music_backdrop", "aurora")
+        self.full.bands = self.player.bands
+        self.full.progress = lambda: (self.player.position(), self.player.duration())
+        self.full.is_playing = self._playing
+        from .music_backdrop import MODES
+        mode = (self.settings or {}).get("music_backdrop", "aurora")
+        # a look since taken out (Galaxy, Silk) comes back as the default
+        from .music_backdrop import BETA
+        self.full.backdrop_mode = mode if mode in dict(MODES) or mode in dict(BETA) else "aurora"
+        self.full.backdrop_mono = bool((self.settings or {}).get("music_backdrop_mono", False))
+        self.full.frost_on = bool((self.settings or {}).get("music_frost", True))
+        img = (self.settings or {}).get("music_backdrop_image") or ""
+        self.full.backdrop_image = img if img and os.path.exists(img) else ""
+        from .music_backdrop import FX
+        saved_fx = (self.settings or {}).get("music_backdrop_fx") or {}
+        self.full.backdrop_fx = {k: saved_fx.get(k, d) for k, _n, _c, d in FX}
         self.full.closed.connect(self.close_full)
         self.full.lyrics_toggled.connect(self._show_lyrics)
         self.full.lang_requested.connect(self._lyrics_menu)
@@ -1162,7 +1338,7 @@ class MusicTab(QWidget):
         f.heart.clicked.connect(lambda: self.current() and self.toggle_saved(self.current()))
         f.more_btn.clicked.connect(lambda: self._song_menu(QCursor.pos()))
         f.title.clicked.connect(self._song_menu)
-        f.artist.clicked.connect(lambda _pos: (self.close_full(), self.open_artist_of(self.current())))
+        f.artist.clicked.connect(lambda pos: self.open_artist_of(self.current(), pos))
         f.volume.valueChanged.connect(lambda v: self.bar.volume.value() != v and self.bar.volume.setValue(v))
         self.bar.volume.valueChanged.connect(lambda v: f.volume.value() != v and f.volume.setValue(v))
         f.vol_icon.clicked.connect(lambda: self.audio.setMuted(not self.audio.isMuted()) or self._sync_controls())
@@ -1226,6 +1402,9 @@ class MusicTab(QWidget):
             return
         dur = self.player.duration() or int(self.current().get("duration") or 0) * 1000
         pos = self.player.position() + int(seconds * 1000)
+        if self.jam.active:
+            self.jam.op("seek", pos=max(0, min(pos, max(0, dur - 1000)) if dur else max(0, pos)))
+            return
         self.player.setPosition(max(0, min(pos, max(0, dur - 1000)) if dur else max(0, pos)))
 
     def _measure(self, path, track):
@@ -1296,21 +1475,36 @@ class MusicTab(QWidget):
             menu.addAction("Download", lambda: self.keep(track))
             menu.addAction("Copy link", lambda: QApplication.clipboard().setText(track.get("page_url", "")))
         menu.addAction("Start a radio from this song", lambda: self._radio_from(track))
+        self.social_song_actions(menu, track)
         menu.addSeparator()
         menu.addAction("Not for me", lambda: (self._not_for_me(track), self.next()))
         menu.exec(pos or QCursor.pos())
 
-    def open_artist_of(self, track):
+    def open_artist_of(self, track, pos=None, name=None):
         """The artist's page: straight there when the song knows it, else
-        found by name."""
+        found by name. A song by several artists asks which one first."""
         if not track:
             return
+        if name is None:
+            names = []
+            for n in re.split(r"\s*(?:,|&|\band\b|\bfeat\.?|\bft\.|\bwith\b)\s*",
+                              track.get("artist") or "", flags=re.I):
+                if n.strip() and n.strip().lower() not in [m.lower() for m in names]:
+                    names.append(n.strip())
+            if len(names) > 1:
+                menu = style_menu(QMenu(self), theme.tokens(True))
+                for n in names:
+                    menu.addAction(n, lambda n=n: self.open_artist_of(track, name=n))
+                menu.exec(pos or QCursor.pos())
+                return
+            name = names[0] if names else ""
+            if track.get("artist_browse"):
+                if self.full.isVisible():
+                    self.close_full()
+                self.go("artist", {"browse_id": track["artist_browse"], "title": track.get("artist", "")})
+                return
         if self.full.isVisible():
             self.close_full()
-        if track.get("artist_browse"):
-            self.go("artist", {"browse_id": track["artist_browse"], "title": track.get("artist", "")})
-            return
-        name = (track.get("artist") or "").split(",")[0].strip()
         if not name:
             return
         self.status.setText("Finding %s..." % name)
@@ -1553,6 +1747,8 @@ class MusicTab(QWidget):
     def _settings_menu(self, pos):
         menu = style_menu(QMenu(self), theme.tokens(True))
         menu.addAction("Settings…", self.open_settings)
+        menu.addAction("Your Awesome Music profile…" if self.hub.signed_in() else "Sign in to Awesome Music…",
+                       lambda: self.go("account"))
         menu.addSeparator()
         menu.addAction("Import a playlist…", self.importer.open)
         menu.addAction("New playlist…", lambda: self._rail_go("newplaylist"))
@@ -1746,11 +1942,82 @@ class MusicTab(QWidget):
             a = menu.addAction(name)
             a.setCheckable(True)
             a.setChecked(self.full.backdrop_mode == key)
+            if key == "image":
+                a.triggered.connect(lambda _c=False: self.choose_backdrop_image(
+                    ask=not self.full.backdrop_image))
+            else:
+                a.triggered.connect(lambda _c=False, k=key: self.set_backdrop(k))
+        if self.full.backdrop_image:
+            menu.addAction("Choose another image…", lambda: self.choose_backdrop_image(ask=True))
+        from .music_backdrop import BETA
+        beta = style_menu(menu.addMenu("Beta"), theme.tokens(True))
+        beta.setToolTip("New backgrounds to try")
+        for key, name in BETA:
+            a = beta.addAction(name)
+            a.setCheckable(True)
+            a.setChecked(self.full.backdrop_mode == key)
             a.triggered.connect(lambda _c=False, k=key: self.set_backdrop(k))
+        menu.addSeparator()
+        from .music_backdrop import FX
+        for key, name, choices, default in FX:
+            sub = style_menu(menu.addMenu(name), theme.tokens(True))
+            now = self.full.backdrop_fx.get(key, default)
+            for value, label in choices:
+                a = sub.addAction(label)
+                a.setCheckable(True)
+                a.setChecked(abs(float(now) - float(value)) < 1e-6)
+                a.triggered.connect(lambda _c=False, k=key, v=value: self.set_backdrop_fx(k, v))
+        menu.addSeparator()
+        frost = menu.addAction("Frosted glass")
+        frost.setCheckable(True)
+        frost.setChecked(self.full.frost_on)
+        frost.toggled.connect(self.set_frost)
+        mono = menu.addAction("Black and white")
+        mono.setCheckable(True)
+        mono.setChecked(self.full.backdrop_mono)
+        mono.toggled.connect(self.set_backdrop_mono)
         menu.exec(pos)
 
+    def choose_backdrop_image(self, ask=True):
+        """"Your image": a picture from this PC as the full-screen background, moved by the music."""
+        path = self.full.backdrop_image
+        if ask or not path:
+            from PySide6.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getOpenFileName(self, "Choose an image for the background", "",
+                                                  "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
+            if not path:
+                return
+            from PySide6.QtGui import QImage
+            if QImage(path).isNull():
+                self.status.setText("That image couldn't be opened.")
+                return
+            self.set_pref("music_backdrop_image", path)
+            self.full.backdrop_image = path
+        self.set_backdrop("image")
+
+    def set_frost(self, on):
+        """The glass cards over the full-screen background: frosted (the background blurred under them)
+        or clear (seen sharp through a light tint)."""
+        self.set_pref("music_frost", bool(on))
+        self.full.frost_on = bool(on)
+        self.full._frosted = None
+        for c in (self.full.card, self.full.queue_card, self.full.fx_card, self.full.info_card):
+            c.update()
+
+    def set_backdrop_fx(self, key, value):
+        """One of the visualiser's controls (music_backdrop.FX): React, Trails, Glow, Symmetry."""
+        fx = dict(self.full.backdrop_fx)
+        fx[key] = value
+        self.full.backdrop_fx = fx
+        self.set_pref("music_backdrop_fx", fx)
+
+    def set_backdrop_mono(self, on):
+        """The moving background in colour (the cover's) or black and white."""
+        self.set_pref("music_backdrop_mono", bool(on))
+        self.full.backdrop_mono = bool(on)
+
     def set_backdrop(self, mode):
-        """The full-screen player's background: "aurora", "nebula" or "still"."""
+        """The full-screen player's background: one of music_backdrop.MODES."""
         self.set_pref("music_backdrop", mode)
         self.full.backdrop_mode = mode
 
@@ -1884,6 +2151,7 @@ class MusicTab(QWidget):
         self._last_pos = 0
         self.taste.log(track, "search_play" if self._context == "search" and self._chosen else "play")
         self.taste.started(track, chosen=self._chosen)
+        self.hub.playing(track)
 
     def _end_listen(self, natural=False):
         track, self._listen = self._listen, None
@@ -2040,6 +2308,7 @@ class MusicTab(QWidget):
             del self._history[:-30]
         self._here = (key, item)
         page = self._pages[key]
+        self._social_page_left(key)
         if key == "home":
             self._build_home()
         elif key == "search":
@@ -2059,6 +2328,16 @@ class MusicTab(QWidget):
             self._build_list_page(key, item)
         elif key == "explore":
             self._build_explore(item if isinstance(item, str) else None)
+        elif key == "friends":
+            self._build_friends()
+        elif key == "profile":
+            self._build_profile(item)
+        elif key == "chats":
+            self._build_chats()
+        elif key == "chat":
+            self._build_chat(item)
+        elif key == "account":
+            self._build_account()
         if self.pages.currentWidget() is not page:
             self._fade_in(page)
         self.pages.setCurrentWidget(page)
@@ -2066,7 +2345,7 @@ class MusicTab(QWidget):
                          and item else key)
         self.back_btn.setVisible(bool(self._history))
         self.reload_btn.setVisible(key in ("search", "artist", "album", "local", "home", "songs", "artists",
-                                           "albums", "queue", "explore"))
+                                           "albums", "queue", "explore", "friends", "chats", "profile", "chat"))
         self._corner.raise_()
         self.stage.corners.raise_()
         self._paint_page(page)
@@ -2160,13 +2439,14 @@ class MusicTab(QWidget):
             else "browse"))
         row.queue.connect(self.add_to_queue)
         row.keep.connect(self.keep)
+        row.cancel_keep.connect(lambda t: self.cancel_keep(t["id"]))
         row.remove.connect(self.remove_from_queue)
         row.more.connect(self._row_menu)
         row.open_artist.connect(lambda t: self.go("artist", {"browse_id": t["artist_browse"],
                                                             "title": t.get("artist", "")}))
         row.open_album.connect(lambda t: self.go("album", {"browse_id": t["album_browse"], "title": t.get("album", ""),
                                                           "source": "youtube", "kind": "album"}))
-        if self._kept.get(row.track["id"]) in ("busy", "done"):
+        if self._kept.get(row.track["id"]) in ("busy", "waiting", "done"):
             row.set_kept(self._kept[row.track["id"]])
         cur = self.current()
         if cur and cur["id"] == row.track["id"]:
@@ -2845,6 +3125,7 @@ class MusicTab(QWidget):
             menu.addAction("Go to album", lambda: self.go("album", {"browse_id": track["album_browse"],
                                                                     "title": track.get("album", ""),
                                                                     "source": "youtube", "kind": "album"}))
+        self.social_song_actions(menu, track)
         if track.get("page_url") and track.get("source") != "local":
             menu.addAction("Copy link", lambda: QApplication.clipboard().setText(track["page_url"]))
         elif track.get("source") == "local":
@@ -2896,6 +3177,11 @@ class MusicTab(QWidget):
         """Plays `track`; the rest of the list it's in follows as the queue --
         an album's, a playlist's, a mix's. A song picked from search results
         plays on its own, and its radio follows (up next)."""
+        if self.jam.active and context != "jam":
+            # in a jam, what you pick plays for everyone
+            lst = list(tracks) if tracks and context not in ("search", "single") else [track]
+            self.jam.play_list(lst, next((i for i, t in enumerate(lst) if t["id"] == track["id"]), 0))
+            return
         self._context = context
         if context in ("search", "single"):
             tracks = [track]
@@ -2909,6 +3195,9 @@ class MusicTab(QWidget):
         self._play_current()
 
     def play_next(self, track):
+        if self.jam.active:
+            self.jam.add(track, next_=True)
+            return
         if self.index < 0:
             self.play_from(track)
             return
@@ -2918,6 +3207,9 @@ class MusicTab(QWidget):
         self._arm_next()
 
     def add_to_queue(self, track, quiet=False):
+        if self.jam.active:
+            self.jam.add(track)
+            return
         if any(t["id"] == track["id"] for t in self.queue):
             if not quiet:
                 self.status.setText("Already in the queue.")
@@ -3349,6 +3641,9 @@ class MusicTab(QWidget):
             lst.set_current(tid, playing)
 
     def toggle(self):
+        if self.jam.active:
+            self.jam.op("pause" if (self.jam.state or {}).get("playing") else "play")
+            return
         if self.current() is not None and not self._started:
             self._play_current()            # a song brought back from last time, not begun yet
             return
@@ -3364,6 +3659,10 @@ class MusicTab(QWidget):
             self.player.play()
 
     def next(self, auto=False):
+        if self.jam.active:
+            # the first player to reach the end moves everyone on; a press of Next does it at once
+            self.jam.op("ended", index=self.index) if auto else self.jam.op("next")
+            return
         if not self.queue:
             return
         if auto and self.repeat == "one":
@@ -3387,6 +3686,9 @@ class MusicTab(QWidget):
         self._play_current()
 
     def prev(self):
+        if self.jam.active:
+            self.jam.op("prev")
+            return
         if self.player.position() > 3000 or self.index <= 0:
             self.player.setPosition(0)
             return
@@ -3412,6 +3714,9 @@ class MusicTab(QWidget):
 
     def _seek_release(self, slider=None):
         self._seeking = False
+        if self.jam.active:
+            self.jam.op("seek", pos=int((slider or self.bar.seek).value()))
+            return
         self.player.setPosition((slider or self.bar.seek).value())
 
     def _sync_controls(self):
@@ -3754,37 +4059,105 @@ class MusicTab(QWidget):
         if track.get("kind") == "album":
             self.status.setText("Open the album to download its songs.")
             return
-        self._kept[track["id"]] = "waiting"
-        self._keep_tracks[track["id"]] = track
+        tid = track["id"]
+        self._kept[tid] = "waiting"
+        self._keep_tracks[tid] = track
+        self._keep_cancel.discard(tid)
         self.taste.log(track, "download")
         self._keep_queue.append(track)
-        self._row_state(track["id"], "busy", 0)
+        self._row_state(tid, "waiting", 0)
+        self._keep_card(track)
         if self._keeping is None:
             self._keep_next()
         else:
-            self.status.setText("Will download %s next" % track["title"])
+            self._waiting_positions()
+            self._keep_status()
+
+    def _keep_card(self, track):
+        """The song's card in the Download tab, with its own Cancel."""
+        dt = self.download_tab
+        if dt is None:
+            return
+        tid = track["id"]
+        url = thumb_url(track["artwork"], 120) if track.get("artwork") else None
+        pm = art().pixmap(url) if url else None
+        meta = " · ".join(x for x in (track.get("artist"), "MP3 320 kbps" if track["source"] == "youtube"
+                                      else (track.get("ext") or "").upper()) if x)
+        self._keep_jobs[tid] = dt.start_job(track["title"], meta, pm, lambda _jid, t=tid: (lambda: self.cancel_keep(t)))
+
+    def _waiting_positions(self):
+        if self.download_tab is None:
+            return
+        for n, t in enumerate(self._keep_queue, 1):
+            jid = self._keep_jobs.get(t["id"])
+            if jid is not None:
+                self.download_tab.set_waiting(jid, n)
+
+    def _keep_status(self):
+        """While songs download: what's happening, and a way to stop it all."""
+        if self._keeping is None:
+            return
+        track = self._keep_tracks.get(self._keeping)
+        more = len(self._keep_queue)
+        text = "Downloading %s" % (track["title"] if track else "a song")
+        if more:
+            text += " (%d more waiting)" % more
+        self.status.show_message(text + "...", action=("Cancel all" if more else "Cancel", self.cancel_all_keeps),
+                                 seconds=6)
+
+    def cancel_keep(self, tid):
+        """Stops one song's download: dropped from the line if it's waiting,
+        stopped where it is if it's the one downloading."""
+        if self._keeping == tid:
+            self._keep_cancel.add(tid)            # the download stops at its next chunk
+            return
+        for t in list(self._keep_queue):
+            if t["id"] == tid:
+                self._keep_queue.remove(t)
+                self._on_keep(tid, "cancelled", 0, "")
+                self._waiting_positions()
+                return
+
+    def cancel_all_keeps(self):
+        """Stops the music downloads: the one running and all that wait."""
+        for t in list(self._keep_queue):
+            self._keep_queue.remove(t)
+            self._on_keep(t["id"], "cancelled", 0, "")
+        if self._keeping is not None:
+            self._keep_cancel.add(self._keeping)
+        self.status.setText("Stopping the downloads...")
 
     def _keep_next(self):
         if not self._keep_queue:
             self._keeping = None
             return
         track = self._keep_queue.pop(0)
-        self._keeping = track["id"]
-        self._kept[track["id"]] = "busy"
-        self.status.setText("Downloading %s..." % track["title"])
+        tid = track["id"]
+        self._keeping = tid
+        self._kept[tid] = "busy"
+        self._row_state(tid, "busy", 0)
+        if self.download_tab is not None and tid in self._keep_jobs:
+            self.download_tab.set_started(self._keep_jobs[tid])
+        self._waiting_positions()
+        self._keep_status()
         folder = self.music_dir
 
         def progress(got, total):
             if total:
-                self._keep_sig.emit(track["id"], "busy", int(100 * got / total), "")
+                self._keep_sig.emit(tid, "busy", int(100 * got / total), "")
 
         def work():
             try:
-                path = music_sources.download(track, folder, progress)
-                self._keep_sig.emit(track["id"], "done", 100, path or "")
+                path = music_sources.download(track, folder, progress, cancelled=lambda: tid in self._keep_cancel)
+                self._keep_sig.emit(tid, "done", 100, path or "")
+            except music_sources.Cancelled:
+                self._keep_sig.emit(tid, "cancelled", 0, "")
             except Exception as e:   # noqa: BLE001
+                if tid in self._keep_cancel:
+                    self._keep_sig.emit(tid, "cancelled", 0, "")
+                    return
                 logger.exception("Couldn't download %s", track.get("title"))
-                self._keep_sig.emit(track["id"], "error", 0, music_sources.friendly(e))
+                self._keep_sig.emit(tid, "error", 0, music_sources.friendly(e))
         threading.Thread(target=work, daemon=True).start()
 
     def _row_state(self, tid, state, pct):
@@ -3794,7 +4167,25 @@ class MusicTab(QWidget):
                     r.set_kept(state, pct)
 
     def _on_keep(self, tid, state, pct, info):
-        if state == "error":
+        dt, jid = self.download_tab, self._keep_jobs.get(tid)
+        if dt is not None and jid is not None:
+            if state == "busy":
+                dt.update_progress(jid, pct, "%d%%" % pct)
+            elif state == "done":
+                dt.mark_done(jid)
+            elif state == "cancelled":
+                dt.mark_cancelled(jid)
+            elif state == "error":
+                dt.mark_failed(jid, info or "Couldn't download it")
+            if state in ("done", "cancelled", "error"):
+                self._keep_jobs.pop(tid, None)
+        if state == "cancelled":
+            self._kept.pop(tid, None)
+            self._keep_cancel.discard(tid)
+            self._row_state(tid, None, None)
+            if not self._keep_queue and self._keeping in (None, tid):
+                self.status.setText("Download cancelled")
+        elif state == "error":
             self._kept.pop(tid, None)
             self._row_state(tid, "error", None)
             track = self._keep_tracks.get(tid)
@@ -3805,6 +4196,6 @@ class MusicTab(QWidget):
             self._row_state(tid, state, pct)
             if state == "done":
                 self.status.setText("Saved to %s" % info)
-        if state in ("done", "error") and self._keeping == tid:
+        if state in ("done", "error", "cancelled") and self._keeping == tid:
             self._keeping = None
             self._keep_next()

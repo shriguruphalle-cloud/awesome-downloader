@@ -93,6 +93,7 @@ class LyricsView(QWidget):
         self._cache = {}
         self._buf = None
         self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._step)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -231,11 +232,14 @@ class LyricsView(QWidget):
         if not self.lines:
             return -self.height() * 0.08
         row = rows[max(0, self.index)] if self.index >= 0 else rows[0]
-        return row["y"] - self._anchor() + (0 if self.index >= 0 else -self._sizes()[0] * 1.6)
+        if self.index < 0:
+            return row["y"] - self._anchor() - self._sizes()[0] * 1.6
+        # the line being sung sits with its middle on the view's middle
+        return row["y"] + row["h"] / 2.0 - self.height() / 2.0
 
     def _limit(self, value, rows):
         total = (rows[-1]["y"] + rows[-1]["h"]) if rows else 0.0
-        return max(-self.height() * 0.6, min(value, total - self.height() * 0.3))
+        return max(-self.height() * 0.6, min(value, total - self.height() * 0.5))
 
     def _step(self):
         rows = self._layout()
@@ -257,7 +261,7 @@ class LyricsView(QWidget):
                 self._manual = 0.0
         goal = self._limit(self._goal(rows) + self._manual, rows)
         moving = False
-        ease = 1.0 - math.exp(-dt * 7.5)
+        ease = 1.0 - math.exp(-dt * 5.5)   # a slow, even glide
         for k in range(len(rows)):
             cur = self._row_scroll.get(k)
             if cur is None:

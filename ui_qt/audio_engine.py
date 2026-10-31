@@ -30,6 +30,7 @@ set_next(), set_blend(), set_gain() and set_eq().
 """
 import atexit
 import math
+import operator
 import re
 import subprocess
 import threading
@@ -715,17 +716,21 @@ class Engine(QObject):
         if len(left) < 32:
             return
         lp, k = self._lp, 0.47                  # one pole at ~150 Hz, at 1.5 kHz
-        bass = loud = 0.0
+        bass = loud = mid = hi = 0.0
         n = 0
         for i in range(0, len(left) - 31, 32):
             block = left[i:i + 32]
             m = sum(block) / 32.0
             lp += (m - lp) * k
             bass += lp * lp
+            mid += (m - lp) * (m - lp)          # what's left of the block's average: ~150 Hz to 1.5 kHz
+            # sample to sample changes: the highs (hi-hats, cymbals, the sparkle on a voice)
+            hi += sum(map(abs, map(operator.sub, block[1:], block))) / 31.0
             loud += max(block) - min(block)
             n += 1
         self._lp = lp
-        self._lv.append((end, math.sqrt(bass / n) / 32768.0, loud / n / 65536.0))
+        self._lv.append((end, math.sqrt(bass / n) / 32768.0, loud / n / 65536.0,
+                         math.sqrt(mid / n) / 32768.0, hi / n / 32768.0))
 
     def levels(self):
         """(bass, loudness), 0..1, of what's been heard since the last call --
@@ -744,6 +749,26 @@ class Engine(QObject):
             span = [self._lv[k] for k in range(min(i, j), j + 1)]
             self._lv_read = played
         return max(e[1] for e in span), sum(e[2] for e in span) / len(span)
+
+    def bands(self):
+        """(bass, mid, high, loudness), 0..1, of what's been heard since the
+        last call: each band's peak (a hit between two frames isn't missed),
+        the loudness's average -- for a background whose big shapes follow
+        the kick and whose small ones follow the hi-hats."""
+        with self._lock:
+            if not self._lv or not self._playing:
+                return 0.0, 0.0, 0.0, 0.0
+            played = self._played
+            since = getattr(self, "_lv_read", 0)
+            if since > played:
+                since = 0
+            i = bisect_left(self._lv, (since, -1.0, -1.0))
+            j = bisect_left(self._lv, (played, -1.0, -1.0))
+            j = min(j, len(self._lv) - 1)
+            span = [self._lv[k] for k in range(min(i, j), j + 1)]
+            self._lv_read = played
+        return (max(e[1] for e in span), max(e[3] for e in span), max(e[4] for e in span),
+                sum(e[2] for e in span) / len(span))
 
     def _try_align(self, j, out):
         a = self._feed

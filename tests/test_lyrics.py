@@ -142,10 +142,10 @@ check(0.2 < frac < 1.0, "line 2 isn't part-sung: %.2f" % frac)
 
 def line_top(i):
     row = lv._layout()[i]
-    return row["y"] - lv._row_scroll.get(i, 0)
+    return row["y"] + row["h"] / 2.0 - lv._row_scroll.get(i, 0)   # the line's middle
 
 
-check(abs(line_top(1) - lv.height() * lv.ANCHOR) < 8, "the lyrics didn't glide to the line being sung")
+check(abs(line_top(1) - lv.height() / 2.0) < 8, "the lyrics didn't glide to the line being sung")
 check(lv._emph.get(1, 0) > 0.9 and lv._emph.get(0, 1) < 0.1, "the sung line isn't the lit one")
 from PySide6.QtCore import QPoint  # noqa: E402
 from PySide6.QtGui import QWheelEvent  # noqa: E402
@@ -157,7 +157,7 @@ app.sendEvent(lv, QWheelEvent(QPointF(50, 50), QPointF(50, 50), QPoint(0, 0), QP
 settle(300)
 check(lv._manual != 0 and line_top(1) != before, "the wheel didn't scroll the lyrics")
 settle(2200)
-check(lv._manual == 0 and abs(line_top(1) - lv.height() * lv.ANCHOR) < 8,
+check(lv._manual == 0 and abs(line_top(1) - lv.height() / 2.0) < 8,
       "after scrolling, the lyrics didn't come back to the song")
 print("the lyrics glide to the line being sung, scroll with the wheel and come back")
 mt.full.grab()
