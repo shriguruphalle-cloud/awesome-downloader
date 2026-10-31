@@ -178,6 +178,9 @@ class MusicSettings(GlassSheet):
         self._section("Library")
         self._row("Import a playlist", "From Spotify, Apple Music, YouTube Music or YouTube — or a list of songs.",
                   self._pill("Import", lambda: (self.hide(), t.importer.open())))
+        self._row("Import liked songs", "Every song you've liked on Spotify or YouTube Music, in one go: sign in on "
+                                        "their own page, and nothing of the sign-in is kept.",
+                  self._pill("Import", lambda: (self.hide(), t.liked_import.open())))
         self.folder_note = _text(t.music_dir, 12, QFont.Weight.Normal, 150)
         self._row("Music folder", "Where downloaded songs are saved, and On this PC is read from.",
                   self._pill("Change", self._folder))

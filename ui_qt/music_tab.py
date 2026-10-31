@@ -57,6 +57,7 @@ from . import theme
 from .browser_chrome import ChromeButton, style_menu
 from .audio_engine import Engine, loudness
 from .music_import import ImportSheet
+from .music_import_liked import LikedImportSheet
 from .music_onboarding import Onboarding
 from .music_panels import EqPanel, InfoPanel, QueuePanel, SidePanel
 from .music_more import MusicMore
@@ -1316,6 +1317,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
                                            "info": self.info_panel}, self)
         self.importer = ImportSheet(self)
         self.importer.imported.connect(self._imported)
+        self.liked_import = LikedImportSheet(self)
 
         self.onboarding = Onboarding(self)
         self.onboarding.done.connect(self._taste_done)
@@ -1770,6 +1772,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
                        lambda: self.go("account"))
         menu.addSeparator()
         menu.addAction("Import a playlist…", self.importer.open)
+        menu.addAction("Import liked songs…", self.liked_import.open)
         menu.addAction("New playlist…", lambda: self._rail_go("newplaylist"))
         menu.addSeparator()
         menu.addAction("Your taste…", lambda: self.open_taste(editing=True))
@@ -4098,7 +4101,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         super().resizeEvent(event)
         if self.full.isVisible():
             self.full.setGeometry(self.rect())
-        for sheet in (self.onboarding, self.importer, getattr(self, "_settings_sheet", None)):
+        for sheet in (self.onboarding, self.importer, self.liked_import, getattr(self, "_settings_sheet", None)):
             if sheet is not None and _alive(sheet) and sheet.isVisible():
                 sheet.setGeometry(self.rect())
         QTimer.singleShot(0, lambda: hasattr(self, "side") and self.side.relayout())
