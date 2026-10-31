@@ -1675,8 +1675,8 @@ class MusicTab(SocialPages, MusicMore, QWidget):
             if not pl:
                 page.hero.set_text("Playlist", "Not found", "")
                 return
-            tracks = pl["tracks"]
-            page.hero.set_text("Playlist" + (" · from %s" % pl["source"] if pl.get("source") else ""),
+            tracks = self._playlist_in_order(pl["tracks"])
+            page.hero.set_text("Your playlist" + (" · from %s" % pl["source"] if pl.get("source") else ""),
                                pl["title"], " · ".join(x for x in (count(len(tracks), "song"),
                                                                     total_length(tracks)) if x))
         else:
@@ -1696,9 +1696,12 @@ class MusicTab(SocialPages, MusicMore, QWidget):
                                                        tracks[0].get("artwork")), self._sync_rail(),
                          self.status.setText("Saved %s to your playlists" % item["title"])))
         if key == "playlist" and isinstance(pl, dict):
+            h.add_action(self._profile_ring(pl))
             h.add_action(Pill("Rename", style="outline")).clicked.connect(lambda: self._rename_playlist(pl))
             h.add_action(Pill("Delete", style="outline")).clicked.connect(lambda: self._delete_playlist(pl))
         h.set_trio(tracks[:3], "In this list")
+        if key == "playlist" and len(tracks) > 1:
+            page.add(self._sort_bar("playlist_songs", lambda: self._build_list_page(key, item)))
         lst = self._track_list()
         lst.set_tracks(tracks)
         page.add(lst)
@@ -2649,30 +2652,13 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         self._explore_gen += 1
         gen, region = self._explore_gen, self._region()
 
+        if everything:
+            self._add_fresh_charts(page, region)
+
         def work():
-            from app.core import ytmusic
             data, err = {}, ""
             try:
-                if everything:
-                    shelves = ytmusic.charts(region)
-                    lists = [x for sh in shelves for x in sh["items"] if x.get("kind") == "ytplaylist"]
-                    if lists:
-                        top = ytmusic.playlist(lists[0]["browse_id"])
-                        data["trending"] = top["tracks"]
-                        data["trending_title"] = top.get("title") or lists[0]["title"]
-                    data["shelves"] = shelves
-                    try:
-                        data["new"] = ytmusic.new_releases()[:24]
-                    except Exception:   # noqa: BLE001 -- the charts alone will do
-                        data["new"] = []
-                else:
-                    if self._moods is None:
-                        self._moods = ytmusic.moods()
-                    name = self.CHIP_CATEGORY.get(chip, chip)
-                    ep = self._moods.get(name)
-                    if not ep:
-                        raise music_sources.MusicError("YouTube Music has no %s page here." % chip)
-                    data["shelves"] = ytmusic.category(ep)
+                data = music_brain.value(music_brain.explore, chip, region) or {}
             except Exception as e:   # noqa: BLE001
                 err = music_sources.friendly(e)
             self._explore_sig.emit(gen, chip, data, err)
@@ -2697,6 +2683,11 @@ class MusicTab(SocialPages, MusicMore, QWidget):
             first = next((t for t in trending if music_sources.is_cover(t.get("artwork"))), None)
             if first:
                 page.art_url = thumb_url(first["artwork"], 900)
+        if data.get("week"):
+            lst = self._track_list(limit=10)
+            lst.set_tracks(data["week"])
+            page.add(lst, data.get("week_title") or "Top songs this week")
+            self._want_cover(data["week"][:20])
         for sh in data.get("shelves") or []:
             items = sh["items"]
             songs = [x for x in items if x.get("kind", "track") == "track"]
@@ -2729,6 +2720,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         page.hero.set_text("Search", "Find anything",
                            "Type a song, an artist or an album on the left — every library is searched at once.")
         self._songs_list = self._track_list(limit=8)
+        self._add_recent_searches(page)
         self._add_moods(page, 2)
 
     def run_search(self, text=None):
@@ -2738,6 +2730,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         self._suggest_gen += 1
         self.suggest.hide()
         self.rail.search.setText(q)
+        self._remember_search(q)
         self._gen += 1
         gen = self._gen
         self._search = {"query": q, "gen": gen, "parts": {}}
@@ -2745,7 +2738,8 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         page.clear()
         page.art_url = None
         page.hero.set_text("Searching", q, "YouTube Music, Openverse and the Internet Archive")
-        self._songs_list = self._track_list(limit=8)
+        self._songs_list = self._track_list(limit=5)
+        self._more_songs = self._track_list(limit=15)
         self._free_list = self._track_list(limit=4)
         self._album_grid = self._tile_grid("album", rows=1)
         self._artist_grid = self._tile_grid("artist", rows=1)
@@ -2754,6 +2748,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         for key, title, widget, link in (("songs", "Songs", self._songs_list, None),
                                          ("albums", "Albums", self._album_grid, "See all"),
                                          ("artists", "Artists", self._artist_grid, "See all"),
+                                         ("more", "More songs", self._more_songs, None),
                                          ("free", "Free to keep · Creative Commons", self._free_list, None),
                                          ("live", "Live shows & netlabels · Internet Archive", self._live_grid,
                                           "See all")):
@@ -2801,8 +2796,10 @@ class MusicTab(SocialPages, MusicMore, QWidget):
             except Exception:   # noqa: BLE001 -- as it came
                 logger.debug("Couldn't tidy the search", exc_info=True)
             self._results = found["songs"]
-            self._songs_list.set_tracks(found["songs"])
+            self._songs_list.set_tracks(found["songs"][:5])
             self._section_state("songs", found["songs"], err, "")
+            self._more_songs.set_tracks(found["songs"][5:20])
+            self._section_state("more", found["songs"][5:20], "", "")
             self._album_grid.set_items(found["albums"])
             self._section_state("albums", found["albums"], "", "")
             self._artist_grid.set_items(found["artists"])
@@ -2949,8 +2946,10 @@ class MusicTab(SocialPages, MusicMore, QWidget):
                                                            if a["songs"] else None)
         h.add_action(self._ring("shuffle", "Shuffle", lambda: self._play_artist(a, shuffle=True)))
         h.add_action(self._save_ring(a))
+        if a["songs"] and str(a["songs"][0].get("id", "")).startswith("yt:"):
+            h.add_action(self._ring("radio", "Radio from this artist", lambda: self._radio_from(a["songs"][0])))
         if a.get("browse_id"):
-            h.add_action(Pill("Every song", style="outline")).clicked.connect(lambda: self.open_catalog(a))
+            page.add(self._all_songs_card(a))
         if a["songs"]:
             lst = self._track_list(show_album=True)
             lst.set_tracks(a["songs"])
@@ -2992,7 +2991,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
             h.add_action(self._ring("download", "Download the album", lambda: [self.keep(t) for t in tracks]))
         h.add_action(self._save_ring(al))
         if al.get("artist_browse"):
-            h.add_action(Pill("Artist", style="outline")).clicked.connect(
+            h.add_action(Pill("%s  ›" % (al.get("artist") or "Artist").split(",")[0], style="glass")).clicked.connect(
                 lambda: self.go("artist", {"browse_id": al["artist_browse"], "title": al.get("artist", "")}))
         lst = self._track_list(show_art=False, show_album=False)
         lst.set_tracks(tracks)
@@ -3028,19 +3027,25 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         page.clear()
         page.art_url = None
         items = music_library.saved(kind)
-        title = {"songs": "Your songs", "artists": "Your artists", "albums": "Your albums"}[kind]
+        if kind == "songs":
+            items = self._liked_in_order(items)
+        title = {"songs": "Liked songs", "artists": "Your artists", "albums": "Your albums"}[kind]
         noun = {"songs": "song", "artists": "artist", "albums": "album"}[kind]
         page.hero.set_text("Your music", title,
                            "%s saved" % count(len(items), noun) if items
-                           else "Nothing saved yet — tap the star on a %s to keep it here." % noun)
+                           else "Nothing saved yet — tap the heart on %s %s to keep it here."
+                           % ("a" if noun == "song" else "an", noun))
         if kind == "songs":
             if items:
                 page.hero.add_action(Pill("Play", "play")).clicked.connect(lambda: self._play_list(items))
                 page.hero.add_action(self._ring("shuffle", "Shuffle", lambda: self._play_list(items, True)))
+                page.hero.add_action(self._ring("download", "Download them all", lambda: [self.keep(t) for t in items]))
                 page.hero.set_trio(items[:3], "Latest")
+            if len(items) > 1:
+                page.add(self._sort_bar("liked", lambda: self._build_saved(kind)))
             lst = self._track_list()
             lst.set_tracks(items)
-            page.add(lst)
+            page.add(lst, gap=8)
         else:
             grid = self._tile_grid("artist" if kind == "artists" else "album", rows=99)
             grid.set_items(items)
@@ -3093,9 +3098,10 @@ class MusicTab(SocialPages, MusicMore, QWidget):
         page = self._pages["queue"]
         page.clear()
         page.art_url = None
-        page.hero.set_text("Queue", "Up next",
-                           " · ".join(x for x in (count(len(self.queue), "song") if self.queue else "Empty",
-                                                  total_length(self.queue)) if x))
+        now = self.queue[self.index] if 0 <= self.index < len(self.queue) else None
+        page.hero.set_text("Queue", "Up next" if now else "Nothing queued",
+                           "Playing %s · %d after it" % (now.get("title", ""), max(0, len(self.queue) - self.index - 1))
+                           if now else "Songs you add to the queue wait here.")
         if self.queue:
             page.hero.add_action(Pill("Shuffle", "shuffle", style="glass")).clicked.connect(self._shuffle_queue)
             page.hero.add_action(Pill("Clear", style="outline")).clicked.connect(self.clear_queue)

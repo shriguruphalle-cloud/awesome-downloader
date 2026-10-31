@@ -234,6 +234,21 @@ def draw_icon(p, kind, rect, color, weight=1.0):
             r = 8.6 if i % 2 == 0 else 3.9
             pts.append((12 + r * math.cos(ang), 12.9 + r * math.sin(ang)))
         poly(*pts, close=True, fill=kind == "star_filled")
+    elif kind == "radio":
+        dot(12, 12, 1.8)
+        arc(12, 12, 4.8, -50, 100)
+        arc(12, 12, 4.8, 130, 100)
+        arc(12, 12, 8.4, -45, 90)
+        arc(12, 12, 8.4, 135, 90)
+    elif kind == "pin":
+        poly((8.4, 3.8), (15.6, 3.8), (14.6, 10.2), (17.8, 13.8), (6.2, 13.8), (9.4, 10.2), close=True, fill=True)
+        poly((12, 13.8), (12, 20.6))
+    elif kind == "sort":
+        poly((4, 7), (14, 7))
+        poly((4, 12), (11, 12))
+        poly((4, 17), (8, 17))
+        poly((18, 5), (18, 19))
+        poly((15.4, 16.4), (18, 19), (20.6, 16.4))
     elif kind == "lock":
         body = QRectF(pt(6, 10.6), pt(18, 20))
         p.drawRoundedRect(body, 2.2 * u, 2.2 * u)

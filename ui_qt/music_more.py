@@ -7,7 +7,7 @@ import threading
 import os
 import time
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QAbstractButton, QGridLayout, QHBoxLayout, QMenu, QVBoxLayout, QWidget
 
@@ -22,7 +22,7 @@ from app.utils import music_library
 from . import theme
 from .browser_chrome import draw_icon, style_menu
 from .music_social import Field, Glass, _alive, _label
-from .music_widgets import NavItem, Pill, SectionHeader
+from .music_widgets import NavItem, Pill, RingButton, SectionHeader, icon_button
 
 logger = get_logger("music_more")
 
@@ -40,6 +40,19 @@ MOOD_LINES = {"chill": "Slow down, breathe out", "focus": "Head down, in the zon
               "lofi": "Soft beats, warm crackle", "indie": "Off the beaten track", "jazz": "Smoke, brass and late hours",
               "classical": "Strings, keys and calm", "hiphop": "Bars, beats and swagger",
               "phonk": "Cowbells and drift nights"}
+
+
+SORTS = {"liked": ("music_liked_sort", "recent", (("recent", "Recently added"), ("oldest", "Oldest"), ("title", "Title"),
+                                                  ("artist", "Artist"), ("longest", "Longest"))),
+         "playlist_songs": ("music_playlist_song_sort", "custom", (("custom", "Playlist order"),
+                                                                   ("recent", "Recently added"), ("title", "Title"),
+                                                                   ("artist", "Artist"))),
+         "playlists": ("music_playlist_sort", "recent", (("recent", "Recently added"), ("oldest", "Oldest"),
+                                                         ("az", "A–Z"), ("songs", "Most songs")))}
+
+
+def _low(t, key):
+    return (t.get(key) or "").lower()
 
 
 class LibraryCard(QAbstractButton):
@@ -526,14 +539,30 @@ class MusicMore:
             it.setCheckable(False)
             it.clicked.connect(lambda _c=False, f=fn: f())
             col.addWidget(it)
-        for p in music_library.playlists():
+        shown = self._playlists_in_order()
+        pins = self._pins()
+        for p in shown:
             it = NavItem(p["id"], p["title"], sub=n(len(p.get("tracks") or []), "song") or "Empty",
                          art_url=p.get("artwork") or next((t.get("artwork") for t in p.get("tracks") or []
                                                            if t.get("artwork")), None))
             it.setCheckable(False)
             it.clicked.connect(lambda _c=False, k=p["id"]: self.go("playlist", k))
-            col.addWidget(it)
-        page.add(box, "Playlists")
+            line = QWidget()
+            lr = QHBoxLayout(line)
+            lr.setContentsMargins(0, 0, 0, 0)
+            lr.setSpacing(2)
+            lr.addWidget(it, 1)
+            pin = icon_button("pin", "Unpin" if p["id"] in pins else "Pin to the top", 34, 16)
+            pin.tint = None if p["id"] in pins else "#55ffffff"
+            pin.clicked.connect(lambda _c=False, x=p: self._toggle_pin(x))
+            lr.addWidget(pin)
+            more = icon_button("dots", "More", 34, 17)
+            more.clicked.connect(lambda _c=False, x=p: self._playlist_more(x))
+            lr.addWidget(more)
+            col.addWidget(line)
+        if len(shown) > 1:
+            page.add(self._sort_bar("playlists", self._build_library), gap=14)
+        page.add(box, None if len(shown) > 1 else "Playlists")
         st = NavItem("x", "Settings", icon="sliders")
         st.setCheckable(False)
         st.clicked.connect(lambda _c=False: self.open_settings())
@@ -544,8 +573,8 @@ class MusicMore:
         page.clear()
         page.art_url = None
         songs = [t for t in music_library.recent() if t.get("kind", "track") == "track"]
-        page.hero.set_text("Your music", "Recent", "The last %d songs you played." % len(songs) if songs else
-                           "What you play shows here.")
+        page.hero.set_text("Your music", "Recently played", "The last %d songs" % len(songs) if songs else
+                           "Songs you play show up here.")
         if songs:
             page.hero.add_action(Pill("Play", "play")).clicked.connect(lambda: self.play_from(songs[0], songs))
             lst = self._track_list()
@@ -562,10 +591,190 @@ class MusicMore:
                 self.status.setText("Nothing found for that just now.")
                 return
             self.status.setText("")
-            self.go("mix", dict(item, over=item.get("over") or "Mood"))
+            line = MOOD_LINES.get(key, "")
+            self.go("mix", dict(item, over=item.get("over") or "Mood mix · made for you",
+                                subtitle=item.get("subtitle") or line))
         self._brain(ok, lambda e: self.status.setText(str(e)), brain.mood_mix, key)
 
+    # ---- the phone's orders ----
+    def _sort_now(self, name):
+        pref, first, _opts = SORTS[name]
+        return (self.settings or {}).get(pref) or first
+
+    def _sort_bar(self, name, rebuild):
+        """An order to choose: one small button with the choice on it, opening the choices under it."""
+        pref, _first, opts = SORTS[name]
+        now = self._sort_now(name)
+        b = Pill("%s  ▾" % dict(opts).get(now, opts[0][1]), "sort", style="glass")
+
+        def choose(key):
+            self.set_pref(pref, key)
+            QTimer.singleShot(0, rebuild)
+
+        def show():
+            menu = style_menu(QMenu(self), theme.tokens(True))
+            for key, words in opts:
+                act = menu.addAction(words, lambda k=key: choose(k))
+                act.setCheckable(True)
+                act.setChecked(key == now)
+            menu.exec(b.mapToGlobal(b.rect().bottomLeft()))
+        b.clicked.connect(show)
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(b)
+        row.addStretch(1)
+        return bar
+
+    def _liked_in_order(self, songs):
+        by = self._sort_now("liked")
+        if by == "oldest":
+            return list(reversed(songs))
+        if by in ("title", "artist"):
+            return sorted(songs, key=lambda t: _low(t, by))
+        if by == "longest":
+            return sorted(songs, key=lambda t: -(t.get("duration") or 0))
+        return list(songs)
+
+    def _playlist_in_order(self, songs):
+        by = self._sort_now("playlist_songs")
+        if by == "recent":
+            return list(reversed(songs))
+        if by in ("title", "artist"):
+            return sorted(songs, key=lambda t: _low(t, by))
+        return list(songs)
+
+    def _playlists_in_order(self):
+        by = self._sort_now("playlists")
+        pls = music_library.playlists()
+        if by == "oldest":
+            pls = list(reversed(pls))
+        elif by == "az":
+            pls = sorted(pls, key=lambda p: _low(p, "title"))
+        elif by == "songs":
+            pls = sorted(pls, key=lambda p: -len(p.get("tracks") or []))
+        pins = self._pins()
+        return sorted(pls, key=lambda p: pins.index(p["id"]) if p["id"] in pins else len(pins))
+
+    def _pins(self):
+        return list((self.settings or {}).get("music_pinned_playlists") or [])
+
+    def _toggle_pin(self, pl):
+        pins = self._pins()
+        pins.remove(pl["id"]) if pl["id"] in pins else pins.insert(0, pl["id"])
+        self.set_pref("music_pinned_playlists", pins)
+        self.status.setText(("Pinned %s" if pl["id"] in pins else "Unpinned %s") % pl["title"])
+        QTimer.singleShot(0, self._build_library)
+
+    def _profile_ring(self, pl):
+        """A playlist on your profile, or only yours."""
+        on = pl.get("public", True) is not False
+        b = RingButton("people" if on else "lock", "On your profile — click to keep it private" if on
+                       else "Private — click to show it on your profile")
+
+        def flip():
+            now = not (pl.get("public", True) is not False)
+            brain.value(brain.set_playlist_public, pl["id"], now)
+            pl["public"] = now
+            b.set_kind("people" if now else "lock")
+            b.set_tip("On your profile — click to keep it private" if now
+                      else "Private — click to show it on your profile")
+            self.status.setText("%s shows on your profile" % pl["title"] if now
+                                else "%s is private now — only you see it" % pl["title"])
+        b.clicked.connect(flip)
+        return b
+
+    def _playlist_more(self, pl):
+        menu = style_menu(QMenu(self), theme.tokens(True))
+        songs = pl.get("tracks") or []
+        if songs:
+            menu.addAction("Play", lambda: self._play_list(songs))
+            menu.addAction("Shuffle", lambda: self._play_list(songs, True))
+            menu.addSeparator()
+        menu.addAction("Unpin" if pl["id"] in self._pins() else "Pin to the top", lambda: self._toggle_pin(pl))
+        menu.addAction("Rename", lambda: self._rename_playlist(pl))
+        menu.addAction("Delete", lambda: self._delete_playlist(pl))
+        menu.exec(QCursor.pos())
+
+    # ---- what you looked for ----
+    def _remember_search(self, q):
+        had = [x for x in (self.settings or {}).get("music_recent_searches") or [] if x.lower() != q.lower()]
+        self.set_pref("music_recent_searches", ([q] + had)[:12])
+
+    def _forget_search(self, q=None):
+        had = (self.settings or {}).get("music_recent_searches") or []
+        self.set_pref("music_recent_searches", [x for x in had if q is not None and x != q])
+        QTimer.singleShot(0, self._build_search_empty)
+
+    def _add_recent_searches(self, page):
+        had = (self.settings or {}).get("music_recent_searches") or []
+        if not had:
+            return
+        holder = QWidget()
+        grid = QGridLayout(holder)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(2)
+        for i, q in enumerate(had[:6]):
+            line = QWidget()
+            row = QHBoxLayout(line)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(2)
+            it = NavItem("x", q, icon="search")
+            it.setCheckable(False)
+            it.clicked.connect(lambda _c=False, t=q: self.run_search(t))
+            row.addWidget(it, 1)
+            off = icon_button("close", "Forget this search", 32, 13)
+            off.clicked.connect(lambda _c=False, t=q: self._forget_search(t))
+            row.addWidget(off)
+            grid.addWidget(line, i // 2, i % 2)
+        page.add(holder, "Recently searched")
+        clear = Pill("Clear", style="glass")
+        clear.clicked.connect(lambda: self._forget_search())
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(clear)
+        row.addStretch(1)
+        page.add(bar, gap=6)
+
+    # ---- Explore: the newest charts come on their own, so the page doesn't wait for them ----
+    def _add_fresh_charts(self, page, region):
+        holder = QWidget()
+        col = QVBoxLayout(holder)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(10)
+        wait = _label("Getting today's Apple Music and Spotify charts…", 13, color=look.TEXT_3)
+        col.addWidget(wait)
+        page.add(holder)
+
+        def ok(got):
+            if not _alive(holder):
+                return
+            wait.hide()
+            for key, fallback in (("apple", "Top songs today"), ("spotify", "Spotify Top 30")):
+                songs = (got or {}).get(key) or []
+                if songs:
+                    lst = self._track_list(limit=15)
+                    lst.set_tracks(songs)
+                    col.addWidget(SectionHeader((got or {}).get(key + "_title") or fallback))
+                    col.addWidget(lst)
+                    self._want_cover(songs[:30])
+            self._set_current_marks()
+
+        def fail(_e):
+            if _alive(holder):
+                holder.hide()
+        self._brain(ok, fail, brain.fresh_charts, region)
+
     # ---- an artist's every song ----
+    def _all_songs_card(self, artist):
+        n = len(artist.get("albums") or []) + len(artist.get("singles") or [])
+        c = LibraryCard("disc", "All songs", "Everything %s has put out" % artist.get("title", "this artist"),
+                        "%d releases" % n if n else "", 0.60)
+        c.clicked.connect(lambda: self.open_catalog(artist))
+        return c
+
     def open_catalog(self, artist):
         self.go("catalog", {"browse_id": artist.get("browse_id"), "title": artist.get("title", "")})
 
@@ -611,7 +820,7 @@ class MusicMore:
                     "year": str(t.get("year") or "")}[key]
 
         def show():
-            q = find.text().strip().lower()
+            q = find.edit.text().strip().lower()
             out = [t for t in state["tracks"]
                    if all(not state[k] or value_of(t, k) == state[k] for k in ("lang", "kind", "year"))
                    and (not q or q in (t.get("title") or "").lower() or q in (t.get("album") or "").lower())]
