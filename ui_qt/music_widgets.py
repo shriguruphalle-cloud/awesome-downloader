@@ -690,6 +690,7 @@ class Tile(QWidget):
     play = Signal(object)
 
     TEXT_H = 46
+    PAD = 8
 
     def __init__(self, item, mode="album", parent=None):
         super().__init__(parent)
@@ -733,9 +734,74 @@ class Tile(QWidget):
         self.update()
 
     def _play_rect(self):
-        s = self.width()
-        d = 42
-        return QRectF(s - d - 10, s - d - 10, d, d)
+        d = 36
+        end = self.width() - self.PAD - 8     # the cover's corner, inside the card
+        return QRectF(end - d, end - d, d, d)
+
+    def _paint_card(self, p):
+        """An album, a mix or a song, as on the phone: a pane of glass holding the cover, a ringed play button on it
+        always, the name and who under it. A chart wears its colour and its name over the cover."""
+        s, pad = self.width(), self.PAD
+        lift = 2.0 * self._hover
+        p.translate(0, 2 - lift)
+        card = QRectF(0.5, 0.5, s - 1, self.height() - 3)
+        g = QLinearGradient(card.topLeft(), card.bottomLeft())
+        g.setColorAt(0, QColor(255, 255, 255, int(26 + 14 * self._hover)))
+        g.setColorAt(1, QColor(255, 255, 255, int(10 + 10 * self._hover)))
+        p.setBrush(g)
+        p.setPen(QPen(QColor(255, 255, 255, int(30 + 30 * self._hover)), 1))
+        p.drawRoundedRect(card, 18, 18)
+        side = s - 2 * pad
+        cover = QRectF(pad, pad, side, side)
+        if self._raw is not None and (self._pix is None or self._pix.width() != int(side * 2)):
+            self._pix = look.rounded(self._raw, side, side, 12)
+        if self._pix is not None:
+            p.drawPixmap(cover.topLeft(), self._pix)
+        else:
+            look.placeholder(p, cover, look.DEFAULT, 12)
+        it = self.item
+        if it.get("chart"):
+            hue = float(it.get("hue") or 0.5)
+            tone = QColor.fromHslF(hue % 1.0, 0.70, 0.30)
+            shade = QLinearGradient(cover.topLeft(), cover.bottomLeft())
+            shade.setColorAt(0, look.with_alpha(tone, 0.92))
+            shade.setColorAt(0.55, look.with_alpha(tone, 0.35))
+            shade.setColorAt(1, QColor(0, 0, 0, 140))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(shade)
+            p.drawRoundedRect(cover, 12, 12)
+            words = (it.get("title") or "").split(" · ")
+            x, w = cover.left() + 12, side - 24
+            lf = look.label_font(10)
+            p.setFont(lf)
+            p.setPen(QColor(255, 255, 255, 210))
+            p.drawText(QRectF(x, cover.top() + 10, w, 16), int(Qt.AlignmentFlag.AlignVCenter),
+                       (it.get("over") or "Chart").upper())
+            px, lines = look.fit_display(words[0], w, max_px=min(30, side * 0.17), min_px=14, lines=2)
+            p.setFont(look.display_font(px))
+            p.setPen(QColor(255, 255, 255))
+            y = cover.top() + 28 + px
+            for line in lines:
+                p.drawText(QPointF(x, y), line)
+                y += px * 1.02
+            if len(words) > 1:
+                p.setFont(look.font(13, QFont.Weight.Bold))
+                p.drawText(QPointF(x, y + 1), words[1])
+        pr = self._play_rect()
+        p.setBrush(QColor(255, 255, 255, 235) if self._hover > 0.5 else QColor(0, 0, 0, 115))
+        p.setPen(QPen(QColor(255, 255, 255, 217), 1.5))
+        p.drawEllipse(pr)
+        draw_icon(p, "play", pr.adjusted(10, 10, -9, -10), QColor(10, 11, 16) if self._hover > 0.5 else QColor(255, 255, 255))
+        tf, sf = look.font(13.5, QFont.Weight.Bold), look.font(11.5, QFont.Weight.Medium)
+        w = s - 2 * pad - 4
+        title = it.get("subtitle") if it.get("chart") else it.get("title")
+        line = ("#1 " + it["lead"]) if it.get("chart") and it.get("lead") else self._subtitle()
+        p.setFont(tf)
+        p.setPen(look.TEXT)
+        p.drawText(QRectF(pad + 2, s - pad + 6, w, 19), int(Qt.AlignmentFlag.AlignVCenter), _elide(title, tf, w))
+        p.setFont(sf)
+        p.setPen(look.TEXT_2)
+        p.drawText(QRectF(pad + 2, s - pad + 25, w, 16), int(Qt.AlignmentFlag.AlignVCenter), _elide(line, sf, w))
 
     def mousePressEvent(self, e):
         e.accept()
@@ -756,6 +822,10 @@ class Tile(QWidget):
         cover = QRectF(0, 0, s, s)
         if self.mode == "mood":
             self._paint_mood(p, cover)
+            p.end()
+            return
+        if self.mode in ("album", "track"):
+            self._paint_card(p)
             p.end()
             return
         circle = self.mode == "artist"
@@ -835,16 +905,16 @@ class Tile(QWidget):
         g.setColorAt(1, look.mix(pal["base"], pal["glow"], 0.35))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(g)
-        p.drawRoundedRect(r, 8, 8)
+        p.drawRoundedRect(r, 18, 18)
         p.save()
         path = QPainterPath()
-        path.addRoundedRect(r, 8, 8)
+        path.addRoundedRect(r, 18, 18)
         p.setClipPath(path)
         look.paint_grain(p, r, 0.8)
         p.restore()
         if self._hover:
             p.setBrush(QColor(255, 255, 255, int(22 * self._hover)))
-            p.drawRoundedRect(r, 8, 8)
+            p.drawRoundedRect(r, 18, 18)
         px, lines = look.fit_display(self.item["title"].upper(), r.width() - 30,
                                      max_px=min(28, r.width() * 0.17), min_px=12, lines=2)
         f = look.display_font(px)
