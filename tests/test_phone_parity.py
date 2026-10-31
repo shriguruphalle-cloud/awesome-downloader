@@ -4,6 +4,8 @@ import json
 
 import _support
 from _support import build_window, check, settle
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
 
 from app.core import music_brain as brain
 from ui_qt import music_look as look
@@ -56,6 +58,15 @@ check(not any("Moods" in x for x in labels), "moods on Home: %s" % labels)
 check(any(t.item.get("title") == "Top Synthetic" for t in home.sections.findChildren(Tile)), "the chart card isn't shown")
 check(home.hero.title.startswith("Good "), "no greeting: %r" % home.hero.title)
 print("Home: greeting, then charts; no moods")
+
+# a chart card opens its songs, as on the phone; its button plays them
+chart = [t for t in home.sections.findChildren(Tile) if t.item.get("title") == "Top Synthetic"][0]
+QTest.mouseClick(chart, Qt.MouseButton.LeftButton, pos=QPoint(chart.width() // 2, 30))
+settle(200)
+check(mt._here[0] == "mix", "the chart card didn't open: %s" % (mt._here,))
+check(mt._pages["mix"].hero.title == "Top Synthetic", "another page: %r" % mt._pages["mix"].hero.title)
+check(not mt.queue, "the chart started playing instead of opening")
+print("a chart card opens its songs")
 
 # Moods on Search
 rail.items["search"].click()

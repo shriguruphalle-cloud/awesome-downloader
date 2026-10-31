@@ -2541,7 +2541,7 @@ class MusicTab(SocialPages, MusicMore, QWidget):
             key = str(item.get("id", "")).split(":", 1)[-1]
             self._open_mood(key) if key in music_brain.MOOD_MIXES else self.run_search(item["title"])
         elif kind == "mix":
-            self.play_item(item)
+            self.go("mix", dict(item, over=item.get("over") or "Made for you"))    # opens its songs; its button plays
         elif kind == "ytplaylist":
             self._open_ytplaylist(item)
         else:
