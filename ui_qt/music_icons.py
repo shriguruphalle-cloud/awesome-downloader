@@ -11,7 +11,8 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 
 KINDS = {"play", "pause", "next", "prev", "back10", "fwd10", "shuffle", "repeat", "repeat_one", "speaker",
          "speaker_low", "mute", "queue", "sliders", "eq", "mic", "note", "lyrics", "trend", "sparkle", "person",
-         "disc", "folder", "target", "home", "import", "chevron", "playlist_import"}
+         "disc", "folder", "target", "home", "import", "chevron", "playlist_import", "people", "chat", "jam",
+         "send", "share"}
 
 
 def _pen(c, w):
@@ -213,6 +214,51 @@ def draw(p, kind, rect, color):
         body.cubicTo(pt(5.2, 15.6), pt(8.4, 13.6), pt(12, 13.6))
         body.cubicTo(pt(15.6, 13.6), pt(18.8, 15.6), pt(19.4, 20.2))
         stroke(body)
+    elif kind == "people":
+        # two people, one a little behind the other
+        front = QPainterPath()
+        front.addEllipse(pt(9.4, 8.6), 3.5 * u, 3.5 * u)
+        stroke(front)
+        body = QPainterPath(pt(3.0, 20.0))
+        body.cubicTo(pt(3.6, 15.8), pt(6.4, 14.0), pt(9.4, 14.0))
+        body.cubicTo(pt(12.4, 14.0), pt(15.2, 15.8), pt(15.8, 20.0))
+        stroke(body)
+        back = QPainterPath(pt(15.0, 5.3))
+        back.cubicTo(pt(17.6, 5.0), pt(19.4, 7.0), pt(19.0, 9.4))
+        back.cubicTo(pt(18.7, 11.2), pt(17.4, 12.2), pt(15.8, 12.3))
+        stroke(back)
+        tail = QPainterPath(pt(17.4, 14.3))
+        tail.cubicTo(pt(19.6, 14.8), pt(20.9, 16.8), pt(21.2, 20.0))
+        stroke(tail)
+    elif kind == "chat":
+        # a speech bubble, its tail at the lower left
+        b = QPainterPath(pt(7.6, 18.2))
+        b.lineTo(pt(4.4, 20.6))
+        b.lineTo(pt(5.0, 16.6))
+        b.cubicTo(pt(3.8, 15.2), pt(3.2, 13.6), pt(3.2, 11.8))
+        b.cubicTo(pt(3.2, 7.2), pt(7.2, 4.0), pt(12.0, 4.0))
+        b.cubicTo(pt(16.8, 4.0), pt(20.8, 7.2), pt(20.8, 11.4))
+        b.cubicTo(pt(20.8, 15.6), pt(16.8, 18.8), pt(12.0, 18.8))
+        b.cubicTo(pt(10.4, 18.8), pt(8.9, 18.6), pt(7.6, 18.2))
+        stroke(b)
+    elif kind == "jam":
+        # headphones
+        band = QPainterPath()
+        box = QRectF(pt(4.2, 4.4), pt(19.8, 20.0))
+        band.arcMoveTo(box, 180)
+        band.arcTo(box, 180, -180)
+        stroke(band)
+        rrect(3.4, 13.0, 7.8, 20.4, 1.8)
+        rrect(16.2, 13.0, 20.6, 20.4, 1.8)
+    elif kind == "send":
+        # a paper plane
+        stroke(path((3.6, 11.2), (20.6, 4.0), (14.6, 20.4), (11.4, 13.0), close=True))
+        stroke(path((11.4, 13.0), (20.6, 4.0)))
+    elif kind == "share":
+        # an arrow up out of a tray
+        stroke(path((12.0, 15.0), (12.0, 3.8)))
+        chevron((12.0, 3.8), -math.pi / 2, 4.0)
+        stroke(path((7.6, 9.8), (5.4, 9.8), (5.4, 20.2), (18.6, 20.2), (18.6, 9.8), (16.4, 9.8)))
     elif kind == "disc":
         outer = QPainterPath()
         outer.addEllipse(pt(12, 12), 8.6 * u, 8.6 * u)
