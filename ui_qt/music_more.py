@@ -791,7 +791,49 @@ class MusicMore:
         menu.addAction("Keep it")
         menu.exec(QCursor.pos())
 
+    # ---- the full-screen player's top bar ----
+    def _player_share(self):
+        track = self.current()
+        if not track:
+            return
+        menu = style_menu(QMenu(self), theme.tokens(True))
+        menu.addAction("Share as a video…", lambda: self.sharer.open_for(track))
+        self.social_song_actions(menu, track)
+        if track.get("page_url") and track.get("source") != "local":
+            menu.addAction("Copy link", lambda: QApplication.clipboard().setText(track["page_url"]))
+        menu.exec(QCursor.pos())
+
+    def _player_more(self):
+        """The dots: what the card has under its controls, as a list, and the song's own menu."""
+        track = self.current()
+        if not track:
+            return
+        f = self.full
+        menu = style_menu(QMenu(self), theme.tokens(True))
+        menu.addAction("Liked" if music_library.is_saved(track) else "Like", lambda: self.toggle_saved(track))
+        menu.addAction("Back to the player" if f.view == "lyrics" else "Lyrics",
+                       lambda: f.set_view("card" if f.view == "lyrics" else "lyrics"))
+        menu.addAction("Lyrics language", lambda: self._lyrics_menu(QCursor.pos()))
+
+        def panel(card):
+            f.show_card(card, True)
+            self._refresh_panels()
+        menu.addAction("Queue", lambda: panel(f.queue_card))
+        menu.addAction({"one": "Repeat this song", "all": "Repeat all"}.get(self.repeat, "Repeat"), self._cycle_repeat)
+        menu.addAction("Shuffle: on" if self.shuffle else "Shuffle", self._toggle_shuffle)
+        menu.addAction("Equalizer & effects", lambda: panel(f.fx_card))
+        menu.addAction("Share", self._player_share)
+        menu.addSeparator()
+        menu.addAction("More for this song", lambda: self._song_menu(QCursor.pos()))
+        menu.exec(QCursor.pos())
+
     # ---- the sleep timer: the music fades out and stops when the time is up ----
+    def _sleep_lit(self):
+        on = getattr(self, "_sleep_end", False) or getattr(self, "_sleep_due", None)
+        self.full.moon_btn.tint = self._np_pal["accent"].name() if on else None
+        self.full.moon_btn.set_tip(self._sleep_words().rstrip("…"))
+        self.full.moon_btn.update()
+
     def _sleep_words(self):
         if getattr(self, "_sleep_end", False):
             return "Sleep timer: end of this song"
@@ -822,16 +864,19 @@ class MusicMore:
             self._sleep_timer.start(minutes * 60000)
         self.status.setText("Sleep timer off" if minutes is None else "Music stops at the end of this song"
                             if minutes == -1 else "Music stops in %d minutes" % minutes)
+        self._sleep_lit()
 
     def _sleep_at_song_end(self):
         if not getattr(self, "_sleep_end", False):
             return False
         self._sleep_end = False
         self.status.setText("Stopped by the sleep timer")
+        self._sleep_lit()
         return True
 
     def _sleep_fade(self):
         self._sleep_due = None
+        self._sleep_lit()
         full, steps = self.audio.volume(), [20]
         fade = QTimer(self)
         fade.setInterval(500)

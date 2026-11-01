@@ -306,6 +306,7 @@ class _Art(QWidget):
     def __init__(self, size=44, radius=8, parent=None):
         super().__init__(parent)
         self._size, self._radius, self._pix, self._src = size, radius, None, None
+        self.mirror = None                  # another _Art showing the same picture (focus's cover)
         self.setFixedSize(size, size)
 
     def set_size(self, size, radius=None):
@@ -315,6 +316,8 @@ class _Art(QWidget):
         self.setFixedSize(self._size, self._size)
 
     def set_pixmap(self, pix):
+        if self.mirror is not None and pix is not self._src:
+            self.mirror.set_pixmap(pix)
         self._src = pix
         self._pix = look.rounded(pix, self._size, self._size, self._radius) if pix is not None else None
         self.update()
@@ -326,6 +329,53 @@ class _Art(QWidget):
             p.drawPixmap(0, 0, self._pix)
         else:
             look.placeholder(p, QRectF(0, 0, self._size, self._size), look.DEFAULT, self._radius)
+        p.end()
+
+
+class _FocusArt(_Art):
+    """Focus's cover: rounded, a soft shadow round it, straight on the moving background (no glass). The shadow is
+    drawn once and kept, so it costs nothing a frame."""
+    MARGIN = 30
+
+    def __init__(self, parent=None):
+        super().__init__(400, 18, parent)
+        self._shadow = None
+        self.set_side(400)
+
+    def set_side(self, side):
+        side = int(side)
+        if side != self._size or self._shadow is None:
+            self.set_size(side)
+            self.setFixedSize(side + 2 * self.MARGIN, side + 2 * self.MARGIN)
+            self._shadow = None
+            self.set_pixmap(self._src)
+
+    def _shadow_pix(self):
+        if self._shadow is None:
+            out = QPixmap(self.size())
+            out.fill(Qt.GlobalColor.transparent)
+            p = QPainter(out)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 11))
+            m = self.MARGIN
+            for i in range(14):
+                grow = (14 - i) * 2
+                p.drawRoundedRect(QRectF(m - grow, m - grow + 8, self._size + 2 * grow, self._size + 2 * grow - 8),
+                                  18 + grow, 18 + grow)
+            p.end()
+            self._shadow = out
+        return self._shadow
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.drawPixmap(0, 0, self._shadow_pix())
+        m = self.MARGIN
+        if self._pix is not None:
+            p.drawPixmap(m, m, self._pix)
+        else:
+            look.placeholder(p, QRectF(m, m, self._size, self._size), look.DEFAULT, self._radius)
         p.end()
 
 
@@ -422,6 +472,7 @@ class _PlayerCard(QWidget):
         foot.addWidget(self.div_c, 0, V)
         foot.addWidget(self.vol, 0, V)
         col.addLayout(foot)
+        self.mode = "portrait"              # on its side ("side"), or a strip of controls ("strip")
         self.set_width(470)
 
     def _gap(self, layout, px):
@@ -433,6 +484,7 @@ class _PlayerCard(QWidget):
         """Everything in proportion to the card's width -- the buttons, their
         icons, the words, the gaps -- with nothing held at a minimum size, so
         a small window gets a smaller card that still fits together."""
+        self._back_to_layout()
         w = int(w)
         k = w / 520.0                       # sizes: as designed at 520 px
         ki = w / 470.0                      # icons and words: as designed at 470 px
@@ -486,6 +538,154 @@ class _PlayerCard(QWidget):
         self.layout().activate()
         self.setFixedHeight(self.layout().sizeHint().height())
 
+    def _back_to_layout(self):
+        """What the other shapes put aside comes back, and the layout takes over again."""
+        if self.mode == "portrait":
+            return
+        self.mode = "portrait"
+        for w in (self.div_a, self.div_b, self.div_c, self.shuffle_btn, self.repeat_btn, self.lyrics_pill, self.eq_tile):
+            w.show()
+        self.len_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.vol.setFixedHeight(10)     # (set_width sizes it again)
+        self.layout().setEnabled(True)
+
+    def set_side(self, ctrl_w):
+        """On its side, for a window wider than it's tall, as on a phone turned: the cover at the left, as tall as
+        the song and its controls at the right. Everything keeps the size set_width gives it for that column."""
+        vw = ctrl_w / (1.0 - 2 * 0.072)
+        self.set_width(vw)
+        self.layout().setEnabled(False)
+        self.mode = "side"
+        for w in (self.div_a, self.div_b, self.div_c):
+            w.hide()
+        k, ki = vw / 520.0, vw / 470.0
+        ctrl_w = int(ctrl_w)
+        pad = int(round(vw * 0.072))
+        name_h = self.title.sizeHint().height() + int(4 * k) + self.artist.sizeHint().height()
+        if self.quality.isVisibleTo(self):
+            name_h += int(4 * k) + self.quality.sizeHint().height()
+        top_h = max(name_h, self.heart.height())
+        seek_h = self.seek.sizeHint().height()
+        time_h = self.pos_label.sizeHint().height()
+        play = self.play_btn.height()
+        tile_h = self.queue_tile.height()
+        g1, g2, g3 = int(18 * k), int(10 * k), int(14 * k)
+        body = top_h + g1 + seek_h + time_h + g2 + play + g3 + tile_h
+        cover = body
+        self.art.set_size(cover, max(10, int(cover * 0.06)))
+        self.art.set_pixmap(self.art._src)
+        self.art.move(pad, pad)
+        x = pad + cover + int(28 * k)
+        y = pad
+        r = self.heart.width()
+        self.more_btn.move(x + ctrl_w - r, y + (top_h - r) // 2)
+        self.heart.move(x + ctrl_w - 2 * r - int(8 * k), y + (top_h - r) // 2)
+        name_w = ctrl_w - 2 * r - int(20 * k)
+        ny = y + (top_h - name_h) // 2
+        self.title.setGeometry(x, ny, name_w, self.title.sizeHint().height())
+        ny += self.title.height() + int(4 * k)
+        self.artist.setGeometry(x, ny, name_w, self.artist.sizeHint().height())
+        ny += self.artist.height() + int(4 * k)
+        self.quality.adjustSize()
+        self.quality.move(x, ny)
+        y += top_h + g1
+        self.seek.setGeometry(x, y, ctrl_w, seek_h)
+        y += seek_h
+        self.pos_label.setGeometry(x + 4, y, 60, time_h)
+        self.len_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.len_label.setGeometry(x + ctrl_w - 64, y, 60, time_h)
+        y += time_h + g2
+        # the transport row, mirrored about play: the ends at the column's edges, the ten-second skips halfway
+        b = self.prev_btn.width()
+        mid = x + ctrl_w // 2
+        first = b // 2
+        skip = (first + ctrl_w // 2 - play // 2 + b // 2) // 2
+        cy = y + play // 2
+        self.play_btn.move(mid - play // 2, y)
+        for w, cx in ((self.prev_btn, x + first), (self.back10_btn, x + skip), (self.fwd10_btn, x + ctrl_w - skip),
+                      (self.next_btn, x + ctrl_w - first)):
+            w.move(cx - w.width() // 2, cy - w.height() // 2)
+        y += play + g3
+        # along the foot: Lyrics, the queue, EQ, repeat and shuffle, the volume taking the rest
+        sp = max(4, int(8 * k))
+        fx = x
+        self.lyrics_pill.move(fx, y)
+        fx += self.lyrics_pill.width() + sp
+        for w in (self.queue_tile, self.eq_tile):
+            w.move(fx, y)
+            fx += w.width() + sp
+        for w in (self.repeat_btn, self.shuffle_btn):
+            n = min(tile_h, int(42 * k))
+            w.setFixedSize(n, n)
+            w.move(fx, y + (tile_h - n) // 2)
+            fx += n + sp // 2
+        vol_w = x + ctrl_w - fx
+        self.vol.setFixedHeight(tile_h)
+        self.vol.fit(vol_w, ki)
+        self.vol.move(fx, y)
+        self.radius = max(18.0, (body + 2 * pad) * 0.085)
+        self.setFixedSize(x + ctrl_w + pad, body + 2 * pad)
+
+    STRIP_H = 116
+
+    def set_strip(self, width):
+        """The controls in a slim strip along the bottom, for focus and the lyrics, as on a phone on its side: the
+        seek bar with the times at its ends; under it the song at the left, the five transport buttons in the very
+        middle, and the queue, like, more and the volume at the right. No glass: it lies on the background."""
+        self.set_width(470)
+        self.layout().setEnabled(False)
+        self.mode = "strip"
+        for w in (self.div_a, self.div_b, self.div_c, self.shuffle_btn, self.repeat_btn, self.lyrics_pill, self.eq_tile):
+            w.hide()
+        self.quality.move(-2000, -2000)     # (it keeps its own showing or not, for when it's back)
+        W, m = int(width), 36
+        self.setFixedSize(W, self.STRIP_H)
+        for lab in (self.pos_label, self.len_label):
+            lab.setFont(look.font(11.5, QFont.Weight.Medium))
+        seek_h = self.seek.sizeHint().height()
+        self.pos_label.setGeometry(m, 8, 44, seek_h)
+        self.len_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.len_label.setGeometry(W - m - 44, 8, 44, seek_h)
+        self.seek.setGeometry(m + 52, 8, W - 2 * m - 104, seek_h)
+        cy, cx, play, b = 74, W // 2, 64, 48
+        self.play_btn.setFixedSize(play, play)
+        self.play_btn.icon_size = 22
+        self.play_btn.move(cx - play // 2, cy - play // 2)
+        for w, dx in ((self.back10_btn, -(play // 2 + 8 + b // 2)), (self.prev_btn, -(play // 2 + 12 + b + b // 2)),
+                      (self.fwd10_btn, play // 2 + 8 + b // 2), (self.next_btn, play // 2 + 12 + b + b // 2)):
+            w.setFixedSize(b, b)
+            w.icon_size = 26
+            w.move(cx + dx - b // 2, cy - b // 2)
+        self.art.set_size(50, 8)
+        self.art.set_pixmap(self.art._src)
+        self.art.move(m, cy - 25)
+        x = m + 62
+        name_w = max(60, self.prev_btn.x() - 16 - x)
+        self.title._f = look.font(14, QFont.Weight.Bold)
+        self.title.setFont(self.title._f)
+        self.artist._f = look.font(12, QFont.Weight.Medium)
+        self.artist.setFont(self.artist._f)
+        self.title.setGeometry(x, cy - 22, name_w, 22)
+        self.artist.setGeometry(x, cy, name_w, 20)
+        # at the right, from the edge in
+        vol_w = 150 if W >= 1100 else 110
+        self.vol.setFixedHeight(40)
+        self.vol.fit(vol_w, 0.8)
+        self.vol.move(W - m - vol_w, cy - 20)
+        r = 40
+        rx = self.vol.x() - 10 - r
+        for w in (self.more_btn, self.heart):
+            w.setFixedSize(r, r)
+            w.icon_size = 17
+            w.move(rx, cy - r // 2)
+            rx -= r + 8
+        self.heart._base = self.heart.icon_size
+        self.queue_tile.setFixedSize(52, 46)
+        self.queue_tile.move(rx - 52 + r, cy - 23)
+
+    def mousePressEvent(self, e):
+        e.accept()                          # a click on the card isn't a click on the screen behind it
+
     def set_accent(self, colour):
         self.accent = QColor(colour)
         for wdg in (self.play_btn, self.seek, self.volume, self.lyrics_pill, self.queue_tile, self.eq_tile):
@@ -494,6 +694,8 @@ class _PlayerCard(QWidget):
         self.update()
 
     def paintEvent(self, event):
+        if self.mode == "strip":
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
@@ -517,7 +719,13 @@ class _FullView(QWidget):
     lyrics_toggled = Signal(bool)
     lang_requested = Signal(QPoint)
     theme_requested = Signal(QPoint)
+    sleep_requested = Signal()
+    share_requested = Signal()
+    more_requested = Signal()
+    view_changed = Signal(str)
     TOP, BOTTOM = 78, 40
+    VIEWS = {"card": "The player", "focus": "Focus", "lyrics": "Lyrics"}
+    IDLE_MS = 5000                      # the buttons along the top fade after this, untouched
 
     def __init__(self, make_list, eq_settings, parent=None):
         super().__init__(parent)
@@ -561,7 +769,6 @@ class _FullView(QWidget):
         self._clock = 0.0
         self._frame = 0
         self._last_tick = time.monotonic()
-        self.hide()
 
         self.card = _PlayerCard(self)
         c = self.card
@@ -593,8 +800,22 @@ class _FullView(QWidget):
                 card.close_btn.clicked.connect(lambda _c=False, k=card: self.show_card(k, False))
         self.lyrics = LyricsView(self)
         self.lyrics.hide()
+        self.focus_art = _FocusArt(self)
+        self.focus_art.hide()
+        self.card.art.mirror = self.focus_art
+        self.view = "card"                  # the player, focus or the lyrics
+        self._words = False                 # the lyrics showing (as the view, or over the card)
+        self._panels = set()                # the cards round the player that are open
+        self._lang_on = False
+        self._slide_next = False
+        self._slide = None
+        self._chrome_on = True
+        self._chrome_fades = {}
+        self._just_woke = False
+        self._rest_pos = None
 
-        # along the top: the lyrics' language (while they show), the song's details, and out
+        # along the top: down at the left; the lyrics' language (while they show), sleep, the view, the background,
+        # share, the song's details and the rest at the right
         self.lang_btn = Pill("Lyrics language", style="ghost", parent=self)
         self.lang_btn.setToolTip("Lyrics in another script or language, and a translation under each line")
         self.lang_btn.hide()
@@ -605,14 +826,36 @@ class _FullView(QWidget):
                                      44, 20, self)
         self.theme_btn.clicked.connect(lambda: self.theme_requested.emit(
             self.theme_btn.mapToGlobal(QPoint(0, self.theme_btn.height() + 6))))
-        self.close_btn = icon_button("shrink", "Leave full screen (Esc)", 44, 18, self)
+        self.close_btn = icon_button("chevron_down", "Leave full screen (Esc)", 44, 26, self)
         self.close_btn.clicked.connect(self.closed)
+        self.moon_btn = icon_button("moon", "Sleep timer", 44, 20, self)
+        self.moon_btn.clicked.connect(self.sleep_requested)
+        self.view_btn = icon_button("view_card", "The player, focus or the lyrics", 44, 20, self)
+        self.view_btn.clicked.connect(self.cycle_view)
+        self.share_btn = icon_button("share", "Share", 44, 20, self)
+        self.share_btn.clicked.connect(self.share_requested)
+        self.dots_btn = icon_button("dots", "More", 44, 20, self)
+        self.dots_btn.clicked.connect(self.more_requested)
+        self.view_note = QLabel("", self)
+        self.view_note.setFont(look.font(14, QFont.Weight.DemiBold))
+        self.view_note.setStyleSheet("color: white; background: rgba(0,0,0,115); border: 1px solid rgba(255,255,255,40);"
+                                     " border-radius: 17px; padding: 0 16px;")
+        self.view_note.hide()
+        self._note_timer = QTimer(self)
+        self._note_timer.setSingleShot(True)
+        self._note_timer.setInterval(2000)
+        self._note_timer.timeout.connect(self.view_note.hide)
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.setInterval(self.IDLE_MS)
+        self._idle.timeout.connect(self._rest)
         self.lyrics_btn = self.lyrics_pill
 
         self.queue_tile.clicked.connect(lambda: self.show_card(self.queue_card))
         self.eq_tile.clicked.connect(lambda: self.show_card(self.fx_card))
         self.info_btn.clicked.connect(lambda: self.show_card(self.info_card))
-        self.lyrics_pill.clicked.connect(lambda: self.lyrics_toggled.emit(not self.lyrics.isVisible()))
+        self.lyrics_pill.clicked.connect(lambda: self.lyrics_toggled.emit(not self._words))
+        self.hide()
 
     # ---- the cards round the player ----
     def is_open(self, card):
@@ -622,15 +865,153 @@ class _FullView(QWidget):
 
     def show_card(self, card, on=None):
         on = (not self.is_open(card)) if on is None else on
-        if on and card in (self.fx_card, self.info_card):
-            other = self.info_card if card is self.fx_card else self.fx_card
-            self._pop(other, False)
-            if self.lyrics.isVisible():
-                self.lyrics_toggled.emit(False)
         if on:
-            self._relayout()
+            others = (self.fx_card, self.info_card) if card in (self.fx_card, self.info_card) else ()
+            if not self._can_flank():       # no room round it: one at a time
+                others = (self.queue_card, self.fx_card, self.info_card)
+            for other in others:
+                if other is not card:
+                    self._panels.discard(other)
+                    self._pop(other, False)
+            self._panels.add(card)
+        else:
+            self._panels.discard(card)
+        self._slide_next = True
+        self._relayout()
         self._pop(card, on)
         self._sync_lit()
+        self._wake()
+
+    def _strip_layout(self):
+        """Focus and the lyrics: the controls in a strip along the bottom."""
+        return self._words or self.view == "focus"
+
+    def _can_flank(self):
+        """Room for a card on either side of the player at once."""
+        if self._strip_layout():
+            return False
+        if self.card.mode == "portrait":
+            return True
+        return (self.width() - self.card.width()) // 2 - 70 >= 300
+
+    # ---- the player, focus, the lyrics ----
+    def set_view(self, view, tell=True):
+        view = view if view in self.VIEWS else "card"
+        self.view = view
+        self._sync_view_icon()
+        if tell:
+            self.view_changed.emit(view)
+        if (view == "lyrics") != self._words:
+            self.lyrics_toggled.emit(view == "lyrics")     # (which comes back through show_lyrics)
+        else:
+            self._relayout()
+        self._wake()
+
+    def cycle_view(self):
+        if self._words and self.view != "lyrics":
+            self.lyrics_toggled.emit(False)                 # the words over the card: back to the card
+            self._wake()
+            return
+        order = list(self.VIEWS)
+        view = order[(order.index(self.view) + 1) % len(order)]
+        self.set_view(view)
+        self._say(self.VIEWS[view])
+
+    def _sync_view_icon(self):
+        self.view_btn.set_kind("view_lyrics" if self._words else "view_focus" if self.view == "focus" else "view_card")
+        self.view_btn.update()
+
+    def _say(self, words):
+        self.view_note.setText(words)
+        self.view_note.adjustSize()
+        self.view_note.setFixedHeight(34)
+        self.view_note.move((self.width() - self.view_note.width()) // 2, 74)
+        self.view_note.show()
+        self.view_note.raise_()
+        self._note_timer.start()
+
+    # ---- the buttons fade when nothing's touched ----
+    def _top_buttons(self):
+        out = [self.close_btn, self.moon_btn, self.view_btn, self.theme_btn, self.share_btn, self.info_btn, self.dots_btn]
+        if self._lang_on and self._words:
+            out.append(self.lang_btn)
+        return out
+
+    def _fading(self):
+        out = self._top_buttons()
+        if self._strip_layout():
+            out.append(self.card)
+        return out
+
+    def _wake(self):
+        if self.isVisible():
+            self._idle.start()
+        if not self._chrome_on:
+            self._set_chrome(True)
+
+    def _rest(self):
+        if self._panels or QApplication.activePopupWidget() is not None or self._lyrics_seeking():
+            self._idle.start()
+            return
+        self._set_chrome(False)
+
+    def _lyrics_seeking(self):
+        return self.seek.isSliderDown() if hasattr(self.seek, "isSliderDown") else False
+
+    def _set_chrome(self, on, animate=True):
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        self._chrome_on = on
+        self._rest_pos = None if on else QCursor.pos()
+        if on or not self._strip_layout():
+            self.unsetCursor()
+        else:
+            self.setCursor(Qt.CursorShape.BlankCursor)
+        for w in self._fading():
+            old = self._chrome_fades.pop(w, None)
+            if old is not None:
+                old.stop()
+            if not animate or not self.isVisible():
+                w.setGraphicsEffect(None)
+                w.setVisible(on)
+                continue
+            fx = QGraphicsOpacityEffect(w)
+            w.setGraphicsEffect(fx)
+            w.show()
+            anim = QVariantAnimation(self)
+            anim.setDuration(160 if on else 320)
+            anim.setStartValue(0.0 if on else 1.0)
+            anim.setEndValue(1.0 if on else 0.0)
+            anim.valueChanged.connect(fx.setOpacity)
+            anim.finished.connect(lambda w=w, on=on: self._fade_done(w, on))
+            self._chrome_fades[w] = anim
+            anim.start()
+
+    def _fade_done(self, w, on):
+        self._chrome_fades.pop(w, None)
+        w.setGraphicsEffect(None)       # only while it fades: the moving background doesn't pay for it otherwise
+        w.setVisible(on)
+
+    def eventFilter(self, obj, e):
+        kind = e.type()
+        if kind == QEvent.Type.MouseMove:
+            at = QCursor.pos()
+            rest = self._rest_pos
+            if rest is None or abs(at.x() - rest.x()) + abs(at.y() - rest.y()) > 12:     # not a hand's tremble
+                self._wake()
+        elif kind in (QEvent.Type.MouseButtonPress, QEvent.Type.Wheel, QEvent.Type.KeyPress):
+            if kind == QEvent.Type.MouseButtonPress and not self._chrome_on:
+                self._just_woke = True
+            self._wake()
+        return False
+
+    def mousePressEvent(self, e):
+        """A click on the empty screen: the buttons away, or back."""
+        woke, self._just_woke = self._just_woke, False
+        hit = self.childAt(e.position().toPoint())
+        if not woke and self._chrome_on and hit in (None, self.focus_art) and not self._panels:
+            self._idle.stop()
+            self._set_chrome(False)
+        super().mousePressEvent(e)
 
     def _sync_lit(self):
         self.queue_tile.set_lit(self.is_open(self.queue_card))
@@ -719,6 +1100,28 @@ class _FullView(QWidget):
         W, H = self.width(), self.height()
         if W < 200 or H < 200:
             return
+        slide, self._slide_next = self._slide_next, False
+        self._place_top_bar(W)
+        strip = self._strip_layout()
+        self.focus_art.setVisible(self.view == "focus" and not self._words and not self._panels)
+        self.lyrics.setVisible(self._words and not self._panels)
+        if strip:
+            self._stop_slide()
+            self.card.set_strip(W)
+            cy = H - self.card.height() - 6
+            self.card.move(0, cy)
+            side = int(max(120, min(H - 2 * 126, H * 0.52, W * 0.34, 560)))
+            self.focus_art.set_side(side)
+            self.focus_art.move((W - self.focus_art.width()) // 2, (H - self.focus_art.height()) // 2)
+            self.lyrics.setGeometry(48, 66, W - 96, cy - 66 - 6)
+            pw, ph = min(560, W - 96), min(640, cy - 76)
+            for card in self._panels:
+                card.setGeometry((W - pw) // 2, 70 + (cy - 70 - ph) // 2, pw, ph)
+            return
+        if W >= H * 1.25:
+            self._relayout_side(W, H, slide)
+            return
+        self._stop_slide()
         top, bottom = self.TOP, self.BOTTOM
         room = H - top - bottom
         # the card: 15% under what fills the height, and smaller still in a small window -- it shrinks
@@ -742,14 +1145,76 @@ class _FullView(QWidget):
         self.queue_card.setGeometry(cx - gap - side_w, cy, side_w, side_h)
         for card in (self.fx_card, self.info_card):
             card.setGeometry(cx + cw + gap, cy, side_w, side_h)
-        lx = cx + cw + gap + 10
-        self.lyrics.setGeometry(lx, top, max(200, W - lx - 56), H - top - bottom)
-        # the top bar
-        self.close_btn.move(W - 36 - self.close_btn.width(), 22)
-        self.info_btn.move(self.close_btn.x() - 10 - self.info_btn.width(), 22)
-        self.theme_btn.move(self.info_btn.x() - 10 - self.theme_btn.width(), 22)
+
+    def _relayout_side(self, W, H, slide):
+        """The card on its side, in the middle. A card opened beside it: on either side where there's room, else the
+        two side by side in the middle, the player sliding over to make room."""
+        room = H - self.TOP - self.BOTTOM
+        gap = int(34 * max(0.75, min(1.3, min(W / 1700.0, H / 1000.0))))
+        ctrl = min(W * 0.34, H * 0.56, 520)
+        for _ in range(6):
+            self.card.set_side(ctrl)
+            if self.card.height() <= room and self.card.width() <= W - 48:
+                break
+            ctrl = max(170, ctrl * 0.88)
+        panels = self._panels
+        flank = (W - self.card.width()) // 2 - gap - 36 >= 300
+        if panels and not flank:
+            for _ in range(6):
+                if W - self.card.width() - gap - 48 >= 300 or ctrl <= 170:
+                    break
+                ctrl = max(170, ctrl * 0.88)
+                self.card.set_side(ctrl)
+        cw, ch = self.card.width(), self.card.height()
+        ph = int(min(room, max(ch, min(560, H * 0.7))))
+        py = max(self.TOP, (H - ph) // 2)
+        cx = (W - cw) // 2
+        if flank or not panels:
+            side_w = int(min(420, (W - cw) // 2 - gap - 36))
+            self.queue_card.setGeometry(cx - gap - side_w, py, side_w, ph)
+            for card in (self.fx_card, self.info_card):
+                card.setGeometry(cx + cw + gap, py, side_w, ph)
+        else:
+            pw = int(min(420, W - cw - gap - 48))
+            left = (W - cw - gap - pw) // 2
+            if self.queue_card in panels:
+                self.queue_card.setGeometry(left, py, pw, ph)
+                cx = left + pw + gap
+            else:
+                for card in (self.fx_card, self.info_card):
+                    card.setGeometry(left + cw + gap, py, pw, ph)
+                cx = left
+        self._move_card(cx, (H - ch) // 2, slide)
+
+    def _stop_slide(self):
+        if self._slide is not None:
+            self._slide.stop()
+            self._slide = None
+
+    def _move_card(self, x, y, slide):
+        self._stop_slide()
+        if not slide or not self.isVisible() or self.card.pos() == QPoint(x, y):
+            self.card.move(x, y)
+            return
+        anim = QPropertyAnimation(self.card, b"pos", self)
+        anim.setDuration(220)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.setEndValue(QPoint(x, y))
+        anim.start()
+        self._slide = anim
+
+    def _place_top_bar(self, W):
+        self.close_btn.move(24, 16)
+        x = W - 24
+        for b in (self.dots_btn, self.info_btn, self.share_btn, self.theme_btn, self.view_btn, self.moon_btn):
+            x -= b.width()
+            b.move(x, 16)
+            x -= 6
         self.lang_btn.adjustSize()
-        self.lang_btn.move(self.theme_btn.x() - 14 - self.lang_btn.width(), 25)
+        self.lang_btn.move(x - 8 - self.lang_btn.width(), 19)
+        for b in self._top_buttons():
+            b.raise_()
+        self.view_note.move((W - self.view_note.width()) // 2, 74)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -802,32 +1267,50 @@ class _FullView(QWidget):
 
     def set_lang_label(self, text):
         self.lang_btn.setText(text or "Lyrics language")
-        self.lang_btn.setVisible(bool(text) and self.lyrics.isVisible())
+        self._lang_on = bool(text)
+        self.lang_btn.setVisible(self._lang_on and self._words and self._chrome_on)
         self._relayout()
 
     def show_lyrics(self, on):
+        self._words = bool(on)
+        if not on and self.view == "lyrics":
+            self.view = "card"
+            self.view_changed.emit("card")
         if on:
-            self._pop(self.fx_card, False)
-            self._pop(self.info_card, False)
-            self._relayout()
-            self.lyrics.show()
-            self.lyrics.raise_()
+            for card in (self.queue_card, self.fx_card, self.info_card):
+                self._panels.discard(card)
+                self._pop(card, False)
         else:
-            self.lyrics.hide()
             self.lang_btn.hide()
+        self._sync_view_icon()
+        self._relayout()
+        if on:
+            self.lyrics.raise_()
+            self.card.raise_()
+            for b in self._top_buttons():
+                b.raise_()
         self.lyrics_pill.style = "glow" if on else "ghost"
         self.lyrics_pill.setToolTip("Hide lyrics" if on else "Lyrics")
         self.lyrics_pill.update()
         self._sync_lit()
+        if not self._chrome_on:
+            self._set_chrome(True, animate=False)
+        self._wake()
 
     def showEvent(self, event):
         super().showEvent(event)
         self._relayout()
         self._drift.start()
+        self._set_chrome(True, animate=False)
+        QApplication.instance().installEventFilter(self)
+        self._idle.start()
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self._drift.stop()
+        self._idle.stop()
+        QApplication.instance().removeEventFilter(self)
+        self.unsetCursor()
 
     def _tick(self):
         now = time.monotonic()
@@ -1357,6 +1840,11 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         self.full.lyrics_toggled.connect(self._show_lyrics)
         self.full.lang_requested.connect(self._lyrics_menu)
         self.full.theme_requested.connect(self._theme_menu)
+        self.full.sleep_requested.connect(self._sleep_menu)
+        self.full.share_requested.connect(self._player_share)
+        self.full.more_requested.connect(self._player_more)
+        self.full.view_changed.connect(lambda v: self.set_pref("music_player_view", v))
+        self.full.set_view((self.settings or {}).get("music_player_view", "card"), tell=False)
         self.full.lyrics.seek_requested.connect(lambda ms: self.player.setPosition(ms))
         self.full.play_btn.clicked.connect(self.toggle)
         self.full.next_btn.clicked.connect(self.next)
@@ -3681,7 +4169,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         f.artist.setText(track.get("artist") or "")
         f.credit.setText(credit or ("YouTube Music" if track["source"] == "youtube" else ""))
         f.credit.setToolTip(track.get("attribution") or "")
-        if f.lyrics.isVisible():
+        if f.isVisible() and f._words:
             self._fetch_lyrics(track)
         b.art.set_pixmap(None)
         f.art.set_pixmap(None)
@@ -3843,7 +4331,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
             dur = self.player.duration()
             if dur:
                 self.full.len_label.setText(format_eta(dur // 1000))
-            if self.full.lyrics.isVisible():
+            if self.full.isVisible() and self.full._words:
                 self.full.lyrics.set_position(ms, self._playing())
 
     def _on_duration(self, ms):
@@ -3852,7 +4340,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         self.bar.len_label.setText(format_eta(ms // 1000) if ms else "0:00")
         self.full.len_label.setText(self.bar.len_label.text())
         cur = self.current()
-        if (ms and cur is not None and self.full.lyrics.isVisible()
+        if (ms and cur is not None and self.full.isVisible() and self.full._words
                 and getattr(self, "_lyrics_for", None) == cur.get("id")
                 and abs(self._song_seconds(cur) - getattr(self, "_lyrics_secs", 0)) > 2):
             self._fetch_lyrics(cur)    # the song's real length: the lyrics that fit it
@@ -3927,7 +4415,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
             self.full.set_background(art().image(url))
             self.full.art.set_pixmap(art().pixmap(url))
         self.full.set_palette(self._np_pal)
-        self._show_lyrics(lyrics)
+        self._show_lyrics(lyrics or self.full.view == "lyrics")
 
     # ---- karaoke ----
     def _show_lyrics(self, on):
