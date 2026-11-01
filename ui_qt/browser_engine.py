@@ -178,6 +178,39 @@ class BrowserServices(QObject):
         # it must get a real window for the install to finish.
         self.engine.adopt_extension_window(args)
 
+    # ---- other extensions ----
+    def extensions_ready(self):
+        return self._service is not None and getattr(self._service, "core", None) is not None
+
+    def extensions_list(self, callback):
+        """Those added (AdGuard is the Browser's own, with its own button): dicts with id, name, enabled, meta, ext."""
+        from app.core import extensions as core
+
+        def got(found):
+            items = []
+            for e in list(found):
+                ext_id, name = str(e.Id), str(e.Name or "")
+                if ext_id == self.adguard_id or "adguard" in name.lower():
+                    continue
+                meta = core.meta_for(ext_id, name)
+                if meta:        # (the engine has some of its own, Microsoft's, which aren't anyone's to manage)
+                    items.append({"id": ext_id, "name": name, "enabled": bool(e.IsEnabled), "ext": e, "meta": meta})
+            callback(sorted(items, key=lambda x: x["name"].lower()))
+
+        def failed(msg):
+            logger.warning("Couldn't list the extensions: %s", msg)
+            callback([])
+        webview2.then(self._service.core.Profile.GetBrowserExtensionsAsync(), got, failed)
+
+    def extension_add(self, folder, ok, fail):
+        webview2.then(self._service.core.Profile.AddBrowserExtensionAsync(folder), ok, fail)
+
+    def extension_enable(self, ext, on, ok, fail):
+        webview2.then(ext.EnableAsync(bool(on)), ok, fail)
+
+    def extension_remove(self, ext, ok, fail):
+        webview2.then(ext.RemoveAsync(), ok, fail)
+
     # ---- AdGuard ----
     def _on_service_created(self):
         self._flush_cookie_waiters()

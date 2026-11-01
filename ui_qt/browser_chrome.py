@@ -249,6 +249,17 @@ def draw_icon(p, kind, rect, color, weight=1.0):
         poly((4, 17), (8, 17))
         poly((18, 5), (18, 19))
         poly((15.4, 16.4), (18, 19), (20.6, 16.4))
+    elif kind == "puzzle":
+        path = QPainterPath(pt(4.5, 8.5))
+        path.lineTo(pt(9.2, 8.5))
+        path.cubicTo(pt(8.2, 4.2), pt(14.2, 4.2), pt(13.2, 8.5))
+        path.lineTo(pt(18, 8.5))
+        path.lineTo(pt(18, 12.2))
+        path.cubicTo(pt(22, 11.2), pt(22, 17.2), pt(18, 16.2))
+        path.lineTo(pt(18, 20))
+        path.lineTo(pt(4.5, 20))
+        path.closeSubpath()
+        p.drawPath(path)
     elif kind == "lock":
         body = QRectF(pt(6, 10.6), pt(18, 20))
         p.drawRoundedRect(body, 2.2 * u, 2.2 * u)

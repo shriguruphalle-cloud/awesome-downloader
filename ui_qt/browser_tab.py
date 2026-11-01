@@ -40,6 +40,7 @@ from app.core import safe_browsing
 from app.utils import browser_data, download_history, formatting, settings as settings_store
 
 from . import browser_engine, browser_scripts, motion, palettes, theme, webview2
+from .browser_extensions import ExtensionManager
 from .browser_chrome import (
     ActionButton, AddressBar, AdGuardPanel, BookmarkPopup, BookmarksBar, BookmarksPanel, ChromeButton,
     EngineMissing, LoadBar, NowPlaying, TabPill, TabStrip, favicons, icon, style_menu, UpdateBar,
@@ -589,6 +590,8 @@ class BrowserTab(QWidget):
         self.bookmarks_btn.customContextMenuRequested.connect(
             lambda _pos: self._show_bookmarks_panel(self.bookmarks_btn))
         bar.addWidget(self.bookmarks_btn)
+        self.extensions_btn = ChromeButton("puzzle", "Extensions")
+        bar.addWidget(self.extensions_btn)
         self.shield_btn = ChromeButton("shield_check", "AdGuard ad blocker")
         self.menu_btn = ChromeButton("menu", "Menu")
         bar.addWidget(self.shield_btn)
@@ -649,6 +652,8 @@ class BrowserTab(QWidget):
         self.pip_btn.clicked.connect(lambda: self.toggle_pip())
         self.address.star_clicked.connect(self._on_bookmark_button)
         self.shield_btn.clicked.connect(self._show_adguard_panel)
+        self.extensions = ExtensionManager(self)
+        self.extensions_btn.clicked.connect(self.extensions.show_panel)
         self.menu_btn.clicked.connect(self._show_menu)
         self.now_playing.activated.connect(self._goto_media_tab)
         self.now_playing.toggle_clicked.connect(lambda: self._media_command("toggle"))
@@ -723,7 +728,7 @@ class BrowserTab(QWidget):
     def apply_theme(self):
         self._dark = self._dark_mode()
         t = self._t = theme.tokens(dark_mode=self._dark)
-        for b in (self.back_btn, self.fwd_btn, self.reload_btn, self.home_btn, self.shield_btn, self.menu_btn,
+        for b in (self.extensions_btn, self.back_btn, self.fwd_btn, self.reload_btn, self.home_btn, self.shield_btn, self.menu_btn,
                   self.bookmarks_btn, self.pip_btn):
             b.apply_theme(t)
         self.strip.apply_theme(t, self._dark)
@@ -1212,6 +1217,8 @@ class BrowserTab(QWidget):
             self.load_bar.stage(value)
 
     def _on_load_finished(self, tab, ok):
+        if ok:
+            self.extensions.offer(tab)
         tab.loading = False
         tab.pill.set_loading(False)
         if tab is self._cur and tab.private:
@@ -1491,6 +1498,8 @@ class BrowserTab(QWidget):
 
     # ------------------------------------------------------ downloads ----
     def _on_download_starting(self, tab, args):
+        if self.extensions.take_download(tab, args):
+            return
         try:
             suggested = os.path.basename(str(args.ResultFilePath or "")) or "download"
             os.makedirs(self.download_dir, exist_ok=True)
