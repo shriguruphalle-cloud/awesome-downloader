@@ -198,7 +198,7 @@ check(len(mt._album_grid.tiles) == 1 and len(mt._artist_grid.tiles) == 1, "album
 check(mt._sections["free"][0].isHidden(), "an empty section still shows")
 live_note = mt._sections["live"][2]
 check(not live_note.isHidden() and "resting" in live_note.text(), "a library that failed didn't say so")
-check(mt._pages["search"].hero.title == "Tone 0" and mt._pages["search"].hero.trio,
+check(mt._pages["search"].hero.title == "Tone 0" and mt._top_card.title == "Tone 0",
       "the top result isn't the page's header: %r" % mt._pages["search"].hero.title)
 check(wait(lambda: mt.stage.pal["base"].rgb() != look.DEFAULT["base"].rgb(), 4000),
       "the page didn't take its colours from the top song's cover")
@@ -270,7 +270,7 @@ ytmusic.album = lambda bid: dict(fake_album, tracks=list(album_tracks), length=3
 mt.go("artist", fake_artist)
 check(wait(lambda: mt._pages["artist"].sec.count() > 2), "the artist's page didn't fill")
 ap = mt._pages["artist"]
-check(ap.hero.title == "Test Artist" and len(ap.hero.trio) == 3, "the artist's header: %r" % ap.hero.title)
+check(ap.hero.title == "Test Artist" and not ap.hero.trio, "the artist's header: %r" % ap.hero.title)
 mt.go("album", fake_album)
 check(wait(lambda: mt._pages["album"].sec.count() > 1), "the album's page didn't fill")
 check(mt._pages["album"].hero.title == "Fake Album", "the album's header")

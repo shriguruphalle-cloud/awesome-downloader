@@ -7,8 +7,8 @@ import threading
 import os
 import time
 
-from PySide6.QtCore import QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QCursor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QAbstractButton, QApplication, QGridLayout, QHBoxLayout, QMenu, QVBoxLayout, QWidget
 
 from app.core import mixer, music_sources
@@ -22,7 +22,7 @@ from app.utils import music_library
 from . import theme
 from .browser_chrome import draw_icon, style_menu
 from .music_social import Field, Glass, _alive, _label
-from .music_widgets import NavItem, Pill, RingButton, SectionHeader, icon_button
+from .music_widgets import NavItem, Pill, RingButton, SectionHeader, TopResultCard, art, icon_button, thumb_url
 
 logger = get_logger("music_more")
 
@@ -53,6 +53,75 @@ SORTS = {"liked": ("music_liked_sort", "recent", (("recent", "Recently added"), 
 
 def _low(t, key):
     return (t.get(key) or "").lower()
+
+
+class AllSongsCard(QAbstractButton):
+    """The way into everything an artist has put out, as on the phone: lit in the page's colours, the latest covers
+    fanned out at the right."""
+    SIDE = 104
+
+    def __init__(self, name, covers, pal_of, parent=None):
+        super().__init__(parent)
+        self.name, self.pal_of = name, pal_of
+        self.covers = [None] * len(covers)
+        self.setFixedHeight(160)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._hover = False
+        for i, url in enumerate(covers):
+            art().want(thumb_url(url, 240), lambda pm, i=i, me=self: me._got(i, pm) if _alive(me) else None)
+
+    def _got(self, i, pm):
+        self.covers[i] = look.rounded(pm, self.SIDE, self.SIDE, 10)
+        self.update()
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        pal = self.pal_of._pal
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        g = QLinearGradient(r.topLeft(), r.bottomRight())
+        g.setColorAt(0, look.with_alpha(pal["glow"], 0.70 if self._hover else 0.55))
+        g.setColorAt(1, look.with_alpha(pal["deep"], 0.92))
+        p.setBrush(g)
+        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
+        p.drawRoundedRect(r, 22, 22)
+        for i in reversed(range(len(self.covers))):     # the first on top, the rest behind it to the left
+            pix = self.covers[i]
+            if pix is None:
+                continue
+            p.save()
+            p.translate(self.width() - 24 - self.SIDE / 2 - i * 44, self.height() / 2)
+            p.rotate((i - 1) * -7)
+            p.drawPixmap(int(-self.SIDE / 2), int(-self.SIDE / 2), pix)
+            p.restore()
+        x, w = 24, max(160, self.width() - 24 - 240)
+        p.setPen(QColor(255, 255, 255, 190))
+        p.setFont(look.label_font(10.5))
+        p.drawText(QPointF(x, 34), "ALL SONGS FROM")
+        px, lines = look.fit_display((self.name or "").upper(), w, max_px=30, min_px=18, lines=1)
+        p.setFont(look.display_font(px))
+        p.setPen(look.TEXT)
+        p.drawText(QPointF(x, 68), lines[0] if lines else "")
+        p.setFont(look.font(13, QFont.Weight.Medium))
+        p.setPen(QColor(255, 255, 255, 205))
+        p.drawText(QPointF(x, 92), "Every album & single, first to latest")
+        pill = QRectF(x, 108, 96, 32)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255))
+        p.drawRoundedRect(pill, 16, 16)
+        p.setFont(look.font(13, QFont.Weight.Bold))
+        p.setPen(QColor(0, 0, 0))
+        p.drawText(pill, int(Qt.AlignmentFlag.AlignCenter), "Explore  ›")
 
 
 class LibraryCard(QAbstractButton):
@@ -866,11 +935,33 @@ class MusicMore:
 
     # ---- an artist's every song ----
     def _all_songs_card(self, artist):
-        n = len(artist.get("albums") or []) + len(artist.get("singles") or [])
-        c = LibraryCard("disc", "All songs", "Everything %s has put out" % artist.get("title", "this artist"),
-                        "%d releases" % n if n else "", 0.60)
+        covers = []
+        for r in (artist.get("albums") or []) + (artist.get("singles") or []):
+            if r.get("artwork") and r["artwork"] not in covers:
+                covers.append(r["artwork"])
+        c = AllSongsCard(artist.get("title", ""), covers[:3], self._pages["artist"].hero)
         c.clicked.connect(lambda: self.open_catalog(artist))
         return c
+
+    # ---- what a search found first ----
+    def _top_result(self, page, title, over, circle, on_open, picture=None):
+        """The card, at the head of the results; the short header steps aside for it."""
+        old = getattr(self, "_top_holder", None)
+        if _alive(old):
+            old.setParent(None)
+            old.deleteLater()
+        card = TopResultCard(title, over, circle, page.hero)
+        card.opened.connect(on_open)
+        holder = QWidget()
+        col = QVBoxLayout(holder)
+        col.setContentsMargins(0, 52, 0, 0)     # clear of back and reload
+        col.addWidget(card)
+        page.sec.insertWidget(0, holder)
+        self._top_holder, self._top_card = holder, card
+        page.hero.hide()
+        if picture:
+            art().want(thumb_url(picture, 480), lambda pm, c=card: c.set_cover(pm) if _alive(c) else None, first=True)
+        return card
 
     def open_catalog(self, artist):
         self.go("catalog", {"browse_id": artist.get("browse_id"), "title": artist.get("title", "")})

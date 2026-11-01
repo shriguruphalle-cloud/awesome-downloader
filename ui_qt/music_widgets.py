@@ -1009,6 +1009,113 @@ class TileGrid(QWidget):
             self._relayout()
 
 
+# ----------------------------------------------------------- top result -----
+class TopResultCard(QWidget):
+    """What a search found first, as on the phone: a pane with its picture (round for an artist), its name as large
+    as it fits, what it is, and the actions. An artist's banner melts in at the right. Clicked, it opens."""
+    opened = Signal()
+    COVER = 160
+    PAD = 20
+
+    def __init__(self, title, over, circle=False, pal_of=None, parent=None):
+        super().__init__(parent)
+        self.title, self.over, self.circle, self.pal_of = title, over, circle, pal_of
+        self._raw = self._cover = self._banner = self._melt = None
+        self._melt_key = None
+        self._hover = False
+        self.setFixedHeight(44 + self.COVER + self.PAD)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.actions = QWidget(self)
+        self.action_row = QHBoxLayout(self.actions)
+        self.action_row.setContentsMargins(0, 0, 0, 0)
+        self.action_row.setSpacing(10)
+
+    def add_action(self, widget):
+        self.action_row.addWidget(widget)
+        widget.show()
+        self.actions.adjustSize()
+        self._place()
+        return widget
+
+    def set_cover(self, pm):
+        self._raw, self._cover = pm, None
+        self.update()
+
+    def set_banner(self, pm):
+        self._banner, self._melt_key = pm, None
+        self.update()
+
+    def _text_x(self):
+        return self.PAD + self.COVER + 24
+
+    def _place(self):
+        self.actions.adjustSize()
+        self.actions.move(self._text_x(), 44 + self.COVER - self.actions.height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place()
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.opened.emit()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(r, 18, 18)
+        p.fillPath(path, QColor(255, 255, 255, 34 if self._hover else 22))
+        if self._banner is not None:
+            pal = self.pal_of._pal if self.pal_of is not None else look.DEFAULT
+            dpr = self.devicePixelRatioF()
+            key = (self.width(), self.height(), id(self._banner), pal["base"].rgb(), dpr)
+            if key != self._melt_key:
+                self._melt = look.blend_art(self._banner, self.width(), self.height(), pal, True, dpr)
+                self._melt_key = key
+            p.save()
+            p.setClipPath(path)
+            p.drawPixmap(0, 0, self._melt)
+            p.restore()
+        p.setPen(QPen(QColor(255, 255, 255, 30), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        p.setFont(look.label_font(10.5))
+        p.setPen(look.TEXT_3)
+        p.drawText(QPointF(self.PAD, 28), "TOP RESULT")
+        if self._cover is None:
+            self._cover = look.rounded(self._raw if self._raw is not None else look._placeholder_art(),
+                                       self.COVER, self.COVER, 10, circle=self.circle)
+        p.drawPixmap(self.PAD, 44, self._cover)
+        x = self._text_x()
+        w = max(160, (self.width() * 0.62 if self._banner is not None else self.width()) - x - self.PAD)
+        px, lines = look.fit_display((self.title or "").upper(), w, max_px=52, min_px=22, lines=2)
+        f = look.display_font(px)
+        fm = QFontMetricsF(f)
+        p.setFont(f)
+        p.setPen(look.TEXT)
+        y = 50 + fm.ascent()
+        for line in lines:
+            p.drawText(QPointF(x, y), line)
+            y += px * 0.98
+        if self.over:
+            of = look.font(13.5, QFont.Weight.Medium)
+            p.setFont(of)
+            p.setPen(look.TEXT_2)
+            words = QFontMetricsF(of).elidedText(self.over, Qt.TextElideMode.ElideRight, w)
+            p.drawText(QPointF(x, y - px * 0.98 + fm.descent() + 22), words)
+
+
 # ----------------------------------------------------------------- hero -----
 class Hero(QWidget):
     """A page's header, the reference's way: a small overline, the name as
@@ -2345,7 +2452,7 @@ class PlayerBar(QWidget):
             getattr(self, name).setVisible(w >= limit)
         self.sep_l.setVisible(w >= 1100)
         self.sep_r.setVisible(w >= 1100)
-        self.left.setFixedWidth(look.RAIL_W + 130 if w >= 1250 else max(280, int(w * 0.28)))
+        self.left.setFixedWidth(look.RAIL_W + 130 if w >= 1250 else max(300, int(w * 0.30)))
 
     def glass_rect(self):
         return QRectF(self.rect()).adjusted(8, 8, -8, -8)

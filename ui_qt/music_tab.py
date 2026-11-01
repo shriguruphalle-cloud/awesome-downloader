@@ -250,6 +250,7 @@ class _Page(QScrollArea):
                 w.deleteLater()
         self.hero.clear_actions()
         self.hero.set_trio([])
+        self.hero.show()
         self.verticalScrollBar().setValue(0)
 
     def resizeEvent(self, e):
@@ -1706,7 +1707,6 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
             h.add_action(self._profile_ring(pl))
             h.add_action(Pill("Rename", style="outline")).clicked.connect(lambda: self._rename_playlist(pl))
             h.add_action(Pill("Delete", style="outline")).clicked.connect(lambda: self._confirm_delete(pl))
-        h.set_trio(tracks[:3], "In this list")
         if key == "playlist" and len(tracks) > 1:
             page.add(self._sort_bar("playlist_songs", lambda: self._build_list_page(key, item)))
         lst = self._track_list()
@@ -2474,7 +2474,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         """The picture a page shows: the song playing, as it changes -- but an
         artist's page keeps the artist's photo."""
         np = self._np_art_url()
-        if np and page.key != "artist":
+        if np and page.key != "artist" and not (page.key == "search" and page.art_url):
             return np
         return page.art_url or np
 
@@ -2777,6 +2777,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
             self._sections[key] = (header, box, note, widget)
         mine = self._mine(q)
         if mine:
+            self._want_cover(mine[:4])
             lst = self._track_list(limit=4)
             lst.set_tracks(mine)
             page.sec.insertWidget(0, lst)
@@ -2842,35 +2843,35 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         if not top:
             return
         if top.get("kind") == "artist":
-            h.set_text("Artist" + (" · " + top["subtitle"] if top.get("subtitle") else ""), top["title"], "")
-            songs = top.get("songs") or [t for t in found["songs"] if top["title"].lower() in t["artist"].lower()]
-            h.set_trio(songs[:3], "Popular")
-            h.add_action(Pill("Play", "play")).clicked.connect(
+            over = "Artist" + (" · " + top["subtitle"] if top.get("subtitle") else "")
+            h.set_text(over, top["title"], "")
+            card = self._top_result(page, top["title"], over, True, lambda: self.go("artist", top), top.get("artwork"))
+            card.add_action(Pill("Play", "play")).clicked.connect(
                 lambda: self._play_artist(top, shuffle=False))
-            h.add_action(self._ring("shuffle", "Shuffle", lambda: self._play_artist(top, shuffle=True)))
-            h.add_action(self._save_ring(top))
-            h.add_action(Pill("All tracks", style="outline")).clicked.connect(lambda: self.go("artist", top))
+            card.add_action(self._ring("shuffle", "Shuffle", lambda: self._play_artist(top, shuffle=True)))
+            card.add_action(self._save_ring(top))
+            card.add_action(Pill("Open artist", style="outline")).clicked.connect(lambda: self.go("artist", top))
             page.art_url, page.wide_art = top.get("artwork"), False
             self._fetch_artist(top["browse_id"], for_search=self._gen)
         elif top.get("kind") == "album":
-            h.set_text(" · ".join(x for x in (top.get("type") or "Album", top.get("year")) if x), top["title"],
-                       top.get("artist", ""))
-            h.set_trio(found["songs"][:3], "Songs")
-            h.add_action(Pill("Play", "play")).clicked.connect(lambda: self.play_item(top))
-            h.add_action(self._save_ring(top))
-            h.add_action(Pill("Open album", style="outline")).clicked.connect(lambda: self.go("album", top))
+            over = " · ".join(x for x in (top.get("type") or "Album", top.get("artist"), top.get("year")) if x)
+            h.set_text(over, top["title"], "")
+            card = self._top_result(page, top["title"], over, False, lambda: self.go("album", top), top.get("artwork"))
+            card.add_action(Pill("Play", "play")).clicked.connect(lambda: self.play_item(top))
+            card.add_action(self._save_ring(top))
+            card.add_action(Pill("Open album", style="outline")).clicked.connect(lambda: self.go("album", top))
             page.art_url, page.wide_art = top.get("artwork"), False
         else:
-            h.set_text("Top result · song", top["title"],
-                       " · ".join(x for x in (top.get("artist"), top.get("album")) if x))
+            over = " · ".join(x for x in ("Song", top.get("artist"), top.get("album")) if x)
+            h.set_text(over, top["title"], "")
             rest = [t for t in found["songs"] if t["id"] != top["id"]]
-            h.set_trio(rest[:3], "More songs")
             songs = [top] + rest
-            h.add_action(Pill("Play", "play")).clicked.connect(lambda: self.play_from(top, songs))
-            h.add_action(self._ring("plus", "Add to the queue", lambda: self.add_to_queue(top)))
-            h.add_action(self._save_ring(top))
+            card = self._top_result(page, top["title"], over, False, lambda: self.play_from(top, songs), top.get("artwork"))
+            card.add_action(Pill("Play", "play")).clicked.connect(lambda: self.play_from(top, songs))
+            card.add_action(self._ring("plus", "Add to the queue", lambda: self.add_to_queue(top)))
+            card.add_action(self._save_ring(top))
             if top.get("source") != "local":
-                h.add_action(self._ring("download", "Download this song", lambda: self.keep(top)))
+                card.add_action(self._ring("download", "Download this song", lambda: self.keep(top)))
             page.art_url, page.wide_art = (thumb_url(top.get("artwork"), 900) if top.get("artwork") else None), False
         if self.pages.currentWidget() is page:
             self._paint_page(page)
@@ -2901,7 +2902,8 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         page.clear()
         page.art_url = thumb_url(item.get("artwork"), 900) if item.get("artwork") else None
         page.wide_art = False
-        page.hero.set_text("Artist", item.get("title") or "", "Opening...")
+        page.hero.set_text("Artist" + (" · " + item["subtitle"] if item.get("subtitle") else ""),
+                           item.get("title") or "", "Opening...")
         self._fetch_artist(item["browse_id"])
 
     def _open_album(self, item):
@@ -2935,10 +2937,11 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
             page = self._pages["search"]
             if data.get("artwork"):
                 page.art_url, page.wide_art = data["artwork"], True
+                card = getattr(self, "_top_card", None)
+                if _alive(card):
+                    art().want(data["artwork"], lambda pm, c=card: c.set_banner(pm) if _alive(c) else None, first=True)
                 if self.pages.currentWidget() is page:
                     self._paint_page(page)
-            if data.get("songs"):
-                page.hero.set_trio(data["songs"][:3], "Popular")
             return
         if gen != self._page_gen:
             return
@@ -2953,8 +2956,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         if not a:
             h.set_text("Artist", h.title, "Couldn't open this artist: %s" % (err or "no answer"))
             return
-        h.set_text("Artist", a["title"], "")
-        h.set_trio(a["songs"][:3], "Popular")
+        h.set_text(h.overline or "Artist", a["title"], "")
         h.clear_actions()
         h.add_action(Pill("Play", "play")).clicked.connect(lambda: self.play_from(a["songs"][0], a["songs"])
                                                            if a["songs"] else None)
@@ -2963,7 +2965,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         if a["songs"] and str(a["songs"][0].get("id", "")).startswith("yt:"):
             h.add_action(self._ring("radio", "Radio from this artist", lambda: self._radio_from(a["songs"][0])))
         if a.get("browse_id"):
-            page.add(self._all_songs_card(a))
+            page.add(self._all_songs_card(a), gap=6)
         if a["songs"]:
             lst = self._track_list(show_album=True)
             lst.set_tracks(a["songs"])
@@ -2994,8 +2996,6 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         h.set_text(" · ".join(x for x in (al.get("type") or "Album", al.get("year")) if x), al["title"],
                    " · ".join(x for x in (al.get("artist"), count(len(tracks), "song") if tracks else "",
                                           total_length(tracks)) if x))
-        # three of its songs under the name -- for an album with more than a couple
-        h.set_trio(tracks[:3] if len(tracks) >= 3 else [], "Tracks")
         h.clear_actions()
         if tracks:
             h.add_action(Pill("Play", "play")).clicked.connect(lambda: self.play_from(tracks[0], tracks))
@@ -3054,7 +3054,6 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
                 page.hero.add_action(Pill("Play", "play")).clicked.connect(lambda: self._play_list(items))
                 page.hero.add_action(self._ring("shuffle", "Shuffle", lambda: self._play_list(items, True)))
                 page.hero.add_action(self._ring("download", "Download them all", lambda: [self.keep(t) for t in items]))
-                page.hero.set_trio(items[:3], "Latest")
             if len(items) > 1:
                 page.add(self._sort_bar("liked", lambda: self._build_saved(kind)))
             lst = self._track_list()
@@ -3121,7 +3120,6 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         if self.queue:
             page.hero.add_action(Pill("Shuffle", "shuffle", style="glass")).clicked.connect(self._shuffle_queue)
             page.hero.add_action(Pill("Clear", style="outline")).clicked.connect(self.clear_queue)
-            page.hero.set_trio(self.queue[self.index + 1:self.index + 4], "Next")
         self.queue_list = self._track_list(in_queue=True)
         self.queue_list.moved.connect(self.move_in_queue)
         self.queue_list.set_tracks(self.queue)

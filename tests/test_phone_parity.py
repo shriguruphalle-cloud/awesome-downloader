@@ -10,7 +10,7 @@ from PySide6.QtTest import QTest
 from app.core import music_brain as brain
 from app.utils import music_library
 from ui_qt import music_look as look
-from ui_qt.music_more import LibraryCard
+from ui_qt.music_more import AllSongsCard, LibraryCard
 from ui_qt.music_widgets import NavItem, SectionHeader, Tile
 
 song = {"kind": "track", "id": "yt:00000000001", "title": "Synthetic", "artist": "Nobody", "source": "youtube",
@@ -118,7 +118,8 @@ settle(100)
 mt._pages["artist"].clear()
 mt._fill_artist(artist, None)
 settle(100)
-check([c.title for c in mt._pages["artist"].findChildren(LibraryCard)] == ["All songs"], "no All-songs card")
+check(len(mt._pages["artist"].findChildren(AllSongsCard)) == 1, "no All-songs card")
+check(not mt._pages["artist"].hero.trio, "Popular shown twice")
 print("Artist: All songs, radio")
 
 # the phone's orders
@@ -221,4 +222,29 @@ mt.back()
 settle(100)
 check(mt._here[0] == "library", "Back opened a deleted playlist: %s" % (mt._here,))
 print("Search goes back to the moods; Back skips what's gone")
+
+# what a search found first: a card with its picture; clicked, it opens
+artist_top = {"kind": "artist", "id": "ytm:artist:UCx", "browse_id": "UCx", "title": "Nobody", "subtitle": "5M monthly audience",
+              "artwork": None}
+mt._artist_cache["UCx"] = dict(artist, kind="artist", id="ytm:artist:UCx")
+music_sources.search_everywhere = lambda q, cb: cb("music", {"top": artist_top, "songs": [song], "albums": [], "artists": []}, "")
+mt.run_search("nobody")
+settle(200)
+card = mt._top_card
+check(card.isVisible() and card.circle and card.title == "Nobody", "no top-result card")
+check(not mt._pages["search"].hero.isVisible(), "the header sits above the card")
+check("5M monthly audience" in card.over, card.over)
+QTest.mouseClick(card, Qt.MouseButton.LeftButton, pos=QPoint(40, 20))
+settle(200)
+check(mt._here[0] == "artist", "the card didn't open the artist: %s" % (mt._here,))
+check("5M monthly audience" in mt._pages["artist"].hero.overline, mt._pages["artist"].hero.overline)
+album_top = {"kind": "album", "id": "al:1", "browse_id": "b1", "title": "Made Up", "artist": "Nobody", "type": "Album", "year": "2020"}
+music_sources.search_everywhere = lambda q, cb: cb("music", {"top": album_top, "songs": [song], "albums": [], "artists": []}, "")
+mt.run_search("made up")
+settle(200)
+check(mt._top_card.isVisible() and not mt._top_card.circle and "Nobody" in mt._top_card.over, "the album's card")
+rail.items["search"].click()
+settle(100)
+check(mt._pages["search"].hero.isVisible(), "the header didn't come back for the moods")
+print("the top result's card")
 print("PHONE PARITY OK")
