@@ -234,6 +234,31 @@ def draw_icon(p, kind, rect, color, weight=1.0):
             r = 8.6 if i % 2 == 0 else 3.9
             pts.append((12 + r * math.cos(ang), 12.9 + r * math.sin(ang)))
         poly(*pts, close=True, fill=kind == "star_filled")
+    elif kind == "chevron_down":
+        poly((6.2, 9.4), (12, 15.2), (17.8, 9.4))
+    elif kind == "moon":
+        path = QPainterPath(pt(15.6, 3.8))
+        path.cubicTo(pt(9.2, 5), pt(6.4, 12.6), pt(10.4, 17.4))
+        path.cubicTo(pt(13.6, 21.2), pt(19.4, 20.2), pt(20.6, 15.6))
+        path.cubicTo(pt(14.6, 17.2), pt(11.6, 9.4), pt(15.6, 3.8))
+        p.drawPath(path)
+    elif kind == "view_card":
+        p.drawRoundedRect(QRectF(pt(6, 3.4), pt(18, 20.6)), 2.6 * u, 2.6 * u)
+        p.drawRoundedRect(QRectF(pt(8.4, 5.8), pt(15.6, 13)), 1.2 * u, 1.2 * u)
+        poly((8.6, 15.8), (15.4, 15.8))
+        poly((10, 18.2), (14, 18.2))
+    elif kind == "view_focus":
+        p.drawRoundedRect(QRectF(pt(6, 6), pt(18, 18)), 2.2 * u, 2.2 * u)
+        poly((3.6, 7.4), (3.6, 3.6), (7.4, 3.6))
+        poly((16.6, 3.6), (20.4, 3.6), (20.4, 7.4))
+        poly((3.6, 16.6), (3.6, 20.4), (7.4, 20.4))
+        poly((16.6, 20.4), (20.4, 20.4), (20.4, 16.6))
+    elif kind == "view_lyrics":
+        poly((3.6, 6.4), (14.4, 6.4))
+        poly((3.6, 11), (12, 11))
+        poly((3.6, 15.6), (10, 15.6))
+        poly((18.6, 17.4), (18.6, 6.2), (21, 7.6))
+        dot(16.9, 17.6, 1.9)
     elif kind == "radio":
         dot(12, 12, 1.8)
         arc(12, 12, 4.8, -50, 100)
