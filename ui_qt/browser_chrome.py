@@ -247,6 +247,11 @@ def draw_icon(p, kind, rect, color, weight=1.0):
         p.drawRoundedRect(QRectF(pt(8.4, 5.8), pt(15.6, 13)), 1.2 * u, 1.2 * u)
         poly((8.6, 15.8), (15.4, 15.8))
         poly((10, 18.2), (14, 18.2))
+    elif kind == "view_side":
+        p.drawRoundedRect(QRectF(pt(3.4, 6), pt(20.6, 18)), 2.6 * u, 2.6 * u)
+        p.drawRoundedRect(QRectF(pt(5.8, 8.4), pt(11.4, 15.6)), 1.2 * u, 1.2 * u)
+        poly((13.8, 10), (18.2, 10))
+        poly((13.8, 14), (18.2, 14))
     elif kind == "view_focus":
         p.drawRoundedRect(QRectF(pt(6, 6), pt(18, 18)), 2.2 * u, 2.2 * u)
         poly((3.6, 7.4), (3.6, 3.6), (7.4, 3.6))

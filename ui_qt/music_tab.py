@@ -724,7 +724,7 @@ class _FullView(QWidget):
     more_requested = Signal()
     view_changed = Signal(str)
     TOP, BOTTOM = 78, 40
-    VIEWS = {"card": "The player", "focus": "Focus", "lyrics": "Lyrics"}
+    VIEWS = {"card": "The player", "upright": "The upright player", "focus": "Focus", "lyrics": "Lyrics"}
     IDLE_MS = 5000                      # the buttons along the top fade after this, untouched
 
     def __init__(self, make_list, eq_settings, parent=None):
@@ -803,7 +803,7 @@ class _FullView(QWidget):
         self.focus_art = _FocusArt(self)
         self.focus_art.hide()
         self.card.art.mirror = self.focus_art
-        self.view = "card"                  # the player, focus or the lyrics
+        self.view = "card"                  # the player (on its side), the upright player, focus or the lyrics
         self._words = False                 # the lyrics showing (as the view, or over the card)
         self._panels = set()                # the cards round the player that are open
         self._lang_on = False
@@ -830,7 +830,7 @@ class _FullView(QWidget):
         self.close_btn.clicked.connect(self.closed)
         self.moon_btn = icon_button("moon", "Sleep timer", 44, 20, self)
         self.moon_btn.clicked.connect(self.sleep_requested)
-        self.view_btn = icon_button("view_card", "The player, focus or the lyrics", 44, 20, self)
+        self.view_btn = icon_button("view_side", "The player, the upright player, focus or the lyrics", 44, 20, self)
         self.view_btn.clicked.connect(self.cycle_view)
         self.share_btn = icon_button("share", "Share", 44, 20, self)
         self.share_btn.clicked.connect(self.share_requested)
@@ -874,6 +874,8 @@ class _FullView(QWidget):
                     self._panels.discard(other)
                     self._pop(other, False)
             self._panels.add(card)
+            if self.view == "upright" and self._words and card is not self.queue_card:
+                self.lyrics_toggled.emit(False)     # they share the right-hand side
         else:
             self._panels.discard(card)
         self._slide_next = True
@@ -884,7 +886,7 @@ class _FullView(QWidget):
 
     def _strip_layout(self):
         """Focus and the lyrics: the controls in a strip along the bottom."""
-        return self._words or self.view == "focus"
+        return (self._words and self.view != "upright") or self.view == "focus"
 
     def _can_flank(self):
         """Room for a card on either side of the player at once."""
@@ -918,7 +920,8 @@ class _FullView(QWidget):
         self._say(self.VIEWS[view])
 
     def _sync_view_icon(self):
-        self.view_btn.set_kind("view_lyrics" if self._words else "view_focus" if self.view == "focus" else "view_card")
+        self.view_btn.set_kind("view_lyrics" if self._words else {"focus": "view_focus", "upright": "view_card"}.get(
+            self.view, "view_side"))
         self.view_btn.update()
 
     def _say(self, words):
@@ -1104,7 +1107,7 @@ class _FullView(QWidget):
         self._place_top_bar(W)
         strip = self._strip_layout()
         self.focus_art.setVisible(self.view == "focus" and not self._words and not self._panels)
-        self.lyrics.setVisible(self._words and not self._panels)
+        self.lyrics.setVisible(self._words and (self.view == "upright" or not self._panels))
         if strip:
             self._stop_slide()
             self.card.set_strip(W)
@@ -1118,7 +1121,7 @@ class _FullView(QWidget):
             for card in self._panels:
                 card.setGeometry((W - pw) // 2, 70 + (cy - 70 - ph) // 2, pw, ph)
             return
-        if W >= H * 1.25:
+        if W >= H * 1.25 and self.view != "upright":
             self._relayout_side(W, H, slide)
             return
         self._stop_slide()
@@ -1140,11 +1143,13 @@ class _FullView(QWidget):
         self.card.move(cx, cy)
         k = max(0.75, min(1.3, min(W / 1700.0, H / 1000.0)))
         gap = int(34 * k)
-        side_w = int(min(cw * 0.96, (W - cw) // 2 - gap - 36))
+        side_w = int(min(max(cw * 0.96, 340), (W - cw) // 2 - gap - 36))
         side_h = ch
         self.queue_card.setGeometry(cx - gap - side_w, cy, side_w, side_h)
         for card in (self.fx_card, self.info_card):
             card.setGeometry(cx + cw + gap, cy, side_w, side_h)
+        lx = cx + cw + gap + 10
+        self.lyrics.setGeometry(lx, top, max(200, W - lx - 56), H - top - bottom)
 
     def _relayout_side(self, W, H, slide):
         """The card on its side, in the middle. A card opened beside it: on either side where there's room, else the
@@ -1277,7 +1282,8 @@ class _FullView(QWidget):
             self.view = "card"
             self.view_changed.emit("card")
         if on:
-            for card in (self.queue_card, self.fx_card, self.info_card):
+            upright = self.view == "upright"       # there, the words sit beside the card, the queue stays on the left
+            for card in (self.fx_card, self.info_card) if upright else (self.queue_card, self.fx_card, self.info_card):
                 self._panels.discard(card)
                 self._pop(card, False)
         else:
