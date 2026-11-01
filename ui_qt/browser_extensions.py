@@ -98,8 +98,7 @@ class ExtensionsPanel(GlassPopup):
         name = QPushButton(e["name"])
         name.setCursor(Qt.CursorShape.PointingHandCursor)
         name.setFlat(True)
-        name.setToolTip(e["name"] + ("
-" + e["meta"]["description"] if e["meta"].get("description") else ""))
+        name.setToolTip(e["name"] + ("\n" + e["meta"]["description"] if e["meta"].get("description") else ""))
         name.setStyleSheet(f"QPushButton {{ color: {t['text']}; font-size: 13px; font-weight: 600; text-align: left;"
                            " background: transparent; border: none; padding: 4px 0; }")
         f = QFont(name.font())
