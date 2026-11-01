@@ -4,7 +4,7 @@ import os
 import threading
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtGui import QFont, QFontMetrics, QPixmap
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from app.core import extensions as core
@@ -98,9 +98,14 @@ class ExtensionsPanel(GlassPopup):
         name = QPushButton(e["name"])
         name.setCursor(Qt.CursorShape.PointingHandCursor)
         name.setFlat(True)
-        name.setToolTip(e["meta"].get("description") or "Open %s" % e["name"])
+        name.setToolTip(e["name"] + ("
+" + e["meta"]["description"] if e["meta"].get("description") else ""))
         name.setStyleSheet(f"QPushButton {{ color: {t['text']}; font-size: 13px; font-weight: 600; text-align: left;"
                            " background: transparent; border: none; padding: 4px 0; }")
+        f = QFont(name.font())
+        f.setPixelSize(13)
+        f.setWeight(QFont.Weight.DemiBold)
+        name.setText(QFontMetrics(f).elidedText(e["name"], Qt.TextElideMode.ElideRight, 176))
         name.clicked.connect(lambda _c=False: (self.close(), self.manager.open(e)))
         lay.addWidget(name, 1)
         switch = Toggle()
