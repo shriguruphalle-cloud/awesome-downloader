@@ -258,8 +258,8 @@ n = len(bt._tabs)
 js(tab.view, "document.getElementById('bg').dispatchEvent("
              "new MouseEvent('auxclick',{button:1,bubbles:true,cancelable:true})); 1")
 check(wait(lambda: len(bt._tabs) == n + 1, 5), "middle-click didn't open a tab")
-bg = bt._tabs[-1]
-check(bg.pending_url == BASE + "/other.html", "a link's new tab didn't open last")
+bg = bt._tabs[bt._tabs.index(tab) + 1]
+check(bg.pending_url == BASE + "/other.html", "a link's new tab didn't open beside the page")
 check(bt._current() is tab, "the background tab took focus")
 check(bg.view is None and bg.pending_url == BASE + "/other.html", "the background tab loaded early")
 bt._switch_to(bg)
@@ -282,6 +282,21 @@ check(js(pop.view, "window.__opener") is True, "the pop-up lost its opener")
 js(pop.view, "window.close(); 1")
 check(wait(lambda: pop not in bt._tabs, 5), "window.close() didn't close the tab")
 check(bt._current() is tab, "window.close() didn't go back to the opener")
+
+# ---- links in new tabs: beside the page, each next one after the last ----------------
+far = bt._create_tab(activate=False)                  # a tab at the end, that links must not land after
+k1 = bt._open_link(tab, BASE + "/other.html?1", background=True)
+k2 = bt._open_link(tab, BASE + "/other.html?2", background=True)
+k3 = bt._open_link(tab, BASE + "/other.html?3", background=True)
+at = bt._tabs.index(tab)
+check(bt._tabs[at + 1:at + 4] == [k1, k2, k3] or bt._tabs[at + 2:at + 5] == [k1, k2, k3],
+      "links' tabs aren't beside the page, in order")
+check(bt._tabs[-1] is far, "a link's tab went to the end")
+check(bt._current() is tab, "a background link took focus")
+for x in (k1, k2, k3, far):
+    bt._close(x)
+wait(lambda: False, 0.3)
+print("links open beside the page, each after the last")
 
 # ---- closing the tab in view: the one beside it, as in Chrome ----------------------
 one = bt._create_tab(activate=True)

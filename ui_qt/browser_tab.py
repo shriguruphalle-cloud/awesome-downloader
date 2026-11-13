@@ -1106,9 +1106,19 @@ class BrowserTab(QWidget):
             self._create_tab(url=url, activate=True)
             show_toast(self.pages, "Sign in on this page, then fetch the link again", kind="info", ms=6000)
 
+    def _beside(self, opener):
+        """Where a tab opened from `opener` goes, as in Chrome: right after it, after the ones it already opened --
+        each next one further along, so they stay in the order they were opened."""
+        if opener not in self._tabs:
+            return None
+        i = self._tabs.index(opener) + 1
+        while i < len(self._tabs) and self._tabs[i].opener is opener:
+            i += 1
+        return i
+
     def _open_link(self, opener, url, background):
         return self._create_tab(url=url, activate=not background, private=opener.private if opener else False,
-                                opener=opener)
+                                index=self._beside(opener), opener=opener)
 
     def go_back(self):
         tab = self._current()
@@ -1375,7 +1385,7 @@ class BrowserTab(QWidget):
                        on_action=lambda: self._open_link(opener, uri, background=False), kind="warning")
             return
         deferral = args.GetDeferral()
-        tab = self._create_tab(activate=True, private=opener.private, opener=opener)
+        tab = self._create_tab(activate=True, private=opener.private, index=self._beside(opener), opener=opener)
         view = self._ensure_view(tab)
         if view is None:
             deferral.Complete()
