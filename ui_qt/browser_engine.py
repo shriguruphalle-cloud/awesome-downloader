@@ -213,6 +213,10 @@ class BrowserServices(QObject):
 
     # ---- AdGuard ----
     def _on_service_created(self):
+        try:        # never seen: its link-preview bubble would float on its own at the screen's foot
+            self._service.core.Settings.IsStatusBarEnabled = False
+        except Exception:   # noqa: BLE001
+            pass
         self._flush_cookie_waiters()
         if not adguard_bundled():
             logger.info("AdGuard is not bundled with this build")

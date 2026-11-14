@@ -351,13 +351,12 @@ class _Pages(QTabWidget):
     instantly: nothing Qt paints can sit over a native window."""
 
     def setCurrentIndex(self, index):  # noqa: N802 -- Qt's name
+        # Switched at once, every tab alike, as Apple's apps do: the fade and rise read as a wobble, and the
+        # Browser (a native view nothing can fade over) jumped in differently from the rest.
+        super().setCurrentIndex(index)
+        return
         old = self.currentWidget()
         new = self.widget(index)
-        if (index == self.currentIndex() or old is None or new is None or motion.reduced()
-                or not self.isVisible() or getattr(old, "hosts_native_views", False)
-                or getattr(new, "hosts_native_views", False)):
-            super().setCurrentIndex(index)
-            return
         try:
             still = old.grab()
             origin = old.mapTo(self, QPoint(0, 0))

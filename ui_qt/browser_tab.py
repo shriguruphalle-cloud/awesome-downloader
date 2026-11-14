@@ -616,10 +616,12 @@ class BrowserTab(QWidget):
         self.bookmarks_bar.all_clicked.connect(lambda: self._show_bookmarks_panel(self.bookmarks_bar.all_btn))
         # On by default: a bookmark you can't see anywhere reads as one that
         # didn't save (reported as "the bookmark button doesn't work").
-        self.bookmarks_bar.setVisible(bool(browser_data.get_pref("bookmarks_bar", True)))
-        if self.bookmarks_bar.isVisible():
-            self.bookmarks_bar.set_bookmarks(browser_data.load_bookmarks())
+        # (placed first: shown while it had no parent yet, it flashed up as a window of its own at start)
         chrome.addWidget(self.bookmarks_bar)
+        show_bar = bool(browser_data.get_pref("bookmarks_bar", True))
+        self.bookmarks_bar.setVisible(show_bar)
+        if show_bar:
+            self.bookmarks_bar.set_bookmarks(browser_data.load_bookmarks())
         root.addWidget(self.chrome)
 
         self.pages = QStackedWidget()
