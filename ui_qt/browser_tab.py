@@ -1650,7 +1650,7 @@ class BrowserTab(QWidget):
                 return
             tab.adguard = status
             self._sync_shield()
-            if self._panel is not None:
+            if self._panel is not None and hasattr(self._panel, "set_status"):     # AdGuard's, not Extensions
                 try:
                     self._panel.set_status(status)
                 except RuntimeError:

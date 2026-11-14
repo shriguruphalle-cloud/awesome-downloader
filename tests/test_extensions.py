@@ -64,8 +64,13 @@ check(core.store_id("https://example.com/detail/x/" + ID) is None, "another site
 uri = "https://clients2.googleusercontent.com/crx/blobs/abc/x.crx"
 check(core.store_download(store, uri, ID + "_53342.crx") == ID, "the Store's download")
 check(core.store_download("https://evil.example/", uri, ID + "_1.crx") is None, "a site could install by downloading")
-check(core.store_download(store, "https://evil.example/x.crx", ID + "_1.crx") is None, "a .crx from elsewhere")
+# on the Store's page the name decides; the package itself is always fetched from Google by that ID
+check(core.store_download(store, "https://evil.example/x.crx", ID + "_1.crx") == ID, "the Store's page, named")
 check(core.store_download(store, "https://clients2.google.com/other", "a.pdf") is None, "another download")
+hidden = "https://permanently-removed.invalid/crx/blobs/x"     # how the engine reports the Store's address
+check(core.store_download(store, hidden, ID + "_8646.crx") == ID, "the Store's install with its address hidden")
+check(core.store_download("https://evil.example/", hidden, ID + "_8646.crx") is None, "a site's .crx, address hidden")
+check(core.store_download(store, hidden, "film.mp4") is None, "another download from the Store's page")
 print("only the Store's own downloads install anything")
 
 # ---- the package ----
@@ -148,7 +153,7 @@ check(loaded() == [], "extensions at the start: %s" % loaded())
 
 # the Store's install: the download is taken over and nothing lands in Downloads
 class Op:
-    Uri = uri
+    Uri = "https://permanently-removed.invalid/crx/blobs/abc"     # what the engine really reports
 
 
 class Args:

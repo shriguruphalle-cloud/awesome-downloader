@@ -55,9 +55,13 @@ def _crx_host(uri):
 def store_download(page_url, uri, filename):
     """The extension a download is, if it's the Store's own install: a .crx, from Google, started on the Store's page.
     A .crx from anywhere else stays an ordinary file, as in Chrome: a site can't install things by starting a download."""
-    if not _from_store(page_url) or not _crx_host(uri):
+    if not _from_store(page_url):
         return None
-    if not (".crx" in (filename or "").lower() or "/crx" in (uri or "").lower()):
+    # the engine hides the Store's own address for these ("permanently-removed.invalid"), so the file's name --
+    # "<the extension's ID>_<n>.crx" -- is what says it. Safe either way: the package is then fetched from Google
+    # by that ID and checked to be that extension, never taken from this download.
+    named = re.fullmatch(r"%s_\d+\.crx" % _ID, os.path.basename(filename or "").lower())
+    if not named and not (_crx_host(uri) and (".crx" in (filename or "").lower() or "/crx" in (uri or "").lower())):
         return None
     m = re.match(r"(%s)" % _ID, os.path.basename(filename or "")) or re.search(r"id%%3D(%s)" % _ID, uri or "")
     return m.group(1) if m else store_id(page_url)
