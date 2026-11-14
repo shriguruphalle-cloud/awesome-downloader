@@ -1558,6 +1558,15 @@ class _FullView(QWidget):
         super().keyPressEvent(event)
 
 
+_UPLOAD_TAIL = re.compile(r"\s-\s*(official|lyrics?|audio|video|full)\b.*$", re.I)
+
+
+def _song_key(track):
+    """What a song is, whatever its upload (as the phone's Up next tells them apart): its title without a trailing
+    "- Lyric Video" or "- Official Audio" too."""
+    return upnext.song_key(dict(track, title=_UPLOAD_TAIL.sub("", track.get("title") or "")))
+
+
 class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
     _kept_charts = Signal(object)
     SHOW_ONBOARDING = True   # the taste setup on first run
@@ -2753,8 +2762,18 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         # the next song stays if it's already prepared to follow (gapless / blended)
         if after and after[0].get("_auto") and self._armed and self._armed[0] == after[0]["id"]:
             keep = [after[0]]
-        have = {t["id"] for t in self.queue[:self.index + 1] + chosen_list + keep}
-        new = [dict(t, _auto=True) for t in tracks if t["id"] not in have]
+        before = self.queue[:self.index + 1] + chosen_list + keep
+        have = {t["id"] for t in before}
+        # never a song heard a little while ago or already queued -- by id, and by what it is (another upload, the
+        # lyric video, the official audio), and each once
+        heard = {_song_key(t) for t in before + music_library.recent()} - {""}
+        new = []
+        for t in tracks:
+            key = _song_key(t)
+            if t["id"] in have or key in heard:
+                continue
+            heard.add(key)
+            new.append(dict(t, _auto=True))
         self.queue = self.queue[:self.index + 1] + chosen_list + keep + new
         self._render_queue()
         self._prefetch()
