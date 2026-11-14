@@ -4360,6 +4360,7 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
                 self.full.lyrics.set_position(ms, self._playing())
 
     def _on_duration(self, ms):
+        self._check_length(ms)
         for s in (self.bar.seek, self.full.seek):
             s.setRange(0, max(0, ms))
         self.bar.len_label.setText(format_eta(ms // 1000) if ms else "0:00")
@@ -4369,6 +4370,27 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
                 and getattr(self, "_lyrics_for", None) == cur.get("id")
                 and abs(self._song_seconds(cur) - getattr(self, "_lyrics_secs", 0)) > 2):
             self._fetch_lyrics(cur)    # the song's real length: the lyrics that fit it
+
+    def _check_length(self, ms):
+        """A kept copy whose sound runs far longer than the song (twice through, or another upload): thrown away
+        and fetched afresh, carrying on where it was -- once per song."""
+        track = self.current()
+        listed = int((track or {}).get("duration") or 0) * 1000
+        if not track or track.get("source") != "youtube" or not listed or not self._file or not ms:
+            return
+        fixed = self.__dict__.setdefault("_length_fixed", set())
+        if track["id"] in fixed or ms < listed * 1.4 or ms - listed < 30000:
+            return
+        fixed.add(track["id"])
+        logger.info("%s plays %ds but is %ds: its kept copy is fetched again", track["id"], ms // 1000, listed // 1000)
+        self._resume_at = min(max(0, self.player.position()), listed - 1000)
+        try:
+            os.remove(self._file)
+        except OSError:
+            pass
+        self._file = None
+        self.status.setText("Fetching the song again...")
+        threading.Thread(target=self._fetch_file, args=(self._token, track), daemon=True).start()
 
     def _on_state(self, _state):
         self._sync_controls()
