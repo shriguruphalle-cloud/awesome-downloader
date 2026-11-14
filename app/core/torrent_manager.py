@@ -69,9 +69,14 @@ class TorrentManager:
             handle.prioritize_files(priorities)
         return handle
 
-    def add_from_resume(self, key, save_path=None):
+    def add_from_resume(self, key, save_path=None, hold_if_missing=False):
         """Re-adds a torrent from its saved fast-resume data: no re-check, no
-        metadata lookup. None when there is no usable data for `key`."""
+        metadata lookup. None when there is no usable data for `key`.
+
+        hold_if_missing: for a torrent that had finished. If its files aren't
+        where it left them any more (moved or deleted), it comes back paused
+        instead of starting over -- libtorrent would otherwise find them gone
+        and download the whole thing again."""
         if not key:
             return None
         try:
@@ -85,11 +90,70 @@ class TorrentManager:
             return None
         if save_path:
             params.save_path = save_path
+        if hold_if_missing and params.ti is not None and self.missing_files(
+                params.ti, params.save_path, list(params.file_priorities or [])):
+            params.flags = (params.flags | lt.torrent_flags.paused) & ~lt.torrent_flags.auto_managed
         try:
             return self.session.add_torrent(params)
         except Exception:   # noqa: BLE001
             logger.exception("Couldn't add %s from its fast-resume data", key)
             return None
+
+    @staticmethod
+    def missing_files(ti, save_path, priorities=None, limit=200):
+        """The wanted files of `ti` that aren't under `save_path` (the first
+        `limit` of them, which is plenty to tell)."""
+        missing = []
+        try:
+            files = ti.files()
+            for i in range(files.num_files()):
+                if priorities and i < len(priorities) and int(priorities[i]) == 0:
+                    continue
+                try:
+                    if files.file_flags(i) & lt.file_storage.flag_pad_file:
+                        continue
+                except Exception:   # noqa: BLE001 -- older bindings: no pad files to skip
+                    pass
+                if files.file_size(i) and not os.path.exists(os.path.join(save_path, files.file_path(i))):
+                    missing.append(files.file_path(i))
+                    if len(missing) >= limit:
+                        break
+        except Exception:   # noqa: BLE001
+            logger.exception("Couldn't list a torrent's files")
+        return missing
+
+    def files_missing(self, handle, save_path):
+        try:
+            ti = handle.torrent_file()
+            if ti is None:
+                return []
+            return self.missing_files(ti, save_path, list(handle.get_file_priorities()))
+        except Exception:   # noqa: BLE001
+            return []
+
+    def hold(self, handle):
+        """Stopped where it is, and kept stopped: a finished torrent whose
+        files have gone (moved or deleted) mustn't start downloading again."""
+        return self.pause(handle)
+
+    def download_again(self, handle):
+        """Looks at what's on disk afresh and fetches whatever isn't there."""
+        try:
+            handle.force_recheck()
+        except Exception:   # noqa: BLE001
+            logger.exception("Couldn't re-check a torrent")
+        return self.resume(handle)
+
+    def relocate(self, handle, folder):
+        """The files are in `folder` now: the torrent uses them from there
+        (nothing is moved or copied) and checks they're whole."""
+        try:
+            handle.move_storage(folder, lt.move_flags_t.reset_save_path)
+            handle.force_recheck()
+            return self.resume(handle)
+        except Exception:
+            logger.exception("Couldn't point a torrent at %s", folder)
+            return False
 
     # ---- identity ----
     @staticmethod

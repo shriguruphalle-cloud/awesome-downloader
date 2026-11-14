@@ -551,7 +551,9 @@ class TorrentTab(QWidget):
                 uri_or_path = entry.get("uri_or_path")
                 # Its fast-resume data first: back exactly as it was, with no
                 # re-check of the files and no hunt for the magnet's metadata.
-                handle = self.manager.add_from_resume(entry.get("info_hash"), save_dir)
+                done_before = bool(entry.get("done") or float(entry.get("progress") or 0.0) >= 1.0)
+                handle = self.manager.add_from_resume(entry.get("info_hash"), save_dir,
+                                                      hold_if_missing=done_before)
                 if handle is not None:
                     pass
                 elif kind == "magnet":
@@ -736,6 +738,10 @@ class TorrentTab(QWidget):
             # History, since this flag lives only in memory and used to
             # always start False regardless of restored progress.
             "history_recorded": initial_progress >= 1.0,
+            # It finished once: from then on, files that go missing (moved or deleted) hold it rather than
+            # start the download over. Only "Download again" does that.
+            "done": bool(saved.get("done") or initial_progress >= 1.0),
+            "moved": False,
             "was_complete": None,
             # saved_progress is the floor shown while libtorrent re-hashes on
             # resume; last_progress is what gets written back to torrents.json.
@@ -756,6 +762,9 @@ class TorrentTab(QWidget):
     def _toggle_pause(self, row_id):
         info = self.rows.get(row_id)
         if not info:
+            return
+        if info.get("moved"):
+            self._download_again(row_id)
             return
         try:
             if info["handle"].status().paused:
@@ -812,6 +821,11 @@ class TorrentTab(QWidget):
             QMenu::item:selected {{ background: {t['hover_overlay']}; }}
             QMenu::separator {{ height: 1px; background: {t['divider']}; margin: 4px 8px; }}
         """)
+
+        if self.rows[row_id].get("moved"):
+            menu.addAction("Find the files…").triggered.connect(lambda: self._find_files(row_id))
+            menu.addAction("Download again").triggered.connect(lambda: self._download_again(row_id))
+            menu.addSeparator()
 
         copy_action = menu.addAction("Copy magnet link")
         copy_action.triggered.connect(lambda: self._copy_row_magnet(row_id))
@@ -895,6 +909,75 @@ class TorrentTab(QWidget):
         self.save_state()
 
     # ------------------------------------------------------------- Polling ---
+    # ---- a finished torrent whose files were moved or deleted ----
+    def _watch_moved(self, info, status):
+        """True while the row is held for missing files (the poll leaves it alone then). A torrent that finished
+        once is looked at every few seconds; when its files are gone it's stopped before it can fetch them again."""
+        if info.get("moved"):
+            self._show_moved(info)
+            return True
+        if not info.get("done") or info.get("again") or not status.has_metadata:
+            return False
+        if "checking" not in str(status.state).lower() and status.progress >= 1.0 and self._polls % 5:
+            return False        # seeding happily: checked every fifth poll, not every one
+        if not self.manager.files_missing(info["handle"], info["save_path"]):
+            return False
+        self.manager.hold(info["handle"])
+        info["moved"] = True
+        logger.info("Holding %s: its files aren't in %s any more", info["name_label"].text(), info["save_path"])
+        self._show_moved(info)
+        return True
+
+    def _show_moved(self, info):
+        info["status_label"].setText("Moved or deleted")
+        info["status_label"].setToolTip("Its files aren't in %s any more, so it isn't sharing them. It won't "
+                                        "download again unless you ask it to." % info["save_path"])
+        info["pause_btn"].setText("Download again")
+        info["pct_label"].setText("—")
+        info["progress_bar"].set_animating(False)
+        info["play_btn"].setVisible(False)
+        info["was_complete"] = None
+
+    def _download_again(self, row_id):
+        info = self.rows.get(row_id)
+        if not info:
+            return
+        answer = QMessageBox.question(
+            self, config.APP_NAME,
+            "Download \"%s\" again?\n\nIts files aren't in %s any more, so the whole torrent will be downloaded "
+            "there again. If you moved them, choose \"Find the files…\" in its menu instead."
+            % (info["name_label"].text(), info["save_path"]))
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        info["moved"] = False
+        info["again"] = True        # asked for: missing files don't hold it this time
+        info["status_label"].setToolTip("")
+        self.manager.download_again(info["handle"])
+        self._poll()
+
+    def _find_files(self, row_id):
+        info = self.rows.get(row_id)
+        if not info:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Where are the files now?", info["save_path"])
+        if not folder:
+            return
+        folder = os.path.normpath(folder)
+        handle = info["handle"]
+        # the folder chosen may be the one holding the files, or the one holding the torrent's own folder
+        candidates = [folder, os.path.dirname(folder)]
+        here = next((c for c in candidates if not self.manager.files_missing(handle, c)), None)
+        if here is None:
+            QMessageBox.information(self, config.APP_NAME,
+                                    "Its files aren't in that folder. Choose the folder you moved them to.")
+            return
+        info["save_path"] = here
+        info["moved"] = False
+        info["status_label"].setToolTip("")
+        self.manager.relocate(handle, here)
+        self.save_state()
+        self._poll()
+
     def _estimate_eta(self, status):
         if status.download_rate <= 0:
             return "—"
@@ -969,6 +1052,9 @@ class TorrentTab(QWidget):
                         logger.exception("Failed to apply resumed file priorities for %s", row_id)
                     info["pending_priorities"] = None
 
+            if self._watch_moved(info, status):
+                continue
+
             # libtorrent re-hashes the files on resume, and during that pass
             # status.progress counts the *check*, climbing from 0 -- which is
             # exactly why a restored torrent (even a finished one) appeared to
@@ -1001,6 +1087,9 @@ class TorrentTab(QWidget):
                 info["progress_bar"].set_complete(complete)
                 info["play_btn"].setVisible(complete)
 
+            if complete and not checking:
+                info["done"] = True
+                info["again"] = False
             if complete and not info["history_recorded"]:
                 info["history_recorded"] = True
                 self._record_completion(info)
@@ -1203,6 +1292,7 @@ class TorrentTab(QWidget):
             "uploaded": info.get("uploaded", 0),
             "downloaded": info.get("downloaded", 0),
             "info_hash": TorrentManager.key(info["handle"]),
+            "done": bool(info.get("done")),
             "stats_v": 4,
         } for info in self.rows.values()]
 
