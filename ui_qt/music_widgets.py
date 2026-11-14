@@ -152,6 +152,14 @@ def icon_button(kind, tip, size=32, icon_size=16, parent=None):
     return b
 
 
+# the phone's button roles (ui/theme/Tokens.kt): one white filled action per page, tonal, outlined, text
+TONAL = 0.14            # a tonal button's fill
+OUTLINE = 0.24          # an outlined button's edge
+PRESSED = 0.10          # pressed: a light over a dark button
+PRESSED_ON_WHITE = 0.08  # ... and a shade over the white one
+HEIGHTS = (32, 38, 46)  # small (dense rows), regular, large (a page's main action): the phone's 36/44/50, for a mouse
+
+
 class RingButton(ChromeButton):
     """An icon in a thin white ring -- the page header's round actions, and
     the player's play button."""
@@ -165,9 +173,14 @@ class RingButton(ChromeButton):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QPen(look.with_alpha(look.TEXT, self.ring + 0.25 * self._hover.value), 1.3))
-        p.setBrush(self.fill if self.fill is not None else Qt.BrushStyle.NoBrush)
-        p.drawEllipse(QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5))
+        p.setPen(Qt.PenStyle.NoPen)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        p.setBrush(self.fill if self.fill is not None else look.with_alpha(look.TEXT, TONAL))
+        p.drawEllipse(r)
+        lift = 0.06 * self._hover.value + (PRESSED if self.isDown() else 0.0)
+        if lift:
+            p.setBrush(look.with_alpha(look.TEXT, lift))
+            p.drawEllipse(r)
         p.end()
         super().paintEvent(event)
 
@@ -190,22 +203,33 @@ class Pill(QAbstractButton):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
+    def _height(self):
+        """The phone's three heights: what's asked for snaps to small, regular or large."""
+        asked = self.height_px or HEIGHTS[1]
+        if asked > 52 or asked < 28:
+            return asked                 # a tile in a row of tiles: its own size
+        return HEIGHTS[2] if asked >= 44 else HEIGHTS[1] if asked >= 36 else HEIGHTS[0]
+
     def _font(self):
         k = self.ui_scale
-        if self.style == "outline":
-            return look.label_font(10.5 * k)
-        if self.style in ("tab", "tab_on"):
-            return look.font(13 * k, QFont.Weight.DemiBold)
-        return look.font(12.5 * k, QFont.Weight.Bold, spacing=0.6)
+        h = self._height()
+        px = 14.5 if h >= HEIGHTS[2] else 12.5 if h <= HEIGHTS[0] else 13.5
+        return look.font(px * k, QFont.Weight.DemiBold)
 
     def sizeHint(self):
         fm = QFontMetricsF(self._font())
-        text = self.text().upper() if self.style == "outline" else self.text()
-        w = fm.horizontalAdvance(text) + (34 if self.style != "outline" else 24) + (22 if self.kind else 0)
-        h = self.height_px or (30 if self.style == "outline" else 38)
-        if self.height_px:
-            w += h * 0.5
+        h = self._height()
+        pad = 12 if h <= HEIGHTS[0] else 18
+        w = fm.horizontalAdvance(self.text()) + pad * 2 + (22 if self.kind else 0)
         return QSize(int(w), int(h))
+
+    def mousePressEvent(self, e):
+        super().mousePressEvent(e)
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        super().mouseReleaseEvent(e)
+        self.update()
 
     def enterEvent(self, e):
         self._hover = True
@@ -219,17 +243,21 @@ class Pill(QAbstractButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        if self.style == "solid":
+        pressed = self.isDown()
+        if self.style in ("solid", "tab_on"):
+            # white, dark words: the page's one main action, or the chosen tab -- unmistakable
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(255, 255, 255) if not self._hover else QColor(236, 238, 244))
             p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+            if pressed:
+                p.setBrush(QColor(0, 0, 0, int(255 * PRESSED_ON_WHITE)))
+                p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
             fg = QColor(10, 11, 16)
-        elif self.style in ("tab", "tab_on"):
-            on = self.style == "tab_on"
-            p.setPen(QPen(QColor(255, 255, 255, 40), 1) if on else Qt.PenStyle.NoPen)
-            p.setBrush(QColor(255, 255, 255, 34 if on else (14 if self._hover else 0)))
+        elif self.style == "tab":
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(look.with_alpha(look.TEXT, (0.06 if self._hover else 0) + (PRESSED if pressed else 0)))
             p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
-            fg = look.TEXT if on else look.with_alpha(look.TEXT, 0.68 if not self._hover else 0.9)
+            fg = look.with_alpha(look.TEXT, 0.70 if not self._hover else 0.9)
         elif self.style == "glow":
             # the accent, lit: a warm fill with a soft halo (Lyrics, when on)
             a = QColor(self.accent)
@@ -253,21 +281,22 @@ class Pill(QAbstractButton):
             p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
             fg = look.TEXT
         elif self.style == "outline":
-            p.setPen(QPen(look.with_alpha(look.TEXT, 0.85 if self._hover else 0.55), 1))
-            p.setBrush(look.with_alpha(look.TEXT, 0.10) if self._hover else Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(r, 2, 2)
+            p.setPen(QPen(look.with_alpha(look.TEXT, OUTLINE + (0.16 if self._hover else 0)), 1))
+            p.setBrush(look.with_alpha(look.TEXT, (0.06 if self._hover else 0) + (PRESSED if pressed else 0)))
+            p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
             fg = look.TEXT
         else:
-            p.setPen(QPen(look.with_alpha(look.TEXT, 0.16), 1))
-            p.setBrush(look.with_alpha(look.TEXT, 0.20 if self._hover else 0.12))
+            # tonal: a quiet fill, no rim
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(look.with_alpha(look.TEXT, TONAL + (0.06 if self._hover else 0) + (PRESSED if pressed else 0)))
             p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
             fg = look.TEXT
         if not self.isEnabled():
             fg = look.with_alpha(fg, 0.45)
-        text = self.text().upper() if self.style == "outline" else self.text()
+        text = self.text()
         f = self._font()
         fm = QFontMetricsF(f)
-        isz = (20 if (self.height_px or 0) >= 46 * self.ui_scale else 16) * self.ui_scale
+        isz = (19 if self._height() >= HEIGHTS[2] else 16) * self.ui_scale
         gap = 8 * self.ui_scale
         tw = fm.horizontalAdvance(text) + ((isz + gap) if self.kind else 0)
         x = (self.width() - tw) / 2

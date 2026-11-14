@@ -117,10 +117,10 @@ class AllSongsCard(QAbstractButton):
         p.drawText(QPointF(x, 92), "Every album & single, first to latest")
         pill = QRectF(x, 108, 96, 32)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255))
+        p.setBrush(QColor(255, 255, 255, 36))           # tonal: the page's Play is its one white action
         p.drawRoundedRect(pill, 16, 16)
-        p.setFont(look.font(13, QFont.Weight.Bold))
-        p.setPen(QColor(0, 0, 0))
+        p.setFont(look.font(13, QFont.Weight.DemiBold))
+        p.setPen(QColor(255, 255, 255))
         p.drawText(pill, int(Qt.AlignmentFlag.AlignCenter), "Explore  ›")
 
 
