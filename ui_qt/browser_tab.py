@@ -19,6 +19,7 @@ Browser tab is first shown (or a download asks for its sign-in cookies).
 """
 import ctypes
 import os
+import threading
 import re
 import time
 import urllib.parse
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
 
 from app import config
 from app.logging_setup import get_logger
-from app.core import safe_browsing
+from app.core import safe_browsing, video_repair
 from app.utils import browser_data, download_history, formatting, settings as settings_store
 
 from . import browser_engine, browser_scripts, motion, palettes, theme, webview2
@@ -475,6 +476,7 @@ class BrowserTab(QWidget):
     torrent_file_requested = Signal(str)
     # "Show" on a download toast.
     show_downloads_requested = Signal()
+    _video_fixed = Signal(str)             # a downloaded video whose broken timing was put right
 
     SLEEP_AFTER_S = 10 * 60
     TOOLBAR_H = 48
@@ -653,6 +655,9 @@ class BrowserTab(QWidget):
         self.address.star_clicked.connect(self._on_bookmark_button)
         self.shield_btn.clicked.connect(self._show_adguard_panel)
         self.extensions = ExtensionManager(self)
+        self._video_fixed.connect(lambda p: show_toast(
+            self.pages, "Fixed %s: its frames were out of time, so it played smeared. It plays smoothly now."
+            % os.path.basename(p), kind="success", ms=8000))
         self.extensions_btn.clicked.connect(self.extensions.show_panel)
         self.menu_btn.clicked.connect(self._show_menu)
         self.now_playing.activated.connect(self._goto_media_tab)
@@ -1533,6 +1538,14 @@ class BrowserTab(QWidget):
     def _download_finished(self, dl):
         if dl in self._downloads:
             self._downloads.remove(dl)
+        if dl.path.lower().endswith(video_repair.VIDEO_EXTS):
+            # some sites' files have frames stuck on one moment, and play smeared into blocks: checked, and
+            # rebuilt when they do
+            def check(path=dl.path):
+                fixed, rebuilt = video_repair.check_and_repair(path)
+                if rebuilt:
+                    self._video_fixed.emit(fixed)
+            threading.Thread(target=check, daemon=True).start()
         if dl.path.lower().endswith(".torrent"):
             show_toast(self.pages, "Downloaded %s" % os.path.basename(dl.path), action="Add to Torrent tab",
                        on_action=lambda p=dl.path: self.torrent_file_requested.emit(p), kind="success", ms=8000)

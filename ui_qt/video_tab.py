@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from app import config
 from app.core import link_router
-from app.core import downloader, errors, ffmpeg_utils, size_estimate
+from app.core import downloader, errors, ffmpeg_utils, size_estimate, video_repair
 from app.logging_setup import get_logger
 from app.utils import (
     download_history, download_queue_state, formatting,
@@ -2332,6 +2332,13 @@ class VideoTab(QWidget):
                         f"Converting to your chosen format failed, so the file was "
                         f"kept as .mkv instead.\n\nDetails: {convert_warning}"
                     )
+
+            if final_path and os.path.exists(final_path):
+                # a file whose own frame timing is broken plays smeared into blocks: put right here, once
+                self._progress_sig.emit(job_id, 100, "Checking the video...")
+                if video_repair.broken(final_path):
+                    self._progress_sig.emit(job_id, 100, "Fixing the video's broken timing...")
+                    final_path, _rebuilt = video_repair.check_and_repair(final_path)
 
             if used_fallback:
                 fallback_msg = self._fallback_client_warning(used_fallback, info.get("height"))
