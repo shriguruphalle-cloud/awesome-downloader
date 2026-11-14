@@ -2068,6 +2068,57 @@ def import_liked(items, source, link=""):
     return _ok(True)
 
 
+def _read_link(link):
+    """A linked playlist's songs as its app has them now, matched to YouTube Music's songs."""
+    from app.core import playlist_import
+    found = playlist_import.read(link)
+    tracks = list(found.get("tracks") or [])
+    if tracks:
+        tracks = playlist_import.prefer_songs(tracks, found.get("songs"), None)
+    if found.get("items"):
+        tracks += [m for m in playlist_import.match(found["items"], None) if m]
+    return tracks
+
+
+_syncing = threading.Lock()
+
+
+def sync_playlist(pid):
+    """One linked playlist brought up to date with where it came from: {"added", "title"}."""
+    from app.utils import music_library
+    pl = music_library.playlist(pid)
+    if not pl or not pl.get("link"):
+        return _err(Exception("This playlist isn't linked to another app."))
+    try:
+        with _syncing:
+            added = music_library.synced_add(pid, _read_link(pl["link"]), time.time())
+        return _ok({"added": added, "title": pl.get("title") or ""})
+    except Exception as e:   # noqa: BLE001
+        return _err(e)
+
+
+def sync_due(max_age_s=6 * 3600, done=None):
+    """Every linked playlist not synced for a while, brought up to date in the background; how many are being looked
+    at. done(added) afterwards, off this thread."""
+    from app.utils import music_library
+    due = [p for p in music_library.playlists() if p.get("link") and time.time() - (p.get("synced") or 0) > float(max_age_s)]
+
+    def work():
+        added = 0
+        for p in due:
+            try:
+                with _syncing:
+                    added += music_library.synced_add(p["id"], _read_link(p["link"]), time.time())
+            except Exception:   # noqa: BLE001 -- one that can't be read is tried again next time
+                from app.logging_setup import get_logger
+                get_logger("bridge").info("Couldn't sync a linked playlist", exc_info=True)
+        if done is not None:
+            done(added)
+    if due:
+        threading.Thread(target=work, daemon=True, name="playlist-sync").start()
+    return _ok(len(due))
+
+
 def import_status():
     return _ok(dict(_import))
 

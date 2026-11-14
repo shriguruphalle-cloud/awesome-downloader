@@ -1825,6 +1825,12 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
         self.importer.imported.connect(self._imported)
         self.liked_import = LikedImportSheet(self)
         self._init_owner()
+        # playlists imported by link stay in step with where they came from (every six hours while the app runs)
+        self._sync_timer = QTimer(self)
+        self._sync_timer.setInterval(6 * 3600 * 1000)
+        self._sync_timer.timeout.connect(self._sync_playlists)
+        self._sync_timer.start()
+        QTimer.singleShot(20000, self._sync_playlists)
         QApplication.instance().applicationStateChanged.connect(
             lambda st: setattr(social, "foreground", st == Qt.ApplicationState.ApplicationActive))
         self.sharer = ShareSheet(self)
@@ -4370,6 +4376,15 @@ class MusicTab(SocialPages, MusicMore, MusicOwner, QWidget):
                 and getattr(self, "_lyrics_for", None) == cur.get("id")
                 and abs(self._song_seconds(cur) - getattr(self, "_lyrics_secs", 0)) > 2):
             self._fetch_lyrics(cur)    # the song's real length: the lyrics that fit it
+
+    _synced_sig = Signal(int)
+
+    def _sync_playlists(self):
+        if not getattr(self, "_synced_hooked", False):
+            self._synced_hooked = True
+            self._synced_sig.connect(lambda n: n and (self._sync_rail(), self.status.setText(
+                "%d new song%s in your synced playlists." % (n, "" if n == 1 else "s"))))
+        music_brain.sync_due(done=self._synced_sig.emit)
 
     def _check_length(self, ms):
         """A kept copy whose sound runs far longer than the song (twice through, or another upload): thrown away

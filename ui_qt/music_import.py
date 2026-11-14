@@ -113,8 +113,10 @@ class ImportSheet(GlassSheet):
                 if not tracks:
                     raise playlist_import.ImportError_("None of its songs could be found.")
                 missing = len(found.get("items") or []) - (len(tracks) - len(found.get("tracks") or []))
+                one = raw.strip()
+                link = one if one.lower().startswith(("http://", "https://")) and "\n" not in one else ""
                 pl = music_library.create_playlist(name or found["title"], tracks, source=found["source"],
-                                                   artwork=tracks[0].get("artwork"))
+                                                   artwork=tracks[0].get("artwork"), link=link)
                 self._done_sig.emit(pl, "%d songs imported%s." % (
                     len(tracks), (", %d couldn't be found" % missing) if missing > 0 else ""))
             except Exception as e:   # noqa: BLE001

@@ -136,11 +136,14 @@ def playlist(pid):
     return next((dict(p) for p in _load().setdefault("playlists", []) if p["id"] == pid), None)
 
 
-def create_playlist(title, tracks=(), source="", artwork=None):
+def create_playlist(title, tracks=(), source="", artwork=None, link=""):
     import time
     import uuid
     pl = {"id": "pl:" + uuid.uuid4().hex[:12], "title": (title or "My playlist").strip()[:80], "source": source,
           "artwork": artwork, "tracks": [slim(t) for t in tracks], "created": int(time.time())}
+    if link:
+        # kept in sync with where it came from: new songs added there arrive here too
+        pl.update(link=link, synced=int(time.time()), removed=[])
     _load().setdefault("playlists", []).insert(0, pl)
     _save()
     return dict(pl)
@@ -161,8 +164,34 @@ def add_to_playlist(pid, track):
 def remove_from_playlist(pid, track_id):
     for p in _load().setdefault("playlists", []):
         if p["id"] == pid:
+            gone = [t for t in p["tracks"] if t["id"] == track_id]
+            if p.get("link") and gone:
+                # taken out of a synced playlist: a sync never brings it back
+                from app.core import upnext
+                p.setdefault("removed", []).extend(k for k in (upnext.song_key(t) for t in gone) if k)
             p["tracks"] = [t for t in p["tracks"] if t["id"] != track_id]
             _save()
+
+
+def synced_add(pid, tracks, when):
+    """A sync's new songs, appended (none already there or taken out by hand); how many were added."""
+    from app.core import upnext
+    for p in _load().setdefault("playlists", []):
+        if p["id"] == pid:
+            have = {upnext.song_key(t) for t in p["tracks"]} | set(p.get("removed") or []) | {t["id"] for t in p["tracks"]}
+            have.discard("")
+            new = []
+            for t in tracks:
+                k = upnext.song_key(t)
+                if t.get("id") in have or (k and k in have):
+                    continue
+                have.update(x for x in (t.get("id"), k) if x)
+                new.append(slim(t))
+            p["tracks"].extend(new)
+            p["synced"] = int(when)
+            _save()
+            return len(new)
+    return 0
 
 
 def rename_playlist(pid, title):
