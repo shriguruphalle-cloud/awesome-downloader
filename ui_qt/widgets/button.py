@@ -103,9 +103,7 @@ class Button(QPushButton):
 
     def _radius(self, r):
         name = self.objectName()
-        if name in ("quiet", "historyPlain", "historyGreen"):
-            return min(8.0, r.height() / 2)
-        return min(10.0, r.height() / 2)
+        return min(8.0, r.height() / 2)
 
     def paintEvent(self, event):
         dark = cinema.is_dark(self)
@@ -127,43 +125,12 @@ class Button(QPushButton):
 
         if variant == "accent" and enabled:
             fg = QColor(t["accent_text"])
-            if h > 0.01:                              # soft ember glow while hovered
-                glow = QColor(t["accent"])
-                for spread, a in ((6.0, 0.05), (3.5, 0.08), (1.5, 0.12)):
-                    gr = r.adjusted(-spread, -spread, spread, spread)
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(_alpha(glow, a * h * (1 - 0.5 * down)))
-                    p.drawRoundedRect(gr, rad + spread, rad + spread)
-            top = _mix(QColor(t["accent_top"]), QColor(t["accent_hover"]).lighter(110), 0.5 * h)
-            bottom = _mix(QColor(t["accent"]), QColor(t["accent_hover"]), 0.6 * h)
-            bottom = _mix(bottom, QColor(t["accent_pressed"]), down)
-            top = _mix(top, QColor(t["accent_pressed"]), down * 0.8)
-            grad = QLinearGradient(r.topLeft(), r.bottomLeft())
-            grad.setColorAt(0, top)
-            grad.setColorAt(1, bottom)
-            p.setPen(QPen(_mix(bottom, QColor(0, 0, 0), 0.08), 1))
-            p.setBrush(grad)
-            p.drawRoundedRect(r, rad, rad)
-            # the lit upper edge
-            edge = QLinearGradient(r.topLeft(), r.center())
-            edge.setColorAt(0, QColor(255, 255, 255, round(70 * (1 - down))))
-            edge.setColorAt(1, QColor(255, 255, 255, 0))
+            # flat and solid, as Apple's prominent buttons: a touch lighter under the pointer, darker pressed
+            fill = _mix(QColor(t["accent"]), QColor(t["accent_hover"]), h)
+            fill = _mix(fill, QColor(t["accent_pressed"]), down)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(edge)
-            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), rad - 1, rad - 1)
-            if self._sheen_started is not None:
-                k = min(1.0, (time.monotonic() - self._sheen_started) * 1000 / self.SHEEN_MS)
-                k = 1 - (1 - k) ** 3
-                x = r.left() - r.width() * 0.4 + (r.width() * 1.8) * k
-                band = QLinearGradient(QPointF(x - 26, r.top()), QPointF(x + 26, r.bottom()))
-                band.setColorAt(0.0, QColor(255, 255, 255, 0))
-                band.setColorAt(0.5, QColor(255, 255, 255, 70))
-                band.setColorAt(1.0, QColor(255, 255, 255, 0))
-                p.save()
-                clip = cinema.glass_path(r, rad)
-                p.setClipPath(clip)
-                p.fillRect(r, band)
-                p.restore()
+            p.setBrush(fill)
+            p.drawRoundedRect(r, rad, rad)
         elif variant in ("pill", "danger", "success"):
             line = QColor({"pill": t["accent"], "danger": t["danger"], "success": t["success"]}[variant])
             if not enabled:
@@ -187,12 +154,6 @@ class Button(QPushButton):
                 p.setPen(QPen(border, 1))
                 p.setBrush(fill)
                 p.drawRoundedRect(r, rad, rad)
-                top = QLinearGradient(r.topLeft(), r.center())
-                top.setColorAt(0, QColor(255, 255, 255, round((22 if dark else 90) * (1 - down))))
-                top.setColorAt(1, QColor(255, 255, 255, 0))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(top)
-                p.drawRoundedRect(r.adjusted(1, 1, -1, -1), rad - 1, rad - 1)
                 fg = qcolor(t["text"])
             else:
                 p.setPen(QPen(qcolor(t["divider"]), 1))

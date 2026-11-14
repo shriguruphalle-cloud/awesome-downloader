@@ -175,7 +175,7 @@ def paint_trace(p, area, trace, now, dark):
     if len(series[0]) < 2:
         return
     t = theme.tokens(dark)
-    down_c, up_c = QColor(t["brand"]), QColor(t["success"])
+    down_c, up_c = QColor(t["wordmark"]), QColor(t["success"])     # data colours, not actions
     top = max(trace.top, 1.0)
 
     def y_of(v):

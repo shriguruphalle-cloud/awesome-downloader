@@ -771,28 +771,6 @@ class _NavIsland(_GlassCapsule):
         painter.setPen(QPen(edge, 1.0))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(pill, radius, radius)
-
-        # The light strip.
-        brand = theme.qcolor(theme.tokens(dark)["brand"])
-        strip_w = min(22.0, pill.width() * 0.34)
-        cx, y = pill.center().x(), pill.bottom() - 2.0
-        glow = QRadialGradient(QPointF(cx, y), strip_w)
-        soft = QColor(brand)
-        soft.setAlpha(110 if dark else 70)
-        clear = QColor(brand)
-        clear.setAlpha(0)
-        glow.setColorAt(0.0, soft)
-        glow.setColorAt(1.0, clear)
-        painter.save()
-        painter.translate(cx, y)
-        painter.scale(1.0, 0.22)
-        painter.translate(-cx, -y)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(glow)
-        painter.drawEllipse(QPointF(cx, y), strip_w, strip_w)
-        painter.restore()
-        painter.setBrush(brand)
-        painter.drawRoundedRect(QRectF(cx - strip_w / 2.0, y - 0.75, strip_w, 1.5), 0.75, 0.75)
         painter.end()
 
 
@@ -1661,7 +1639,7 @@ class MainWindow(FramelessMainWindow):
 
     def _restyle_chrome(self):
         t = theme.tokens(dark_mode=self.dark_mode)
-        self._wordmark.set_colors(t["text"], t["brand"], self.dark_mode,
+        self._wordmark.set_colors(t["text"], t["wordmark"], self.dark_mode,
                                   palettes.spec(self.dark_mode)["glows"][1][0])
         muted = t["text_muted"]
         self.settings_btn.setIcon(_settings_glyph_icon(muted))

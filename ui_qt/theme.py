@@ -151,8 +151,29 @@ def tokens(dark_mode=True):
     if t is None:
         base = DARK if dark_mode else LIGHT
         overrides = palettes.token_overrides(dark_mode)
-        t = dict(base, **overrides) if overrides else base
+        t = _one_accent(dict(base, **overrides) if overrides else dict(base))
         _resolved[key] = t
+    return t
+
+
+def _rgba_of(value, alpha):
+    c = qcolor(value)
+    return "rgba(%d, %d, %d, %d)" % (c.red(), c.green(), c.blue(), alpha)
+
+
+def _one_accent(t):
+    """One accent, as Apple's apps have: the palette's accent is the colour of what you can press and of what's
+    chosen -- buttons, the tab you're on, focus, links, progress. Section labels are quiet text, not a second
+    colour, and nothing is lit with a gradient. The palette's second colour stays where it's identity: the
+    wordmark (and the backdrop's light)."""
+    t["wordmark"] = t["brand"]
+    t["eyebrow"] = t["text_muted"]
+    t["brand"] = t["accent"]
+    t["brand_hover"] = t["accent_hover"]
+    t["brand_text"] = t["accent_text"]
+    t["accent_top"] = t["accent"]
+    t["focus"] = _rgba_of(t["accent"], 200)
+    t["selection"] = _rgba_of(t["accent"], 90)
     return t
 
 
@@ -375,8 +396,7 @@ QPushButton#accent {{
     font-weight: 600;
 }}
 QPushButton#accent:hover {{
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 {t['accent_hover']}, stop:1 {t['accent_hover']});
+    background: {t['accent_hover']};
     border-color: {t['accent_hover']};
 }}
 QPushButton#accent:pressed {{

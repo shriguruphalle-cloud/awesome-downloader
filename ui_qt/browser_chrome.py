@@ -675,13 +675,7 @@ class ActionButton(QAbstractButton):
         else:
             glow = self._lit.value * (0.35 + 0.65 * self._pulse) if self._pulse else self._lit.value * 0.35
             if glow > 0.01:
-                g = QColor(t["accent"])
-                for i, spread in enumerate((5.0, 3.0, 1.5)):
-                    g.setAlphaF(0.10 * glow * (i + 1))
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(g)
-                    gr = r.adjusted(-spread, -spread, spread, spread)
-                    p.drawRoundedRect(gr, gr.height() / 2, gr.height() / 2)
+                pass        # flat, as Apple's prominent buttons: no glow round it
             top = QColor(t["accent_top"])
             bottom = QColor(t["accent_pressed"] if self.isDown() else t["accent"])
             if self._hover.value and not self.isDown():
@@ -1075,18 +1069,6 @@ class TabPill(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(tint)
             p.drawRoundedRect(r, rad, rad)
-        if a > 0.01:
-            strip = private_tint(dark) if self.private else QColor(t["brand"])
-            half = 9 * a
-            cx = r.center().x()
-            y = r.bottom() - 1.2
-            glow = QColor(strip)
-            glow.setAlpha(round(70 * a))
-            p.setPen(_pen(glow, 4))
-            p.drawLine(QPointF(cx - half, y), QPointF(cx + half, y))
-            strip.setAlpha(round(255 * a))
-            p.setPen(_pen(strip, 2))
-            p.drawLine(QPointF(cx - half, y), QPointF(cx + half, y))
 
         narrow = self.width() < 52
         ix = (self.width() - 16) / 2 if narrow else 10

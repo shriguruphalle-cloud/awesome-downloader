@@ -53,7 +53,7 @@ class StatsStrip(QWidget):
         col_w = w / cols
         colors = {
             None: qcolor(t["text"]),
-            "down": QColor(t["brand"]),
+            "down": QColor(t["wordmark"]),
             "up": QColor(t["success"]),
             "done": QColor(t["success"]),
             "warn": QColor(t["warning"]),

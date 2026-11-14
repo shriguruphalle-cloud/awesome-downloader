@@ -43,7 +43,7 @@ card = GraphCard(host)
 card.setGeometry(0, 0, 900, 150)
 host.show()
 settle(150)
-brand = QColor(theme.tokens(True)["brand"])
+brand = QColor(theme.tokens(True)["wordmark"])
 
 
 def feed(down, up=0.0, seconds=70):

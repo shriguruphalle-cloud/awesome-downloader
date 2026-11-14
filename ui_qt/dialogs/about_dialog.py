@@ -81,7 +81,7 @@ def show_about(parent=None, dark_mode=True):
     from ..widgets.wordmark import Wordmark
     t = theme.tokens(dark_mode)
     name_label = Wordmark(px=40)
-    name_label.set_colors(t["text"], t["brand"], dark_mode, palettes.spec(dark_mode)["glows"][1][0])
+    name_label.set_colors(t["text"], t["wordmark"], dark_mode, palettes.spec(dark_mode)["glows"][1][0])
     names.addWidget(name_label)
     version_label = QLabel(f"Version {config.APP_VERSION}")
     version_label.setObjectName("mono")
@@ -132,7 +132,7 @@ def show_about(parent=None, dark_mode=True):
     # the credit in the name's own voice: "Downloader"'s italic serif and gradient
     from ..widgets.wordmark import GradientLine
     credit = GradientLine("Created by ", CREATOR_NAME, " — By an artist, for an artist.", px=21)
-    credit.set_colors(t["text"], t["brand"], dark_mode, palettes.spec(dark_mode)["glows"][1][0])
+    credit.set_colors(t["text"], t["wordmark"], dark_mode, palettes.spec(dark_mode)["glows"][1][0])
     layout.addWidget(credit)
 
     tagline_label = QLabel("We don't lack creativity; we lack patience for tools that slow us down.")
