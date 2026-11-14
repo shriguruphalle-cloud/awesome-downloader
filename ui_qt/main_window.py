@@ -1534,6 +1534,49 @@ class MainWindow(FramelessMainWindow):
             page = self.tabs.widget(i)
             if hasattr(page, "show_update_notice"):
                 page.show_update_notice(release)
+        QTimer.singleShot(1200, lambda r=release: self._show_update_card(r))
+
+    def _show_update_card(self, release):
+        """At start, as the phone app does: a card with the new version and what's in it -- once per version
+        (Later keeps it from coming back for that one; the pill in the title bar stays)."""
+        from app.utils import updater
+        version = release.get("version")
+        if not version or updater.is_dismissed("card:" + version) or not self.isVisible():
+            return
+        from .browser_chrome import GlassPopup
+        from .widgets.button import Button
+        t = theme.tokens(self.dark_mode)
+        card = GlassPopup(self, 400, t, self.dark_mode)
+        card.body.addWidget(card.label("Update available", role="muted", px=12))
+        card.body.addWidget(card.label("Awesome Downloader %s" % version, px=18, weight=QFont.Weight.Bold))
+        notes = (release.get("notes") or "").strip()
+        if notes:
+            from PySide6.QtWidgets import QScrollArea
+            body = card.label(notes[:3000], role="muted", px=13, wrap=True)
+            body.setTextFormat(Qt.TextFormat.MarkdownText)
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setFrameShape(QScrollArea.Shape.NoFrame)
+            area.setStyleSheet("background: transparent;")
+            area.setWidget(body)
+            area.setMaximumHeight(260)
+            card.body.addWidget(area)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        later = Button("Later")
+        later.setObjectName("quiet")
+        update = Button("Update now")
+        update.setObjectName("accent")
+        later.clicked.connect(lambda: (updater.dismiss("card:" + version), card.close()))
+        update.clicked.connect(lambda: (card.close(), self.open_app_update()))
+        row.addWidget(later)
+        row.addWidget(update)
+        card.body.addLayout(row)
+        card.adjustSize()
+        g = self.geometry()
+        card.move(g.center().x() - card.width() // 2, g.center().y() - card.height() // 2)
+        card.show()
+        self._update_card = card
 
     def open_app_update(self, rollback_to=None):
         """The update panel: the latest version, or `rollback_to` to go back."""
